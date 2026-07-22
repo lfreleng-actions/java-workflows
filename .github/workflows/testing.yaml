@@ -1,0 +1,54 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2025 The Linux Foundation
+
+# Exercises the reusable workflow SKELETONS in this repository against
+# downstream fixture repositories, in parallel, to prove the generic
+# scaffolding (job graph, harden-runner wiring, dual checkout, artifact
+# plumbing, SBOM/Grype chain) functions end-to-end. The placeholder
+# build/test/audit/SBOM steps are language-agnostic, so the matrix runs
+# against fixtures of different languages by design.
+#
+# The reusable workflows are referenced by LOCAL path so this always
+# validates the current branch's workflows.
+#
+# The build-test-release and merge skeletons are NOT self-tested here:
+# build-test-release requires a signed semver tag-push context (and
+# creates/promotes GitHub releases), and merge requires a merged-commit
+# context (and would exercise publish legs); neither is available or
+# safe on a pull request. Instantiating repos validate those through
+# their own release/merge cycles.
+name: 'Testing 🧪'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+  pull_request:
+    types: [opened, reopened, synchronize]
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: "${{ github.workflow }}-${{ github.ref }}"
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  # Fixture repositories of different languages, fanned out in parallel
+  # via a matrix; the template placeholders run identically for both.
+  build-test:
+    name: 'Build/Test'
+    strategy:
+      fail-fast: false
+      matrix:
+        repository:
+          - 'lfreleng-actions/test-go-project'
+          - 'lfreleng-actions/test-node-project'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: ./.github/workflows/build-test.yaml
+    with:
+      repository: ${{ matrix.repository }}
