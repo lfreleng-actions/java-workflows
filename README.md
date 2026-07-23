@@ -1,152 +1,117 @@
 <!--
 SPDX-License-Identifier: Apache-2.0
-SPDX-FileCopyrightText: 2025 The Linux Foundation
+SPDX-FileCopyrightText: 2026 The Linux Foundation
 -->
 
-# 🔧 Workflows Template
+# ☕ Java Workflows
 
 <!-- prettier-ignore-start -->
 <!-- markdownlint-disable-next-line MD013 -->
-[![Linux Foundation](https://img.shields.io/badge/Linux-Foundation-blue)](https://linuxfoundation.org/) [![Source Code](https://img.shields.io/badge/GitHub-100000?logo=github&logoColor=white&color=blue)](https://github.com/lfreleng-actions/workflows-template) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![pre-commit.ci status badge]][pre-commit.ci results page] [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/lfreleng-actions/workflows-template/badge)](https://scorecard.dev/viewer/?uri=github.com/lfreleng-actions/workflows-template)
+[![Linux Foundation](https://img.shields.io/badge/Linux-Foundation-blue)](https://linuxfoundation.org/) [![Source Code](https://img.shields.io/badge/GitHub-100000?logo=github&logoColor=white&color=blue)](https://github.com/lfreleng-actions/java-workflows) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![pre-commit.ci status badge]][pre-commit.ci results page] [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/lfreleng-actions/java-workflows/badge)](https://scorecard.dev/viewer/?uri=github.com/lfreleng-actions/java-workflows)
 <!-- prettier-ignore-end -->
 
-The generic, language-agnostic starting point for reusable-workflow
-repositories in this GitHub organisation (`go-workflows`,
-`node-workflows`, …). It carries the canonical Linux Foundation pipeline
-**skeletons and patterns** — not a real pipeline: language-specific
-steps are `# TEMPLATE:`-marked placeholders that instantiators
-replace with real actions. `python-workflows` is the language-specific
-reference implementation of these patterns.
+Reusable GitHub Actions workflows that build, test and scan JVM projects
+for the Linux Foundation. This repository covers both Maven and Gradle
+projects, porting the Jenkins + global-jjb pipeline onto GitHub Actions.
+This initial release provides the verify lane (build, test, SBOM and
+Grype scan); [`docs/BRIEF.md`](docs/BRIEF.md) tracks the merge and release
+lanes that follow later. The workflows keep the harden-runner
+block posture, pinned action SHAs and dual Gerrit/GitHub trigger model of
+`workflows-template`.
 
-## Skeleton reusable workflows
+## Maven and Gradle families
+
+GitHub resolves callable workflows from the flat `.github/workflows/`
+directory, so the two toolchains split by filename prefix rather than by
+subfolder:
 
 <!-- markdownlint-disable MD013 -->
 
-| Workflow | Purpose | Trigger style |
-| -------- | ------- | ------------- |
-| `.github/workflows/build-test.yaml` | Build, test, audit, SBOM and Grype scan skeleton | Pull request |
-| `.github/workflows/build-test-release.yaml` | Release skeleton (Model A, tag-driven): tag validation, release artefact attachment and draft-release promotion | Tag push |
-| `.github/workflows/merge.yaml` | Merge/publish skeleton (Model B, merge-driven): snapshot publish on every merge plus `releases/` file-triggered release publish | Merge / push to main |
+| Workflow                                           | Toolchain | Purpose                          | Caller trigger       |
+| -------------------------------------------------- | --------- | -------------------------------- | -------------------- |
+| `.github/workflows/maven-build-test.yaml`          | Maven     | Build, test, SBOM and Grype scan | Pull request         |
+| `.github/workflows/gradle-build-test.yaml`         | Gradle    | Build, test, SBOM and Grype scan | Pull request         |
 
 <!-- markdownlint-enable MD013 -->
 
-Each pipeline runs a `repository-metadata` job in parallel (an
-informational step that does not gate the build). After `build`, the
-test, audit and SBOM/Grype branches run in parallel - none gates
-another, so a pull request surfaces every failure at once (jobs in
-`{ }` run concurrently; `->` denotes sequence):
+These are `workflow_call` reusable workflows; they carry no trigger of
+their own. "Caller trigger" is the event on which the shipped
+`examples/` callers invoke them (pull request for the verify lane).
+
+## Verify lane
+
+The `maven-build-test.yaml` and `gradle-build-test.yaml` workflows are
+complete. A `repository-metadata` job runs in parallel as an
+informational step that does not gate the build. After `build`, the test
+and SBOM/Grype branches run in parallel (jobs in `{ }` run concurrently;
+`->` denotes sequence):
 
 ```text
-build -> { tests | audit | sbom -> grype }
+build -> { tests | sbom -> grype }
 ```
 
-The release skeleton wraps this with `tag-validate` up front and a
-release-promotion chain at the end. It also **defers `tests` until
-`audit` and `grype` have both passed**, so a failing audit skips the
-test suite and never reaches release promotion:
+The `build` job detects the project's Java version through
+`build-metadata-action`, runs the build with `maven-build-action` or
+`gradle-build-action`, gathers the JUnit XML the build emits, and uploads
+it as an artefact. The `tests` job renders that XML through
+`junit-test-report-action` into the job summary (it does not create a
+check-run) and runs even when the build fails, so test failures
+still surface a report. The `sbom` job generates a real CycloneDX SBOM
+with `sbom-action` (syft static analysis of the checked-out tree) and
+feeds the JSON document to `grype` under the `grype_fail_on` gate.
 
-```text
-tag-validate -> build -> { audit | sbom -> grype } -> tests
-  -> attach-artefacts -> promote-release
-```
-
-The merge skeleton implements the Jenkins-heritage LF/Gerrit model:
-
-```text
-{ resolve-version | build } -> snapshot-publish
-check-release -> release-publish (when a release file merged)
-```
-
-## Dual release models
-
-Repositories built from this template support **both** release models
-so consumers can adopt either — or migrate between them — without
-divergent behaviour:
-
-- **Model A — tag-driven** (`build-test-release.yaml`): the version
-  comes from a validated, signed semver tag; a GitHub release carries
-  the attested artefacts. Canonical for GitHub-native projects and
-  Gerrit projects whose tags replicate to the mirror.
-- **Model B — merge-driven** (`merge.yaml`): every merge publishes a
-  snapshot (version from committed metadata such as
-  `version.properties` → `X.Y.Z-SNAPSHOT`); a release triggers from a
-  committed release file (`releases/*.yaml`) in the merged change.
-  Canonical for Jenkins-heritage LF/Gerrit projects publishing to
-  Nexus.
+The generic template's standalone `audit` job does not appear here: on
+the JVM, dependency-risk auditing is the SBOM/Grype chain plus the
+separate Sonatype CLM lane, and the build tool (`surefire`/`failsafe` or
+the Gradle `test` task) runs the tests as part of its own lifecycle.
 
 ## Usage
 
-Copy a template from [`examples/`](examples/) into your project's
+Copy a caller from [`examples/`](examples/) into your project's
 `.github/workflows/` directory and replace the placeholder `uses:` SHA
-with a pinned release. Each workflow ships in two forms:
+with a pinned release. Each caller ships in two forms:
 
-- `github.yaml` — a plain GitHub-native caller (pull-request, tag-push
-  or push-to-main triggered).
+- `github.yaml` — a plain GitHub-native caller. The shipped verify
+  callers are pull-request triggered.
 - `gerrit.yaml` — a Gerrit-wrapped caller for projects where Gerrit is
-  the source of truth (SCM), integrating with `gerrit_to_platform`
+  the source of truth, integrating with `gerrit_to_platform`
   voting/commenting.
 
 ```text
 examples/
-  build-test/          { github.yaml, gerrit.yaml }
-  build-test-release/  { github.yaml, gerrit.yaml }
-  merge/               { github.yaml, gerrit.yaml }
+  maven/
+    build-test/          { github.yaml, gerrit.yaml }
+  gradle/
+    build-test/          { github.yaml, gerrit.yaml }
 ```
 
-All inputs are optional and default to the canonical behaviour; see the
-`inputs:` block at the top of each workflow file for the full,
-documented list.
-
-## How to instantiate this template
-
-When creating a new `<lang>-workflows` repository from this template:
-
-1. Replace every `# TEMPLATE:` placeholder step in the three skeleton
-   workflows with the real language build/test/audit/SBOM/publish
-   actions, keeping the step ids and job outputs intact. The
-   surrounding job graph, harden-runner wiring, dual checkout, Gerrit
-   validation and Grype scan are generic — keep them as-is.
-2. Wire real fixture/consumer repositories into
-   [`testing.yaml`](.github/workflows/testing.yaml) so the workflows
-   run end-to-end against real projects on every pull request.
-3. Update this README and all badge/link slugs (`workflows-template` →
-   your repository name), and record your design decisions in
-   [`docs/BRIEF.md`](docs/BRIEF.md).
-4. When new work talks to new/external endpoints, follow the central
-   allow-list process: raise a PR against `lfreleng-actions/.github`
-   adding the hosts/ports to the org harden-runner allow-list, get it
-   released, then pin the new tag's commit SHA in the
-   `harden_runner_allowlist` defaults. Reserve `harden_runner_egress:
-   'audit'` for bring-up/endpoint discovery.
-5. Keep support for **both** release models (Model A and Model B),
-   factoring version resolution so the two share building blocks.
-6. Update the `examples/` callers to reference your repository and its
-   real input surface.
+Inputs are optional and default to the canonical behaviour; read the
+`inputs:` block at the top of each workflow file for the documented list.
 
 ## Gerrit support
 
-The reusable workflows are Gerrit-aware: when a caller sets the
-`gerrit_refspec` input they check out the change with
-`checkout-gerrit-change-action` instead of `actions/checkout`. Vote and
+The reusable workflows are Gerrit-aware: a caller that sets the
+`gerrit_refspec` input checks out the change with
+`checkout-gerrit-change-action` in place of `actions/checkout`. Vote and
 comment casting live in the `gerrit.yaml` caller examples (clear vote →
-run → report vote for verify; comments without votes for merge), never
-inside the reusable workflows.
+run → report vote for verify), never inside the reusable workflows.
 
 ## Testing
 
 [`.github/workflows/testing.yaml`](.github/workflows/testing.yaml)
-exercises the build-test skeleton against fixture repositories of
-different languages by calling it via its local path. The placeholder
-steps are language-agnostic, so the self-test validates the generic
-scaffolding regardless of project language — which is the point of this
-repository.
+exercises the Maven and Gradle verify workflows through their local
+paths, so it validates the current branch. Both self-test jobs run on
+`workflow_dispatch` and stay skipped on pull requests until one
+prerequisite lands: dedicated lightweight fixtures. The released action
+pins and the toolchain egress endpoints in the central harden-runner
+allow-list (as of `.github` v0.7.0) are already in place. See
+[`docs/BRIEF.md`](docs/BRIEF.md) for detail.
 
 ## Design
 
-See [`docs/BRIEF.md`](docs/BRIEF.md) for the design decisions behind the
-template: what stays generic versus placeholder, the three skeleton
-contracts, the dual release-model rationale and the instantiation
-checklist.
+Read [`docs/BRIEF.md`](docs/BRIEF.md) for the design decisions: the
+Maven/Gradle split, the verify-lane wiring, the removed audit job, the
+planned merge/release lanes, and the action-pinning policy.
 
-[pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/workflows-template/main
-[pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/workflows-template/main.svg
+[pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/java-workflows/main
+[pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/java-workflows/main.svg

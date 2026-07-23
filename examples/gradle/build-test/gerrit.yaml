@@ -126,11 +126,11 @@ jobs:
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
-    # REPLACE the pinned SHA below with a workflows-template release SHA
+    # REPLACE the pinned SHA below with a java-workflows release SHA
     # (or your instantiated workflows repository's release SHA).
     # The all-zero SHA is a non-functional placeholder, NOT a real commit.
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/workflows-template/.github/workflows/build-test.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    uses: lfreleng-actions/java-workflows/.github/workflows/gradle-build-test.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
     with:
       # When GERRIT_DISABLED is true the gerrit_* values are blanked so the
       # reusable workflow falls back to a standard checkout.
