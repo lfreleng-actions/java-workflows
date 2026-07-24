@@ -2,22 +2,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# Reusable build/test pipeline SKELETON (language-agnostic template).
+# Reusable Gradle build/test (verify) pipeline.
 #
-# Reproduces the canonical Linux Foundation pipeline shape. The
-# repository-metadata job runs in parallel as an informational step.
-# After build the jobs in { } run in parallel; none gates another, so a
-# PR surfaces every failure (-> denotes sequence):
-#   build -> { tests | audit | sbom -> grype }
+# Reproduces the canonical Linux Foundation pipeline shape for a Gradle
+# project. The repository-metadata job runs in parallel as an
+# informational step. After build the jobs in { } run in parallel; none
+# gates another, so a PR surfaces every failure (-> denotes sequence):
+#   build -> { tests | sbom -> grype }
 #
-# Steps marked "# TEMPLATE:" are placeholders. When instantiating this
-# template for a language, replace them with the real build/test/audit/
-# SBOM actions; the surrounding job graph, harden-runner wiring, dual
-# checkout and Grype scan are generic and transfer as-is.
+# Java note: Gradle binds test execution to the build lifecycle, so the
+# build job runs the tests (gradle build) and gates the rest; the tests
+# job renders a JUnit summary from the collected reports without
+# rebuilding. Dependency vulnerability scanning is provided by the
+# SBOM -> Grype leg; Nexus IQ CLM is a separate, dedicated lane.
 #
-# Call this from a thin caller workflow; see examples/build-test/ for
-# both a plain GitHub-native caller and a Gerrit-wrapped caller.
-name: '[R] Build/Test (Template)'
+# Call this from a thin caller workflow; see examples/gradle/build-test/
+# for both a plain GitHub-native caller and a Gerrit-wrapped caller.
+name: '[R] Gradle Build/Test'
 
 # yamllint disable-line rule:truthy
 on:
@@ -42,16 +43,34 @@ on:
         type: string
         default: '.'
 
+      # --- Java / Gradle toolchain ---
+      java_version:
+        description: >-
+          OpenJDK version for the build. Empty auto-detects from the
+          project (build-metadata-action) and falls back to 21.
+        required: false
+        type: string
+        default: ''
+      gradle_version:
+        description: >-
+          Gradle version to provision. Empty uses the project's Gradle
+          Wrapper.
+        required: false
+        type: string
+        default: ''
+      build_arguments:
+        description: 'Arguments passed to the gradle build invocation'
+        required: false
+        type: string
+        default: 'build'
+
       # --- Tests ---
       test_permit_fail:
-        description: 'Permit test failures without failing the workflow'
-        required: false
-        type: boolean
-        default: false
-
-      # --- Audit ---
-      audit_permit_fail:
-        description: 'Permit dependency audit failures (the NO_BLOCK pattern)'
+        description: >-
+          Permit test failures without failing the tests-report job.
+          Gradle runs tests inside the build, so a test failure fails the
+          build job unless the project tolerates it (test.ignoreFailures);
+          this input governs the report gate, not the build exit code.
         required: false
         type: boolean
         default: false
@@ -76,12 +95,22 @@ on:
         required: false
         type: string
         default: 'block'
+      build_permit_egress_traffic:
+        description: >
+          Run harden-runner in audit mode for the build job only,
+          permitting unrestricted egress. Use when the build fetches
+          dependencies from CDNs that are impractical to enumerate in the
+          allow-list. Other jobs stay governed by harden_runner_egress;
+          left unset, the build job follows it too.
+        required: false
+        type: boolean
+        default: false
       harden_runner_allowlist:
         description: 'Out-of-band harden-runner allow-list configuration'
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@aa81113fe43792f29f939c79ea47a04801cf5342'  # v0.4.1
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@d46590dd8f51bdd71494eb9d2afa3bade1457a62'  # v0.7.0
 
       # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
       gerrit_refspec:
@@ -217,20 +246,27 @@ jobs:
     needs: gerrit-validate
     runs-on: ubuntu-latest
     outputs:
-      artefact_name: ${{ steps.build.outputs.artefact_name }}
-      artefact_path: ${{ steps.build.outputs.artefact_path }}
+      java_version: ${{ steps.metadata.outputs.java_version }}
+      gradle_version: ${{ steps.build.outputs['gradle-version'] }}
+      reports_found: ${{ steps.reports.outputs.found }}
     permissions:
       contents: read
     timeout-minutes: 10
     steps:
+      # The build job can opt into audit egress independently of the
+      # other jobs via build_permit_egress_traffic, for dependency
+      # fetches from CDNs impractical to enumerate in the allow-list.
+      # Left unset it follows harden_runner_egress like every other job.
       - name: 'Load egress allow-list (block mode)'
-        if: inputs.harden_runner_egress != 'audit'
+        # yamllint disable-line rule:line-length
+        if: ${{ !inputs.build_permit_egress_traffic && inputs.harden_runner_egress != 'audit' }}
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner (block)'
-        if: inputs.harden_runner_egress != 'audit'
+        # yamllint disable-line rule:line-length
+        if: ${{ !inputs.build_permit_egress_traffic && inputs.harden_runner_egress != 'audit' }}
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
         with:
@@ -238,7 +274,8 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
       - name: 'Harden runner (audit)'
-        if: inputs.harden_runner_egress == 'audit'
+        # yamllint disable-line rule:line-length
+        if: ${{ inputs.build_permit_egress_traffic || inputs.harden_runner_egress == 'audit' }}
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
         with:
@@ -264,47 +301,75 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language build
-      # action, keeping the step id and the artefact_name/artefact_path
-      # outputs so downstream jobs continue to work, e.g.:
-      #   - name: 'Build project'
-      #     id: build
-      #     uses: lfreleng-actions/<lang>-build-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      - name: 'Build project (placeholder)'
+      # Detect Java/Gradle project metadata: Java version (including
+      # sourceCompatibility/targetCompatibility and toolchain settings),
+      # module layout, version.properties and any releases/*.yaml.
+      # Surfaces a metadata summary and lets the build pick the Java
+      # version when the caller does not pin one.
+      - name: 'Detect build metadata'
+        id: metadata
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/build-metadata-action@0f81bc87b65e73729f704683f84a497eacb12f49  # v0.7.0
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
+          github_summary: 'true'
+
+      - name: 'Build with Gradle'
         id: build
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/gradle-build-action@fec7e8a18d3edde71e21012c56fcd5721a0e3128  # v0.5.0
+        with:
+          path: ${{ inputs.path_prefix }}
+          # Caller override wins, else the detected version, else 21.
+          # yamllint disable-line rule:line-length
+          java-version: ${{ inputs.java_version != '' && inputs.java_version || steps.metadata.outputs.java_version || '21' }}
+          gradle-version: ${{ inputs.gradle_version }}
+          build-arguments: ${{ inputs.build_arguments }}
+          # This workflow collects and uploads the test-results XML itself
+          # (below), under a stable artefact name the tests job consumes.
+          # Disable the action's own upload to avoid a duplicate artefact.
+          artifact-upload: 'false'
+
+      - name: 'Collect JUnit reports'
+        id: reports
+        if: always()
         shell: bash
         env:
           PATH_PREFIX: ${{ inputs.path_prefix }}
         run: |
-          # TEMPLATE: placeholder build step; produces a trivial text
-          # artefact so the artifact plumbing can be exercised.
-          cd "${PATH_PREFIX}"
-          mkdir -p dist
-          {
-            echo "workflows-template placeholder build artefact"
-            echo "repository: ${GITHUB_REPOSITORY}"
-            echo "ref: ${GITHUB_REF}"
-            echo "sha: ${GITHUB_SHA}"
-            echo "run_id: ${GITHUB_RUN_ID}"
-          } > dist/template-artefact.txt
-          echo "artefact_name=template-build" >> "$GITHUB_OUTPUT"
-          echo "artefact_path=${PATH_PREFIX}/dist" >> "$GITHUB_OUTPUT"
+          # Copy Gradle test-results XML out of the build tree so the
+          # tests job can render a summary without rebuilding.
+          set -euo pipefail
+          dest="junit-reports"
+          found=0
+          while IFS= read -r -d '' f; do
+            rel="${f#"${PATH_PREFIX}/"}"
+            mkdir -p "${dest}/$(dirname "${rel}")"
+            cp "${f}" "${dest}/${rel}"
+            found=1
+          done < <(find "${PATH_PREFIX}" -type f \
+            -path '*/build/test-results/*/*.xml' -print0)
+          echo "found=${found}" >> "$GITHUB_OUTPUT"
+          echo "Collected JUnit reports (found=${found})"
 
-      - name: 'Upload build artefact'
+      - name: 'Upload JUnit reports'
+        if: ${{ always() && steps.reports.outputs.found == '1' }}
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: ${{ steps.build.outputs.artefact_name }}
-          path: ${{ steps.build.outputs.artefact_path }}
-          if-no-files-found: error
+          name: gradle-junit-reports
+          path: junit-reports
+          if-no-files-found: warn
 
   tests:
     name: 'Tests'
     runs-on: ubuntu-latest
     needs: 'build'
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    # Run whenever build was not skipped, INCLUDING a failed build: Gradle
+    # runs the tests during the build, so a test failure fails the build
+    # job. The report must still render, so gate on 'not skipped' rather
+    # than 'success'.
+    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
     permissions:
       contents: read
     timeout-minutes: 10
@@ -330,138 +395,47 @@ jobs:
         with:
           egress-policy: 'audit'
 
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
+      # Gradle runs the unit tests during the build (gradle build),
+      # which already gates this job. This job only renders a JUnit
+      # summary from the XML the build job collected, so it does not
+      # check out the source tree; it consumes the downloaded artefact
+      # instead.
+      - name: 'Download JUnit reports'
+        if: ${{ needs.build.outputs.reports_found == '1' }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@f87b90a3370e62dad310797fedc7fd3700c75832  # v1.0.2
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
+          name: gradle-junit-reports
+          path: junit-reports
 
-      # TEMPLATE: Replace this placeholder with your language test
-      # action. Pass test_permit_fail through to the action's own
-      # permit_fail input where available, e.g.:
-      #   - name: 'Run tests'
-      #     uses: lfreleng-actions/<lang>-test-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      #       permit_fail: ${{ inputs.test_permit_fail }}
-      - name: 'Run tests (placeholder)'
+      - name: 'Summarise test results'
+        if: ${{ needs.build.outputs.reports_found == '1' }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/junit-test-report-action@8b93aedff045366029288e976026290d4dc9b349  # v0.0.1
+        with:
+          report-paths: 'junit-reports/**/*.xml'
+          fail-on-failure: ${{ !inputs.test_permit_fail }}
+          # The build job already uploads the XML as gradle-junit-reports;
+          # disable the action's own upload to avoid a duplicate artefact.
+          artifact-upload: 'false'
+
+      - name: 'No test reports'
+        if: ${{ needs.build.outputs.reports_found != '1' }}
         shell: bash
-        env:
-          # The NO_BLOCK/soft-fail pattern: the test_permit_fail input
-          # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
-          # variable) disables failure propagation.
-          # yamllint disable-line rule:line-length
-          NO_BLOCK: ${{ inputs.test_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
         run: |
-          # TEMPLATE: placeholder test step; replace with real tests.
-          status=0
-          echo "Placeholder tests executed"
-          if [ "${status}" != "0" ]; then
-            if [ "${NO_BLOCK}" = "true" ]; then
-              echo "::warning::Tests failed, but failures are" \
-                "permitted so the job will not fail."
-              exit 0
-            fi
-            exit "${status}"
-          fi
-
-  audit:
-    name: 'Audit'
-    runs-on: ubuntu-latest
-    needs: 'build'
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
-    permissions:
-      contents: read
-    timeout-minutes: 10
-    steps:
-      - name: 'Load egress allow-list (block mode)'
-        if: inputs.harden_runner_egress != 'audit'
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@6db537b3e6d060c3287c5a3ce2c28b55b0af330d  # v0.2.1
-        with:
-          config: ${{ inputs.harden_runner_allowlist }}
-      - name: 'Harden runner (block)'
-        if: inputs.harden_runner_egress != 'audit'
-        # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
-        with:
-          egress-policy: 'block'
-          allowed-endpoints: >
-            ${{ env.CONNECTION_ALLOW_LIST }}
-      - name: 'Harden runner (audit)'
-        if: inputs.harden_runner_egress == 'audit'
-        # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@bf7454d06d71f1098171f2acdf0cd4708d7b5920  # v2.20.0
-        with:
-          egress-policy: 'audit'
-
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@f87b90a3370e62dad310797fedc7fd3700c75832  # v1.0.2
-        with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-
-      # TEMPLATE: Replace this placeholder with your language dependency
-      # audit action, e.g.:
-      #   - name: 'Audit dependencies'
-      #     uses: lfreleng-actions/<lang>-audit-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      #       permit_fail: ${{ inputs.audit_permit_fail }}
-      - name: 'Audit dependencies (placeholder)'
-        shell: bash
-        env:
-          # The NO_BLOCK/soft-fail pattern: the audit_permit_fail input
-          # (or, when unset, the NO_BLOCK_AUDIT_FAIL repository
-          # variable) disables failure propagation.
-          # yamllint disable-line rule:line-length
-          NO_BLOCK: ${{ inputs.audit_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
-        run: |
-          # TEMPLATE: placeholder audit step; replace with real audit.
-          status=0
-          echo "Placeholder dependency audit executed"
-          if [ "${status}" != "0" ]; then
-            if [ "${NO_BLOCK}" = "true" ]; then
-              echo "::warning::Audit failed, but failures are" \
-                "permitted so the job will not fail."
-              exit 0
-            fi
-            exit "${status}"
-          fi
+          # The build produced no test-results XML (a project with no
+          # tests, or a build that stopped before the test task ran).
+          echo 'No JUnit reports were produced by the build'
 
   sbom:
     name: 'Generate SBOM'
     runs-on: ubuntu-latest
     needs: 'build'
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+    # Runs whenever build was not skipped: the SBOM job does its own
+    # checkout and does not depend on the build's artefacts, so it keeps
+    # producing the dependency-scan signal even when the build fails
+    # (for example on a test failure).
+    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
     timeout-minutes: 10
     permissions:
       contents: read
@@ -507,29 +481,17 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # TEMPLATE: Replace this placeholder with your language SBOM
-      # action. It MUST emit sbom-cyclonedx.json at the workspace root
-      # (the Grype job contract), e.g.:
-      #   - name: 'Generate SBOM'
-      #     uses: lfreleng-actions/<lang>-sbom-action@<SHA>  # vX.Y.Z
-      #     with:
-      #       path_prefix: ${{ inputs.path_prefix }}
-      # The placeholder writes a minimal VALID empty CycloneDX document
-      # so the downstream Grype scan stays fully functional.
-      - name: 'Generate SBOM (placeholder)'
-        shell: bash
-        run: |
-          # TEMPLATE: placeholder SBOM step; replace with a real SBOM
-          # generator emitting sbom-cyclonedx.json.
-          cat > sbom-cyclonedx.json <<'EOF'
-          {
-            "bomFormat": "CycloneDX",
-            "specVersion": "1.5",
-            "version": 1,
-            "components": []
-          }
-          EOF
-          echo "Wrote placeholder CycloneDX SBOM (0 components)"
+      # Generate a real CycloneDX SBOM with syft (static analysis of the
+      # checked-out tree). The defaults emit sbom-cyclonedx.json and
+      # sbom-cyclonedx.xml at the workspace root; the JSON document is the
+      # Grype job's scan contract. The action writes its own SBOM summary
+      # to the job summary, including the component count.
+      - name: 'Generate SBOM'
+        id: sbom
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/sbom-action@df0b04bb49f19c0dca5e6e08a0c9080bf55d261e  # v0.0.1
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
 
       - name: 'Upload SBOM artifacts'
         # yamllint disable-line rule:line-length
@@ -542,15 +504,6 @@ jobs:
           # Fail fast: the downstream Grype job requires this artifact,
           # so a missing/misnamed SBOM must surface here, not later
           if-no-files-found: error
-
-      - name: 'SBOM summary'
-        shell: bash
-        run: |
-          # SBOM summary
-          {
-            echo "## SBOM Summary"
-            echo "Placeholder CycloneDX SBOM (0 components)"
-          } >> "$GITHUB_STEP_SUMMARY"
 
   grype:
     name: 'Grype Audit SBOM'
@@ -693,8 +646,7 @@ jobs:
             fi
             match_count=$(jq '.matches | length' grype-results.json)
             if [ "${match_count}" = "0" ]; then
-              echo "No vulnerabilities found at or above the configured" \
-                "severity threshold."
+              echo "No vulnerabilities found."
               exit 0
             fi
             echo "Found ${match_count} matching Grype record(s)."

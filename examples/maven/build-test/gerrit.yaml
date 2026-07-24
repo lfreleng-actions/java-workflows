@@ -3,33 +3,26 @@
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 # =============================================================================
-# EXAMPLE: Gerrit-wrapped caller for the reusable merge workflow
+# EXAMPLE: Gerrit-wrapped caller for the reusable build-test workflow
 # =============================================================================
 # Use this form when Gerrit is the source of truth (SCM) for your project.
 # gerrit_to_platform dispatches this workflow (via the GitHub API) when a
-# change is MERGED in Gerrit (change-merged event).
-#
-# This is Model B: the MERGE-DRIVEN release model. Every merge publishes
-# a snapshot; a release publish triggers when the merged commit adds a
-# release file under releases/.
+# patchset is created in Gerrit; it then votes Verified +/-1 on the change.
 #
 # DEPLOYMENT NOTES:
 #   * Copy into .github/workflows/ with a filename containing BOTH 'gerrit'
-#     AND 'merge' so gerrit_to_platform can discover it, e.g.
-#     gerrit-merge.yaml.
+#     AND 'verify' so gerrit_to_platform can discover it, e.g.
+#     gerrit-verify.yaml.
 #   * The workflow file must exist on EVERY active branch: dispatches
 #     target refs/heads/{GERRIT_BRANCH}.
-#   * The nine GERRIT_* inputs are populated automatically by the
-#     dispatcher. On merge events GERRIT_PATCHSET_NUMBER is hardcoded "1"
-#     and GERRIT_REFSPEC is refs/heads/<branch>.
-#   * Merge workflows COMMENT on the change (comment-only) — they never
-#     vote; the change already merged.
+#   * The nine GERRIT_* inputs are populated automatically by the dispatcher.
+#   * GERRIT_DISABLED lets you run manually from the GitHub UI without Gerrit
+#     (the clear/vote jobs are skipped and a normal checkout is used). The
+#     release examples do NOT include GERRIT_DISABLED.
 #   * Set the repository variables GERRIT_SERVER, GERRIT_SSH_USER,
-#     GERRIT_KNOWN_HOSTS, GERRIT_URL, the secret GERRIT_SSH_PRIVKEY, and
-#     (for Nexus publishing) the secrets OP_SERVICE_ACCOUNT_TOKEN and
-#     VAULT_MAPPING_JSON.
+#     GERRIT_KNOWN_HOSTS, GERRIT_URL and the secret GERRIT_SSH_PRIVKEY.
 # =============================================================================
-name: 'Gerrit Merge'
+name: 'Gerrit Verify'
 
 # yamllint disable-line rule:truthy
 on:
@@ -80,6 +73,11 @@ on:
         required: false
         type: string
         default: ''
+      GERRIT_DISABLED:
+        description: 'Run without Gerrit components'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.event.inputs.GERRIT_CHANGE_ID || github.run_id }}
@@ -88,9 +86,9 @@ concurrency:
 permissions: {}
 
 jobs:
-  # Comment on the merged change so the merge pipeline start is visible
-  # in Gerrit (comment-only: the change already merged, so no vote).
-  notify:
+  # Clear any previous Verified vote so the change starts from a clean state.
+  clear-vote:
+    if: inputs.GERRIT_DISABLED != true
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -101,7 +99,7 @@ jobs:
         uses: step-security/harden-runner@9af89fc71515a100421586dfdb3dc9c984fbf411  # v2.19.4
         with:
           egress-policy: audit
-      - name: 'Notify merge pipeline start'
+      - name: 'Clear votes'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/gerrit-review-action@b26a98041c59f9a877048c320313ab13bcc19aae  # v1.0.1
         with:
@@ -112,39 +110,48 @@ jobs:
           gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
           gerrit-patchset-number: ${{ inputs.GERRIT_PATCHSET_NUMBER }}
           vote-type: clear
-          comment-only: 'true'
       - name: 'Allow replication'
         run: sleep 10s
 
-  # Call the reusable merge workflow, forwarding the Nexus credential
-  # secrets it needs once the publish placeholders are replaced.
-  merge:
-    needs: notify
+  # Call the reusable build-test workflow. When dispatched by Gerrit, the
+  # gerrit_* inputs drive checkout-gerrit-change-action inside the reusable
+  # workflow. For a manual GERRIT_DISABLED run, the GERRIT_* inputs are empty
+  # so the reusable workflow performs a normal checkout.
+  build-test:
+    needs: clear-vote
     if: >-
       always()
-      && (needs.notify.result == 'success'
-          || needs.notify.result == 'skipped')
+      && (needs.clear-vote.result == 'success'
+          || needs.clear-vote.result == 'skipped')
     permissions:
       contents: read
-    # REPLACE the pinned SHA below with a workflows-template release SHA
+      pull-requests: read  # repository-metadata-action queries PR data
+    # REPLACE the pinned SHA below with a java-workflows release SHA
     # (or your instantiated workflows repository's release SHA).
     # The all-zero SHA is a non-functional placeholder, NOT a real commit.
     # yamllint disable-line rule:line-length
-    uses: lfreleng-actions/workflows-template/.github/workflows/merge.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    uses: lfreleng-actions/java-workflows/.github/workflows/maven-build-test.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
     with:
-      gerrit_refspec: ${{ inputs.GERRIT_REFSPEC }}
-      gerrit_project: ${{ inputs.GERRIT_PROJECT }}
-      gerrit_branch: ${{ inputs.GERRIT_BRANCH }}
+      # When GERRIT_DISABLED is true the gerrit_* values are blanked so the
+      # reusable workflow falls back to a standard checkout.
+      # yamllint disable-line rule:line-length
+      gerrit_refspec: ${{ !inputs.GERRIT_DISABLED && inputs.GERRIT_REFSPEC || '' }}
+      # yamllint disable-line rule:line-length
+      gerrit_project: ${{ !inputs.GERRIT_DISABLED && inputs.GERRIT_PROJECT || '' }}
+      # yamllint disable-line rule:line-length
+      gerrit_branch: ${{ !inputs.GERRIT_DISABLED && inputs.GERRIT_BRANCH || '' }}
       # gerrit_url falls back to the GERRIT_URL repository variable.
-    secrets:
-      OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-      VAULT_MAPPING_JSON: ${{ secrets.VAULT_MAPPING_JSON }}
+    # settings.xml can carry server credentials, so it is passed only as a
+    # masked secret (never a plain input). Synthesise it with
+    # maven-xml-settings-action -- e.g. merged against ONAP Nexus -- and
+    # forward it here when the verify lane needs a global settings.xml.
+    # secrets:
+    #   maven_global_settings: ${{ secrets.MAVEN_GLOBAL_SETTINGS }}
 
-  # Report the overall workflow conclusion back to Gerrit as a comment
-  # (comment-only: merge pipelines never vote).
-  report:
-    if: always()
-    needs: [notify, merge]
+  # Report the overall workflow conclusion back to Gerrit as a Verified vote.
+  vote:
+    if: ${{ always() && inputs.GERRIT_DISABLED != true }}
+    needs: [clear-vote, build-test]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -160,7 +167,7 @@ jobs:
       - name: 'Get conclusion'
         # yamllint disable-line rule:line-length
         uses: im-open/workflow-conclusion@fce18569e28a9f2ed1feca1e6d4251e6a7365fdc  # v2.2.4
-      - name: 'Report conclusion'
+      - name: 'Set vote'
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/gerrit-review-action@b26a98041c59f9a877048c320313ab13bcc19aae  # v1.0.1
         with:
@@ -171,4 +178,3 @@ jobs:
           gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
           gerrit-patchset-number: ${{ inputs.GERRIT_PATCHSET_NUMBER }}
           vote-type: ${{ env.WORKFLOW_CONCLUSION }}
-          comment-only: 'true'

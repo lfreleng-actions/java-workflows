@@ -5,185 +5,247 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 
 <!-- markdownlint-disable MD013 -->
 
-# Design Brief: Workflows Template
+# Design Brief: Java Workflows
 
-This document records the design decisions behind `workflows-template`:
-the generic, language-agnostic starting point for reusable-workflow
-repositories in the `lfreleng-actions` organisation.
+This document records the design decisions behind `java-workflows`: the
+reusable GitHub Actions workflows that build, test, scan and release JVM
+projects in the `lfreleng-actions` organisation. It is the
+language-specific instantiation of `workflows-template` for Java, and it
+targets both Maven and Gradle projects.
+
+The immediate driver is the ONAP `cps` migration off Jenkins + global-jjb
+(Java 21, Maven 3.9 multi-module, plus some Gradle) onto GitHub Actions
+reusable workflows. The patterns generalise to every LF Java project.
 
 ## Goal
 
-Provide the canonical skeleton that new reusable-workflow repositories
-(`go-workflows`, `node-workflows`, and future language repos) copy as
-their first commit, so every language repo inherits the same proven
-pipeline shape, security posture and Gerrit integration by default.
-`python-workflows` is the language-specific reference implementation of
-the patterns carried here.
+Give Java projects a drop-in set of reusable workflows that reproduce the
+Jenkins/global-jjb verify, merge and release lanes on GitHub Actions,
+while inheriting the template's security posture (harden-runner block
+mode, pinned SHAs, SBOM/Grype chain) and dual Gerrit/GitHub trigger model
+by default.
 
-The template deliberately carries **skeletons and patterns, not a real
-pipeline**: language-specific steps are `# TEMPLATE:`-marked placeholder
-steps that instantiators replace with real actions.
+## Maven and Gradle: one repository, two lanes
 
-## Why a template repository?
+GitHub resolves reusable workflows only from the flat `.github/workflows/`
+directory; subdirectories are not permitted for callable workflows. The
+Maven and Gradle families are therefore delineated by **filename prefix**,
+not by folder:
 
-- The generic parts of the LF pipeline (job graph, harden-runner
-  wiring, dual checkout, Gerrit validation, SBOM/Grype chain, release
-  plumbing) are identical across languages; re-deriving them per repo
-  invites drift and security regressions.
-- A template that passes its own linting, self-test and a zero-finding
-  zizmor audit gives each new language repo a verified-secure baseline
-  rather than a blank page.
-- Divergence then stays where it belongs: in the language-specific
-  build/test/audit/SBOM/publish actions.
+| File                     | Family | Lane        |
+| ------------------------ | ------ | ----------- |
+| `maven-build-test.yaml`  | Maven  | Verify (PR) |
+| `gradle-build-test.yaml` | Gradle | Verify (PR) |
 
-## What is generic vs placeholder
+This initial repository ships only the verify lane. The planned merge and
+release lanes will follow the same prefix convention when added
+(`maven-merge.yaml`, `maven-build-test-release.yaml`, and their Gradle
+counterparts); see [Planned: merge and release lanes](#planned-merge-and-release-lanes).
 
-Generic (transfers verbatim, do NOT rewrite when instantiating):
+Only `examples/` and `docs/` use real subfolders (`examples/maven/…`,
+`examples/gradle/…`). Gradle is a first-class parallel track, not an
+afterthought: there are fewer Gradle projects than Maven ones, but the
+same verify/merge/release shape applies, so the Gradle workflows mirror
+their Maven counterparts step-for-step and differ only in the toolchain
+actions and their inputs.
 
-- `gerrit-validate` — root job validating the Gerrit input contract;
-  always runs (only the step is conditional) so `needs:` chains never
-  get skip-propagated.
-- `repository-metadata` — informational job, runs in parallel.
-- Harden-runner triple in every job (block-mode allow-list load +
-  harden-runner block, or harden-runner audit), fail-secure: anything
-  other than `audit` means block.
-- Dual checkout switch (`checkout-gerrit-change-action` when
-  `gerrit_refspec` set, `actions/checkout` otherwise).
-- The Grype job: downloads the `sbom-files` artifact, scans
-  `sbom:sbom-cyclonedx.json`, honours `grype_fail_on`,
-  `grype_permit_fail` and the `NO_BLOCK_AUDIT_FAIL` repository
-  variable (exit code 2 = findings, soft-failable; other non-zero =
-  tool failure).
-- Release plumbing on Model A: `tag-validate` (semver, signed,
-  reject-development, ensure-draft-release), `attach-artefacts`
-  (`release-assets-action`), `promote-release`
-  (`draft-release-promote-action` + idempotency check).
-- Release-file detection on Model B (`check-release`): `git diff-tree`
-  against `releases/` in the merged commit, safe `version:` extraction
-  with a character-class guard before values reach `$GITHUB_OUTPUT`.
+## Verify lane (wired)
 
-Placeholder (`# TEMPLATE:` marked, replaced when instantiating):
+Both `maven-build-test.yaml` and `gradle-build-test.yaml` are fully
+wired. The job graph is:
 
-- Build steps (produce a trivial `dist/template-artefact.txt` and emit
-  `artefact_name`/`artefact_path` outputs to exercise the plumbing).
-- Test and audit steps (demonstrate the `*_permit_fail`/NO_BLOCK
-  soft-fail wiring).
-- SBOM generation (writes a minimal VALID empty CycloneDX JSON so the
-  downstream Grype job stays fully functional).
-- Version resolution on Model B (the `version.properties` parse
-  pattern — parsed, never `source`d).
-- Credential loading and registry publish steps on Model B.
-- Build provenance attestation on Model A (commented
-  `actions/attest-build-provenance` example; attesting the trivial
-  placeholder artefact provides no value).
+```text
+gerrit-validate ─┬─ repository-metadata (informational)
+                 └─ build ─┬─ tests
+                           └─ sbom ─ grype
+```
 
-## The three skeletons and their contracts
+`build` job (Maven):
 
-| Skeleton | Model | Contract |
-| --- | --- | --- |
-| `build-test.yaml` | PR verification | `build -> { tests \| audit \| sbom -> grype }`; parallel fan-out so every failure surfaces |
-| `build-test-release.yaml` | Model A (tag-driven) | `tag-validate -> build -> { audit \| sbom -> grype } -> tests -> attach-artefacts -> promote-release`; gating inversion (audits gate tests); workflow output `tag` |
-| `merge.yaml` | Model B (merge-driven) | `{ resolve-version \| build } -> snapshot-publish`; `check-release -> release-publish` when a release file merged; optional `OP_SERVICE_ACCOUNT_TOKEN`/`VAULT_MAPPING_JSON` secrets |
+1. `build-metadata-action` (id `metadata`) — detects the project's Java
+   version and version/release metadata; writes to the step summary.
+2. `maven-build-action` (id `build`) — runs `setup-java` + `setup-maven`
+   itself, then the configured Maven phases (default `clean install`).
+   The Java version resolves as
+   `inputs.java_version || metadata.java_version || '21'` so an explicit
+   caller value wins, project detection is next, and 21 is the floor.
+3. A "Collect JUnit reports" step (id `reports`, `if: always()`) finds
+   `*/target/*-reports/*.xml`, copies them under `junit-reports/`, and
+   sets `found`.
+4. When reports exist, they upload as the `maven-junit-reports` artefact.
 
-Shared `workflow_call` conventions:
+A global `settings.xml` (which commonly carries Nexus server credentials)
+is never accepted as a plain input: the workflow declares a
+`maven_global_settings` `workflow_call` secret and forwards it to
+`maven-build-action`'s `global-settings`, keeping the value masked in logs
+and the run UI. Callers typically synthesise it with
+`maven-xml-settings-action` and omit the secret entirely when no global
+settings are needed.
 
-- Workflow `name:` prefixed `[R]`.
-- All inputs `required: false` with sensible defaults (the "curated
-  middle" input surface); lowercase snake_case names (`GERRIT_*`
-  UPPERCASE names are reserved for the dispatch inputs on caller
-  workflows).
-- `repository` + `ref` inputs on every workflow so the self-test can
-  run against fixture repos.
-- Four Gerrit inputs (`gerrit_refspec`, `gerrit_project`,
-  `gerrit_branch`, `gerrit_url`) with `vars.GERRIT_URL` fallback.
-- Top-level `permissions: {}`; minimal per-job grants with explanatory
-  comments on anything beyond `contents: read`; `timeout-minutes` on
-  every job; every `uses:` pinned to a full commit SHA with a
-  `# vX.Y.Z` comment.
-- Never interpolate `${{ }}` expressions into `run:` blocks — all
-  dynamic values are env-mediated (zizmor template-injection).
-- `persist-credentials: false` on every `actions/checkout`.
+`tests` job downloads that artefact and runs `junit-test-report-action`
+against `junit-reports/**/*.xml` with
+`fail-on-failure: ${{ !inputs.test_permit_fail }}`. The action writes a
+results table to the job summary; it does not create a check-run. Its
+own artefact upload is disabled (`artifact-upload: 'false'`) because the
+build job already publishes the XML as `maven-junit-reports`. The job
+runs whenever the build was not skipped
+(`needs.build.result != 'skipped'`), including a failed build: Maven and
+Gradle run the tests inside the build, so a test failure fails the build
+job, and gating the report on build success would hide exactly the
+failures the report exists to show.
 
-## Dual release-model rationale
+Because tests run in the build, `test_permit_fail` cannot soft-fail by
+itself. The Maven workflow therefore adds
+`-Dmaven.test.failure.ignore=true` so the build completes and the report
+gate decides the verdict. Gradle has no equivalent CLI flag, so there
+the input governs only the report gate; a project must set
+`test.ignoreFailures` to tolerate failures at build level. The input
+descriptions state this per toolchain.
 
-The organisation must support both release mechanisms flexibly
-(template-level requirement, not a per-language afterthought):
+The Gradle build job is identical in shape: `gradle-build-action` with
+`java-version` / `gradle-version` / `build-arguments` (default `build`),
+report discovery on `*/build/test-results/*/*.xml`, and the
+`gradle-junit-reports` artefact. `gradle-build-action` uploads test
+reports itself by default, so the workflow sets `artifact-upload: false`
+and manages the artefact under a stable name for the tests job.
 
-- **Model A (tag-driven)**: version from a validated, signed semver
-  tag; GitHub release with attached, attested artefacts; optional
-  registry publication. Canonical for GitHub-native projects and Gerrit
-  projects whose tags replicate to the mirror. Release callers are
-  tag-push triggered ONLY — there is no Gerrit change context on a tag,
-  so no votes are cast and the Gerrit/GitHub caller pair is
-  near-identical.
-- **Model B (merge-driven)**: every merge publishes a snapshot; a
-  committed `releases/*.yaml` file triggers a release. Canonical for
-  Jenkins-heritage LF/Gerrit projects publishing to Nexus (the
-  production-proven ONAP flow).
+`sbom` generates a real CycloneDX document with `sbom-action` (a syft
+backend performing static analysis of the checked-out tree) and feeds the
+JSON output to `grype`, honouring `grype_fail_on`, `grype_permit_fail` and
+the `NO_BLOCK_AUDIT_FAIL` repository variable (carried verbatim from the
+template). With the action's defaults it writes `sbom-cyclonedx.json` and
+`sbom-cyclonedx.xml` at the workspace root — the JSON document is the
+Grype job's scan contract — and reports the component count to the job
+summary. Because the SBOM job does its own checkout and does not depend on
+the build's artefacts, it still produces a dependency-scan signal when the
+build fails.
 
-Rather than two parallel stacks, the version source is factored out: a
-resolve-version stage (Model B) and tag validation (Model A) feed
-otherwise-identical build/publish jobs, so consumers can adopt either
-model — or migrate from B to A — without behavioural divergence.
+## No dedicated java-audit-action or java-test-action
 
-Signing/attestations (Model A): the `attestations` and `sigstore_sign`
-inputs (default `true`) follow the python-workflows precedent, with
-`id-token: write` + `attestations: write` granted only to the build
-job. Keyless (OIDC) signing only. The inputs stay toggleable because
-some Gerrit-mirrored or air-gapped consumers cannot reach the public
-Sigstore infrastructure. Snapshot publishes (Model B) skip
-release-grade signing by default.
+Two lanes present in the generic template do not appear as standalone
+Java jobs, by deliberate decision:
 
-## Central allow-list policy
+- **No `audit` job.** For the JVM, dependency-risk auditing is the
+  SBOM + Grype chain (already present) plus the separate Sonatype CLM
+  lane; there is no separate "audit" step to run. The template's generic
+  `audit` job and its `audit_permit_fail` input were removed from the
+  Java verify workflows.
+- **No dedicated test action.** Maven (`surefire`/`failsafe`) and Gradle
+  (`test`) run the tests as part of the build lifecycle. The workflow's
+  job is to *surface* results, which `junit-test-report-action` does by
+  rendering the JUnit XML the build already produced. A separate
+  test-runner action would duplicate the build tool's own contract.
 
-Block-mode egress is the default and the production posture. The
-allow-list is not maintained per-repo: `harden-runner-block-action`
-retrieves the central org allow-list from the `lfreleng-actions/.github`
-repository, pinned in the `harden_runner_allowlist` input default
-(v0.4.1 at the time of writing). When new work talks to new endpoints,
-raise a PR against `lfreleng-actions/.github` adding the hosts/ports,
-get it released, then pin the new tag's commit SHA — the allow-list
-update is a sequenced prerequisite of any change introducing new
-egress. `audit` mode exists for diagnosis/bring-up only and is the
-mechanism for discovering the endpoint list to submit.
+## Planned: merge and release lanes
+
+The merge (`*-merge.yaml`) and release (`*-build-test-release.yaml`) lanes
+are **not part of this initial repository**. They are intentionally
+sequenced **last**, because the stage/release lane depends on design
+decisions that are not yet settled:
+
+- **Signing**: Sigul (LF's traditional signing bridge) versus Sigstore
+  keyless/OIDC. Some Gerrit-mirrored or air-gapped consumers cannot reach
+  public Sigstore infrastructure.
+- **Nexus2 staging semantics**: the ONAP flow stages to a Sonatype Nexus2
+  open/close/promote lifecycle; the reusable equivalent (staging profile,
+  auto-release gating) needs modelling.
+- **Model B data bus**: the Jenkins `releases/*.yaml` +
+  `log_dir` convention needs a GitHub-native replacement for carrying
+  release coordinates between the merge trigger and the publish step.
+
+These lanes are omitted rather than committed as placeholders: the initial
+repository ships only complete, functional workflows. They will be added
+under the filename-prefix convention above once the design decisions are
+resolved.
+
+## Supporting building-block actions
+
+The verify lane composes actions from sibling `lfreleng-actions` repos.
+The Java-specific enhancements landed (or are in review) as separate PRs
+before this repository wired them together:
+
+| Action                      | Role in the lane                               |
+| --------------------------- | ---------------------------------------------- |
+| `build-metadata-action`     | Java version + release metadata detection      |
+| `maven-build-action`        | Maven setup + lifecycle build                  |
+| `gradle-build-action`       | Gradle setup + build (brought to Maven parity) |
+| `junit-test-report-action`  | JUnit XML rendering + check                    |
+| `sbom-action`               | CycloneDX SBOM generation (syft backend)       |
+| `maven-xml-settings-action` | Nexus `settings.xml` synthesis (merge lane)    |
+
+The `java-version` input naming was normalised across every build action
+before the workflows depended on it, since renaming a consumed input
+after the fact would be a breaking change.
+
+## Action pin policy
+
+zizmor's auditor persona rejects `@main`/branch refs (`unpinned-uses`), so
+every `uses:` ref is pinned to a full commit SHA with a `# vX.Y.Z` comment
+naming the release it targets, matching the template convention. All
+building-block actions the verify lane composes are pinned to published
+release tags:
+
+| Action                     | Release |
+| -------------------------- | ------- |
+| `build-metadata-action`    | v0.7.0  |
+| `maven-build-action`       | v0.3.0  |
+| `gradle-build-action`      | v0.5.0  |
+| `junit-test-report-action` | v0.0.1  |
+| `sbom-action`              | v0.0.1  |
 
 ## Self-test approach
 
-`testing.yaml` calls the build-test skeleton **by local path** (so it
-always validates the current branch) against fixture repositories of
-different languages, fanned out via a `fail-fast: false` matrix. The
-placeholder steps are language-agnostic, so the matrix passes for any
-fixture — by design: the template self-test validates the generic
-scaffolding (job graph, harden-runner, dual checkout, artifact
-plumbing, SBOM/Grype chain), not a language pipeline.
+`testing.yaml` calls the Maven and Gradle verify workflows by **local
+path**, so it always validates the current branch. Both self-test jobs
+are gated to `workflow_dispatch` only (skipped on pull requests, keeping
+PR CI green) while one prerequisite is pending:
 
-The release and merge skeletons are not self-tested: they need a signed
-semver tag-push or merged-commit context (and would create releases or
-exercise publish legs), neither of which is available or safe on a pull
-request. Instantiating repos validate them through their own
-release/merge cycles.
+1. Dedicated lightweight fixtures (`test-maven-project` /
+   `test-gradle-project`) exist; the placeholders build large upstream
+   projects and suit a manual run only.
 
-## Instantiation checklist
+The two earlier prerequisites are satisfied: every building-block action
+is pinned to a published release, and the toolchain egress (Maven
+Central, Gradle distribution, Temurin, and the syft and grype tool
+downloads) is in the central harden-runner allow-list as of `.github`
+v0.7.0. The placeholder jobs still run in audit because a large upstream
+project reaches endpoints beyond that toolchain set; a dedicated fixture
+with a known egress footprint can switch them to block mode.
 
-1. Copy the template over the new repo's boilerplate as the first
-   commit of the implementation PR series.
-2. Replace every `# TEMPLATE:` placeholder with real language actions,
-   keeping step ids and job outputs intact.
-3. Wire real fixture/consumer repos into `testing.yaml`.
-4. Rename all slugs (README badges/links, examples `uses:` paths).
-5. Follow the central allow-list process for any new endpoints the
-   language toolchain contacts.
-6. Keep both release models working; extend inputs on demand (curated
-   middle).
-7. Update `docs/BRIEF.md` with the language repo's own decisions.
-8. Verify: pre-commit hooks green, zizmor (auditor persona) reports
-   zero findings, self-test passes.
+The planned merge and release lanes are out of scope for the self-test
+until they are added: they need a merged-commit or signed semver tag-push
+context that is neither available nor safe on a pull request.
 
-## Repo hygiene kept from actions-template
+## Conventions inherited from the template
 
-`.pre-commit-config.yaml` (frozen-SHA hook pins), `.yamllint`,
-`.gitlint` (Conventional Commits + DCO), `.editorconfig`,
-`dependabot.yml` (weekly, cooldown 7 days), REUSE/SPDX layout,
-`SECURITY.md`, `release-drafter.yaml`, `openssf-scorecard.yaml`,
-`clear-action-cache.yaml`, and the newer `tag-push.yaml` generation
-(harden-runner block + tag-validate-action v1.0.4).
+- Workflow `name:` prefixed `[R]`.
+- All `workflow_call` inputs `required: false`, lowercase snake_case
+  (UPPERCASE `GERRIT_*` names reserved for dispatch inputs on callers).
+- Top-level `permissions: {}`; minimal per-job grants with explanatory
+  comments; `timeout-minutes` on every job.
+- Every `uses:` pinned to a full commit SHA; `persist-credentials: false`
+  on every checkout.
+- Harden-runner triple per job (block-mode allow-list load + block, or
+  audit); fail-secure (anything other than `audit` means block). The
+  central allow-list is pinned in the `harden_runner_allowlist` default.
+  The build job additionally honours `build_permit_egress_traffic`
+  (boolean, default `false`): when true it runs harden-runner in audit
+  for the build lane only — for dependency fetches from CDNs impractical
+  to enumerate in the allow-list — while every other job stays governed by
+  `harden_runner_egress`. This is a first, build-scoped hook; per-job
+  egress control can be generalised later if further lanes need it.
+- Never interpolate `${{ }}` into `run:` blocks; env-mediate dynamic
+  values (zizmor template-injection). `with:`-block interpolation is
+  safe.
+- Dual checkout switch on `gerrit_refspec`
+  (`checkout-gerrit-change-action` when set, `actions/checkout`
+  otherwise).
+
+## Follow-ups
+
+1. Create `test-maven-project` / `test-gradle-project` fixtures and point
+   `testing.yaml` at them.
+2. Design and implement the merge/release lanes (signing, Nexus2 staging,
+   Model B data bus).
+3. Wire the ONAP `cps` Gerrit verify/merge workflows onto these reusable
+   workflows.
