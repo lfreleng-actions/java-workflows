@@ -225,9 +225,14 @@ context that is neither available nor safe on a pull request.
   comments; `timeout-minutes` on every job.
 - Every `uses:` pinned to a full commit SHA; `persist-credentials: false`
   on every checkout.
-- Harden-runner triple per job (block-mode allow-list load + block, or
-  audit); fail-secure (anything other than `audit` means block). The
-  central allow-list is pinned in the `harden_runner_allowlist` default.
+- One harden-runner step per job with the egress policy computed
+  (block-mode allow-list load, then harden-runner); fail-secure (anything
+  other than `audit` means block). The policy is computed rather than
+  chosen between two conditional steps because harden-runner declares a
+  `pre` entry point and no `pre-if`, so its pre-phase runs regardless of
+  a step-level `if:`. Two steps would both engage the agent, the first
+  would win, and audit mode would be silently unreachable. The central
+  allow-list is pinned in the `harden_runner_allowlist` default.
   The build job additionally honours `build_permit_egress_traffic`
   (boolean, default `false`): when true it runs harden-runner in audit
   for the build lane only — for dependency fetches from CDNs impractical
