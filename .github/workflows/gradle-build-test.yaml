@@ -110,7 +110,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@d46590dd8f51bdd71494eb9d2afa3bade1457a62'  # v0.7.0
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@4d8825761e149992652bccf8aa0de72d79903853'  # v0.10.0
 
       # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
       gerrit_refspec:
