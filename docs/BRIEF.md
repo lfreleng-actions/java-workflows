@@ -222,7 +222,19 @@ context that is neither available nor safe on a pull request.
 - All `workflow_call` inputs `required: false`, lowercase snake_case
   (UPPERCASE `GERRIT_*` names reserved for dispatch inputs on callers).
 - Top-level `permissions: {}`; minimal per-job grants with explanatory
-  comments; `timeout-minutes` on every job.
+  comments; `timeout-minutes` on every job. The build, test-report and
+  audit jobs take their timeout from an input
+  (`build_timeout_minutes` 45, `tests_timeout_minutes` 30,
+  `sbom_timeout_minutes` 30, `grype_timeout_minutes` 30) because their
+  duration scales with the project; the validation and metadata jobs do
+  fixed work and keep literal values. The defaults assume a large
+  multi-module reactor on a busy shared runner, where dependency
+  resolution, container image pulls and vulnerability database
+  downloads all run slower than they do locally. A timeout only bounds
+  a hung job, so erring high costs nothing; the previous flat 10
+  minutes silently truncated a real ONAP build mid-reactor, and a
+  caller could not raise it because a reusable workflow's job timeout
+  is not overridable from outside.
 - Every `uses:` pinned to a full commit SHA; `persist-credentials: false`
   on every checkout.
 - One harden-runner step per job with the egress policy computed

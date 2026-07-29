@@ -112,6 +112,35 @@ on:
         # yamllint disable-line rule:line-length
         default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@cc89ca0f02a1c8fd875c9758896f0929097d25b7'  # v0.12.0
 
+      # --- Job timeouts (minutes) ---
+      # Sized per job rather than uniformly. The build, test-report and
+      # audit jobs scale with the size of the project, so they are
+      # configurable; the validation and metadata jobs do fixed work and
+      # are not. Defaults suit a large multi-module reactor on a busy
+      # shared runner, where dependency resolution, image pulls and
+      # vulnerability database downloads are all slower than they look
+      # locally. They bound a hung job, so erring high costs nothing.
+      build_timeout_minutes:
+        description: 'Timeout for the build job'
+        required: false
+        type: number
+        default: 45
+      tests_timeout_minutes:
+        description: 'Timeout for the test reporting job'
+        required: false
+        type: number
+        default: 30
+      sbom_timeout_minutes:
+        description: 'Timeout for the SBOM generation job'
+        required: false
+        type: number
+        default: 30
+      grype_timeout_minutes:
+        description: 'Timeout for the Grype scan job'
+        required: false
+        type: number
+        default: 30
+
       # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
       gerrit_refspec:
         description: 'Gerrit refspec of the change under test'
@@ -149,7 +178,7 @@ jobs:
     # not trip GitHub's "skipped need skips dependents" behaviour.
     runs-on: ubuntu-latest
     permissions: {}
-    timeout-minutes: 2
+    timeout-minutes: 5
     steps:
       - name: 'Require Gerrit project, branch and URL'
         if: inputs.gerrit_refspec != ''
@@ -186,7 +215,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       # One harden-runner step with the policy computed, rather than
       # two selected by condition: harden-runner declares a 'pre'
@@ -249,7 +278,7 @@ jobs:
       reports_found: ${{ steps.reports.outputs.found }}
     permissions:
       contents: read
-    timeout-minutes: 10
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
     steps:
       # The build job can opt into audit egress independently of the
       # other jobs via build_permit_egress_traffic, for dependency
@@ -366,7 +395,7 @@ jobs:
     if: ${{ !cancelled() && needs.build.result != 'skipped' }}
     permissions:
       contents: read
-    timeout-minutes: 10
+    timeout-minutes: ${{ inputs.tests_timeout_minutes }}
     steps:
       # One harden-runner step with the policy computed, rather than
       # two selected by condition: harden-runner declares a 'pre'
@@ -428,7 +457,7 @@ jobs:
     # producing the dependency-scan signal even when the build fails
     # (for example on a test failure).
     if: ${{ !cancelled() && needs.build.result != 'skipped' }}
-    timeout-minutes: 10
+    timeout-minutes: ${{ inputs.sbom_timeout_minutes }}
     permissions:
       contents: read
     steps:
@@ -500,7 +529,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: 'sbom'
     if: ${{ !cancelled() && needs.sbom.result == 'success' }}
-    timeout-minutes: 10
+    timeout-minutes: ${{ inputs.grype_timeout_minutes }}
     permissions:
       contents: read
     steps:

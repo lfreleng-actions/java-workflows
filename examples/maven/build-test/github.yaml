@@ -53,6 +53,10 @@ jobs:
     #   test_permit_fail: false       # soft-fail tests
     #   grype_fail_on: 'medium'       # Grype severity gate
     #   harden_runner_egress: 'block' # 'block' (default) or 'audit'
+    #   build_timeout_minutes: 45     # raise for large reactors
+    #   tests_timeout_minutes: 30     # test report rendering
+    #   sbom_timeout_minutes: 30      # SBOM generation
+    #   grype_timeout_minutes: 30     # Grype scan
     # settings.xml can carry server credentials, so it is passed only as a
     # masked secret (never a plain input). Synthesise it with
     # maven-xml-settings-action and forward it here when your build needs a
