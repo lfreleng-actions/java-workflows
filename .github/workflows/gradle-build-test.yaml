@@ -110,7 +110,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@cc89ca0f02a1c8fd875c9758896f0929097d25b7'  # v0.12.0
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@bf6642f68d58c1b81bbe993e676d6cc339ac3654'  # v0.12.2
 
       # --- Job timeouts (minutes) ---
       # Sized per job rather than uniformly. The build, test-report and
@@ -140,6 +140,29 @@ on:
         required: false
         type: number
         default: 30
+
+      # --- Build artefact publication ---
+      # Off by default. The build's packaged output is large and most
+      # verify lanes never look at it again, so uploading unconditionally
+      # would impose storage on every consumer to serve a minority. Turn
+      # it on where a later job, or a human, needs the built output:
+      # publish lanes, container builds, or downloading a jar from a
+      # failed run to reproduce a problem locally.
+      upload_build_artifacts:
+        description: >-
+          Upload the packaged build output (jar/war/ear from each
+          module's build/libs directory) as a workflow artefact.
+        required: false
+        type: boolean
+        default: false
+      build_artifact_retention_days:
+        description: >-
+          Retention for the build artefact. Shorter than the SBOM's 45
+          days: build output is reproducible from the commit, so it is
+          a convenience rather than a record.
+        required: false
+        type: number
+        default: 7
 
       # --- Gerrit-aware checkout (empty unless dispatched via Gerrit) ---
       gerrit_refspec:
@@ -326,16 +349,16 @@ jobs:
 
       # Detect Java/Gradle project metadata: Java version (including
       # sourceCompatibility/targetCompatibility and toolchain settings),
-      # module layout, version.properties and any releases/*.yaml.
-      # Surfaces a metadata summary and lets the build pick the Java
-      # version when the caller does not pin one.
+      # module layout, version.properties and any releases/*.yaml. Lets
+      # the build pick the Java version when the caller does not pin
+      # one. The action takes no github_summary input; one was passed
+      # here until it was noticed in the run annotations.
       - name: 'Detect build metadata'
         id: metadata
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/build-metadata-action@6c432669e6dec2949442da27d0aa270f2bca0ecb  # v0.7.1
         with:
           path_prefix: ${{ inputs.path_prefix }}
-          github_summary: 'true'
 
       - name: 'Build with Gradle'
         id: build
@@ -383,6 +406,53 @@ jobs:
           name: gradle-junit-reports
           path: junit-reports
           if-no-files-found: warn
+
+      # Gradle has no m2repo equivalent in a plain build, so there is
+      # one shape here: whatever each module packaged into build/libs.
+      - name: 'Collect build artefacts'
+        id: build-artifacts
+        if: ${{ always() && inputs.upload_build_artifacts }}
+        shell: bash
+        env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+        run: |
+          # Stage the build output under a single directory for upload.
+          set -euo pipefail
+          dest="build-artifacts"
+          count=0
+
+          while IFS= read -r -d '' dir; do
+            for f in "${dir}"/*.jar "${dir}"/*.war "${dir}"/*.ear; do
+              [ -f "${f}" ] || continue
+              rel="${f#"${PATH_PREFIX}/"}"
+              mkdir -p "${dest}/$(dirname "${rel}")"
+              cp "${f}" "${dest}/${rel}"
+              count=$((count + 1))
+            done
+          done < <(find "${PATH_PREFIX}" -type d -path '*/build/libs' -print0)
+
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Build artefacts"
+            echo ""
+            echo "| Property | Value |"
+            echo "| -------- | ----- |"
+            echo "| Files | ${count} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Collected ${count} file(s) from build/libs"
+
+      - name: 'Upload build artefacts'
+        # yamllint disable-line rule:line-length
+        if: ${{ always() && inputs.upload_build_artifacts && steps.build-artifacts.outputs.count != '0' }}
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: gradle-build-artifacts
+          path: build-artifacts
+          retention-days: ${{ inputs.build_artifact_retention_days }}
+          if-no-files-found: error
 
   tests:
     name: 'Tests'

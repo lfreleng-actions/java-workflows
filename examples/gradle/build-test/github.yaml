@@ -55,3 +55,9 @@ jobs:
     #   tests_timeout_minutes: 30     # test report rendering
     #   sbom_timeout_minutes: 30      # SBOM generation
     #   grype_timeout_minutes: 30     # Grype scan
+    #
+    # Keep the packaged build output from each module's build/libs
+    # directory. Off by default; turn it on where a later job or a
+    # human needs the jars.
+    #   upload_build_artifacts: true
+    #   build_artifact_retention_days: 7

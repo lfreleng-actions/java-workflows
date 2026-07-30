@@ -57,6 +57,12 @@ jobs:
     #   tests_timeout_minutes: 30     # test report rendering
     #   sbom_timeout_minutes: 30      # SBOM generation
     #   grype_timeout_minutes: 30     # Grype scan
+    #
+    # Keep the packaged build output. Off by default; turn it on where a
+    # later job or a human needs the jars. Prefers the m2repo layout
+    # when a deploy phase produced one, else the reactor's target/ jars.
+    #   upload_build_artifacts: true
+    #   build_artifact_retention_days: 7
     # settings.xml can carry server credentials, so it is passed only as a
     # masked secret (never a plain input). Synthesise it with
     # maven-xml-settings-action and forward it here when your build needs a
