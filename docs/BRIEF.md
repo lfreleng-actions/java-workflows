@@ -73,6 +73,32 @@ gerrit-validate ─┬─ repository-metadata (informational)
    `*/target/*-reports/*.xml`, copies them under `junit-reports/`, and
    sets `found`.
 4. When reports exist, they upload as the `maven-junit-reports` artefact.
+5. When `upload_build_artifacts` is set, a "Collect build artefacts"
+   step stages the packaged output and uploads it.
+
+Build artefact publication is **opt-in**. The packaged output is large
+and most verify lanes never read it back, so uploading it unconditionally
+would charge storage to every consumer in order to serve a minority. The
+cases that want it are real, though — publish and stage lanes, container
+builds, CSIT, and a human pulling a jar out of a failed run — so the
+workflow makes it a switch rather than omitting it.
+
+Two shapes can come out of a Maven build, and they are not
+interchangeable. A `deploy` phase writes a repository layout to `m2repo`
+(`groupId/artifactId/version/...`), which is what Nexus staging and
+`nexus-publish-action` consume; any other phase leaves packaged output
+scattered through the reactor's `target/` directories. The collect step
+prefers the former when it exists and records which it took in the
+artefact name (`maven-build-artifacts-m2repo` or
+`maven-build-artifacts-reactor`), so a consumer knows what it has
+without inspecting the contents. Note the lane's default `mvn_phases` is
+`clean install`, which produces the reactor shape; `m2repo` appears only
+when a caller asks for `deploy`. The build job also surfaces
+`m2repo_exists`, `m2repo_path` and `artifact_count` as job outputs.
+
+Gradle has no `m2repo` equivalent in a plain build, so its lane collects
+one shape — each module's `build/libs` output — and names the artefact
+`gradle-build-artifacts`.
 
 A global `settings.xml` (which commonly carries Nexus server credentials)
 is never accepted as a plain input: the workflow declares a
