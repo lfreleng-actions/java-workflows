@@ -386,7 +386,7 @@ jobs:
       - name: 'Detect build metadata'
         id: metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/build-metadata-action@6c432669e6dec2949442da27d0aa270f2bca0ecb  # v0.7.1
+        uses: lfreleng-actions/build-metadata-action@504ee845e954566de1d220137fd40635e15468a9  # v0.8.0
         with:
           path_prefix: ${{ inputs.path_prefix }}
 
