@@ -632,7 +632,6 @@ jobs:
     timeout-minutes: ${{ inputs.grype_timeout_minutes }}
     permissions:
       contents: read
-      issues: read  # Read maintainer-approved CVE bypass issues
     steps:
       # One harden-runner step with the policy computed, rather than
       # two selected by condition: harden-runner declares a 'pre'
