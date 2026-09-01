@@ -50,6 +50,8 @@ jobs:
     #   gradle_version: '8.10'        # pin Gradle (empty uses the wrapper)
     #   build_arguments: 'build'      # arguments for the gradle invocation
     #   test_permit_fail: false       # soft-fail tests
+    #   sbom_enabled: true            # false skips SBOM generation
+    #   grype_enabled: true           # false skips the Grype scan only
     #   grype_fail_on: 'medium'       # Grype severity gate
     #   harden_runner_egress: 'block' # 'block' (default) or 'audit'
     #   build_timeout_minutes: 45     # raise for large reactors
