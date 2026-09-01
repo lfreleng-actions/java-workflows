@@ -223,20 +223,27 @@ release tags:
 
 `testing.yaml` calls the Maven and Gradle verify workflows by **local
 path**, so it always validates the current branch. Both self-test jobs
-are gated to `workflow_dispatch` only (skipped on pull requests, keeping
-PR CI green) while one prerequisite is pending:
+run on **every pull request**.
 
-1. Dedicated lightweight fixtures (`test-maven-project` /
-   `test-gradle-project`) exist; the placeholders build large upstream
-   projects and suit a manual run only.
+There is deliberately no `workflow_dispatch` trigger. A manual run
+happens on the default branch, which would hand the job a cache token
+with write access to the default-branch scope while it builds
+third-party code; that code could then poison caches later runs restore
+(CWE-349). Pull request runs write only to their own cache scope. This
+matches `python-workflows`.
 
-The two earlier prerequisites are satisfied: every building-block action
-is pinned to a published release, and the toolchain egress (Maven
-Central, Gradle distribution, Temurin, and the syft and grype tool
-downloads) is in the central harden-runner allow-list as of `.github`
-v0.7.0. The placeholder jobs still run in audit because a large upstream
-project reaches endpoints beyond that toolchain set; a dedicated fixture
-with a known egress footprint can switch them to block mode.
+The Maven lane builds `lfreleng-actions/test-maven-project` under
+`block` egress: the fixture is a three-module reactor whose only
+dependency is JUnit, so its footprint is the allow-listed toolchain set.
+The Gradle lane still builds a pinned upstream project under `audit`
+egress, because no `test-gradle-project` fixture exists yet (issue #50).
+A large upstream project reaches endpoints beyond the toolchain set; a
+dedicated fixture with a known footprint can switch it to block mode.
+
+Every building-block action is pinned to a published release, and the
+toolchain egress (Maven Central, Gradle distribution, Temurin, and the
+syft and grype tool downloads) is in the central harden-runner
+allow-list as of `.github` v0.7.0.
 
 The planned merge and release lanes are out of scope for the self-test
 until they are added: they need a merged-commit or signed semver tag-push
@@ -286,8 +293,8 @@ context that is neither available nor safe on a pull request.
 
 ## Follow-ups
 
-1. Create `test-maven-project` / `test-gradle-project` fixtures and point
-   `testing.yaml` at them.
+1. Create a `test-gradle-project` fixture and point `testing.yaml` at it
+   (issue #50). The Maven fixture is already in use.
 2. Design and implement the merge/release lanes (signing, Nexus2 staging,
    Model B data bus).
 3. Wire the ONAP `cps` Gerrit verify/merge workflows onto these reusable

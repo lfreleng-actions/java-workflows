@@ -7,18 +7,10 @@
 # reusable workflows are referenced by LOCAL path so this always
 # validates the current branch's workflows.
 #
-# The functional self-test runs on workflow_dispatch ONLY (there is no
-# pull_request trigger) while one prerequisite is pending:
-#   1. Dedicated lightweight fixtures (test-maven-project /
-#      test-gradle-project) exist; the placeholders below build large
-#      upstream projects and are suitable for a manual run only.
-# The two earlier prerequisites are satisfied: every building-block
-# action is pinned to a published release, and the toolchain egress
-# (Maven Central, Gradle distribution, Temurin, and the syft and grype
-# tool downloads) is in the central harden-runner allow-list as of
-# .github v0.7.0. Trigger it manually to validate a candidate branch.
-# Once the dedicated fixtures land, add a pull_request trigger so the
-# self-test guards every change automatically.
+# The self-test guards every pull request. The Maven lane builds the
+# dedicated lightweight fixture; the Gradle lane still builds a pinned
+# upstream project because no test-gradle-project fixture exists yet
+# (tracked in issue #50).
 #
 # The planned merge and release lanes are not self-tested here: merge
 # requires a merged-commit context and release requires a signed semver
@@ -28,7 +20,14 @@ name: 'Testing 🧪'
 
 # yamllint disable-line rule:truthy
 on:
-  workflow_dispatch:
+  # No workflow_dispatch: a manual run happens on the default branch,
+  # which would hand this job a cache token with write access to the
+  # default-branch scope while it builds and tests third-party
+  # consumer repositories. Untrusted code from those repositories
+  # could then poison caches that later runs restore (CWE-349).
+  # Pull request runs write only to their own cache scope.
+  pull_request:
+    branches: ['main']
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -37,11 +36,12 @@ concurrency:
 permissions: {}
 
 jobs:
-  # Manual self-test of the Maven verify lane. Audit egress because the
-  # placeholder fixture builds a large upstream project whose full egress
-  # footprint exceeds the allow-listed toolchain set; a dedicated fixture
-  # with a known footprint can switch this to block mode.
-  # TODO: repoint to a lightweight test-maven-project fixture.
+  # Self-test of the Maven verify lane against the dedicated fixture.
+  # The fixture is a three-module reactor (parent/core/app) whose only
+  # dependency is JUnit, so its egress footprint is the allow-listed
+  # toolchain set and block mode applies. Its Failing*Test classes stay
+  # out of this build: the fixture's parent POM excludes them unless the
+  # failing-tests profile is active.
   maven-build-test:
     name: 'Maven Build/Test'
     permissions:
@@ -49,14 +49,13 @@ jobs:
       pull-requests: read  # repository-metadata-action queries PR data
     uses: ./.github/workflows/maven-build-test.yaml
     with:
-      repository: 'apache/maven'
-      # Pin a known-good tag so the manual self-test is repeatable and an
-      # upstream change cannot make this workflow appear broken.
-      ref: 'maven-3.9.9'
-      harden_runner_egress: 'audit'
+      repository: 'lfreleng-actions/test-maven-project'
 
-  # Manual self-test of the Gradle verify lane.
-  # TODO: repoint to a lightweight test-gradle-project fixture.
+  # Self-test of the Gradle verify lane. Audit egress because this
+  # builds a large upstream project whose full egress footprint exceeds
+  # the allow-listed toolchain set; a dedicated fixture with a known
+  # footprint can switch this to block mode.
+  # TODO: repoint to a test-gradle-project fixture once issue #50 lands.
   gradle-build-test:
     name: 'Gradle Build/Test'
     permissions:
@@ -65,6 +64,7 @@ jobs:
     uses: ./.github/workflows/gradle-build-test.yaml
     with:
       repository: 'onap/portal-ng-preferences'
-      # Pin a known-good commit so the manual self-test is repeatable.
+      # Pin a known-good commit so the self-test is repeatable and an
+      # upstream change cannot make this workflow appear broken.
       ref: '2796448b11c66b536ecf1bd0c8ae2271606e85a7'
       harden_runner_egress: 'audit'
