@@ -197,6 +197,7 @@ before this repository wired them together:
 | `gradle-build-action`       | Gradle setup + build (brought to Maven parity) |
 | `junit-test-report-action`  | JUnit XML rendering + check                    |
 | `sbom-action`               | CycloneDX SBOM generation (syft backend)       |
+| `grype-scan-action`         | Vulnerability scan over the generated SBOM     |
 | `maven-xml-settings-action` | Nexus `settings.xml` synthesis (merge lane)    |
 
 The `java-version` input naming was normalised across every build action
@@ -207,17 +208,17 @@ after the fact would be a breaking change.
 
 zizmor's auditor persona rejects `@main`/branch refs (`unpinned-uses`), so
 every `uses:` ref is pinned to a full commit SHA with a `# vX.Y.Z` comment
-naming the release it targets, matching the template convention. All
-building-block actions the verify lane composes are pinned to published
-release tags:
+naming the release it targets, matching the template convention. No
+building-block action the verify lane composes is consumed from an
+unreleased ref: each one had a published release to pin to before the
+workflows depended on it.
 
-| Action                     | Release |
-| -------------------------- | ------- |
-| `build-metadata-action`    | v0.7.0  |
-| `maven-build-action`       | v0.3.0  |
-| `gradle-build-action`      | v0.5.0  |
-| `junit-test-report-action` | v0.0.1  |
-| `sbom-action`              | v0.0.1  |
+The pinned versions themselves are not recorded here. Dependabot
+maintains them (`.github/dependabot.yml`, weekly, `github-actions`
+ecosystem), so a version list in this document would be stale within
+days of writing and would put every bump PR in conflict with the
+documentation. The `# vX.Y.Z` comment beside each `uses:` ref is the
+authoritative record.
 
 ## Self-test approach
 
