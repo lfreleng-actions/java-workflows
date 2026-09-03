@@ -197,6 +197,7 @@ before this repository wired them together:
 | `gradle-build-action`       | Gradle setup + build (brought to Maven parity) |
 | `junit-test-report-action`  | JUnit XML rendering + check                    |
 | `sbom-action`               | CycloneDX SBOM generation (syft backend)       |
+| `grype-scan-action`         | Vulnerability scan over the generated SBOM     |
 | `maven-xml-settings-action` | Nexus `settings.xml` synthesis (merge lane)    |
 
 The `java-version` input naming was normalised across every build action
@@ -207,36 +208,43 @@ after the fact would be a breaking change.
 
 zizmor's auditor persona rejects `@main`/branch refs (`unpinned-uses`), so
 every `uses:` ref is pinned to a full commit SHA with a `# vX.Y.Z` comment
-naming the release it targets, matching the template convention. All
-building-block actions the verify lane composes are pinned to published
-release tags:
+naming the release it targets, matching the template convention. No
+building-block action the verify lane composes is consumed from an
+unreleased ref: each one had a published release to pin to before the
+workflows depended on it.
 
-| Action                     | Release |
-| -------------------------- | ------- |
-| `build-metadata-action`    | v0.7.0  |
-| `maven-build-action`       | v0.3.0  |
-| `gradle-build-action`      | v0.5.0  |
-| `junit-test-report-action` | v0.0.1  |
-| `sbom-action`              | v0.0.1  |
+The pinned versions themselves are not recorded here. Dependabot
+maintains them (`.github/dependabot.yml`, weekly, `github-actions`
+ecosystem), so a version list in this document would be stale within
+days of writing and would put every bump PR in conflict with the
+documentation. The `# vX.Y.Z` comment beside each `uses:` ref is the
+authoritative record.
 
 ## Self-test approach
 
 `testing.yaml` calls the Maven and Gradle verify workflows by **local
 path**, so it always validates the current branch. Both self-test jobs
-are gated to `workflow_dispatch` only (skipped on pull requests, keeping
-PR CI green) while one prerequisite is pending:
+run on **every pull request**.
 
-1. Dedicated lightweight fixtures (`test-maven-project` /
-   `test-gradle-project`) exist; the placeholders build large upstream
-   projects and suit a manual run only.
+There is deliberately no `workflow_dispatch` trigger. A manual run
+happens on the default branch, which would hand the job a cache token
+with write access to the default-branch scope while it builds
+third-party code; that code could then poison caches later runs restore
+(CWE-349). Pull request runs write only to their own cache scope. This
+matches `python-workflows`.
 
-The two earlier prerequisites are satisfied: every building-block action
-is pinned to a published release, and the toolchain egress (Maven
-Central, Gradle distribution, Temurin, and the syft and grype tool
-downloads) is in the central harden-runner allow-list as of `.github`
-v0.7.0. The placeholder jobs still run in audit because a large upstream
-project reaches endpoints beyond that toolchain set; a dedicated fixture
-with a known egress footprint can switch them to block mode.
+The Maven lane builds `lfreleng-actions/test-maven-project` under
+`block` egress: the fixture is a three-module reactor whose only
+dependency is JUnit, so its footprint is the allow-listed toolchain set.
+The Gradle lane still builds a pinned upstream project under `audit`
+egress, because no `test-gradle-project` fixture exists yet (issue #50).
+A large upstream project reaches endpoints beyond the toolchain set; a
+dedicated fixture with a known footprint can switch it to block mode.
+
+Every building-block action is pinned to a published release, and the
+toolchain egress (Maven Central, Gradle distribution, Temurin, and the
+syft and grype tool downloads) is in the central harden-runner
+allow-list as of `.github` v0.7.0.
 
 The planned merge and release lanes are out of scope for the self-test
 until they are added: they need a merged-commit or signed semver tag-push
@@ -286,8 +294,8 @@ context that is neither available nor safe on a pull request.
 
 ## Follow-ups
 
-1. Create `test-maven-project` / `test-gradle-project` fixtures and point
-   `testing.yaml` at them.
+1. Create a `test-gradle-project` fixture and point `testing.yaml` at it
+   (issue #50). The Maven fixture is already in use.
 2. Design and implement the merge/release lanes (signing, Nexus2 staging,
    Model B data bus).
 3. Wire the ONAP `cps` Gerrit verify/merge workflows onto these reusable

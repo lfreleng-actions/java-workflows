@@ -414,7 +414,7 @@ jobs:
       - name: 'Build with Maven'
         id: build
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-build-action@4fe48909bcb696f286d83b197d84fbb64b4e020e  # v0.4.0
+        uses: lfreleng-actions/maven-build-action@3c48aed21aa422b16e1a15f31adbb2331aa59e83  # v0.4.2
         with:
           path_prefix: ${{ inputs.path_prefix }}
           # Caller override wins, else the detected version, else 21.
