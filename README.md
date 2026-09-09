@@ -101,10 +101,10 @@ run → report vote for verify), never inside the reusable workflows.
 [`.github/workflows/testing.yaml`](.github/workflows/testing.yaml)
 exercises the Maven and Gradle verify workflows through their local
 paths, so it validates the current branch. Both self-test jobs run on
-`workflow_dispatch` and stay skipped on pull requests until one
-prerequisite lands: dedicated lightweight fixtures. The released action
-pins and the toolchain egress endpoints in the central harden-runner
-allow-list (as of `.github` v0.7.0) are already in place. See
+every pull request. The Maven lane builds the dedicated
+`test-maven-project` fixture under `block` egress; the Gradle lane
+still builds a pinned upstream project under `audit` egress because no
+`test-gradle-project` fixture exists yet (issue #50). See
 [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
 
 ## Design
