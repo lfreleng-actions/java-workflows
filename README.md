@@ -27,10 +27,10 @@ subfolder:
 
 <!-- markdownlint-disable MD013 -->
 
-| Workflow                                           | Toolchain | Purpose                          | Caller trigger       |
-| -------------------------------------------------- | --------- | -------------------------------- | -------------------- |
-| `.github/workflows/maven-build-test.yaml`          | Maven     | Build, test, SBOM and Grype scan | Pull request         |
-| `.github/workflows/gradle-build-test.yaml`         | Gradle    | Build, test, SBOM and Grype scan | Pull request         |
+| Workflow                                           | Toolchain | Purpose                                | Caller trigger       |
+| -------------------------------------------------- | --------- | -------------------------------------- | -------------------- |
+| `.github/workflows/maven-build-test.yaml`          | Maven     | Build, test, SBOM/Grype scan and CBOM  | Pull request         |
+| `.github/workflows/gradle-build-test.yaml`         | Gradle    | Build, test, SBOM/Grype scan and CBOM  | Pull request         |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -42,12 +42,12 @@ their own. "Caller trigger" is the event on which the shipped
 
 The `maven-build-test.yaml` and `gradle-build-test.yaml` workflows are
 complete. A `repository-metadata` job runs in parallel as an
-informational step that does not gate the build. After `build`, the test
-and SBOM/Grype branches run in parallel (jobs in `{ }` run concurrently;
-`->` denotes sequence):
+informational step that does not gate the build. After `build`, the
+test, SBOM/Grype and CBOM branches run in parallel (jobs in `{ }` run
+concurrently; `->` denotes sequence):
 
 ```text
-build -> { tests | sbom -> grype }
+build -> { tests | sbom -> grype | cbom }
 ```
 
 The `build` job detects the project's Java version through
@@ -64,6 +64,60 @@ The generic template's standalone `audit` job does not appear here: on
 the JVM, dependency-risk auditing is the SBOM/Grype chain plus the
 separate Sonatype CLM lane, and the build tool (`surefire`/`failsafe` or
 the Gradle `test` task) runs the tests as part of its own lifecycle.
+
+### CBOM (informational)
+
+The `cbom` job runs `cbom-action` to produce a CycloneDX Cryptography
+Bill of Materials: the algorithms, key sizes, modes, protocols and
+certificates the code actually calls. An SBOM cannot express that, and
+a CBOM is what post-quantum readiness assessments read.
+
+**It never fails the workflow run.** The job sets `continue-on-error`
+and pins the action's `fail_on_error` to `false`, so a scanner error, a
+rejected input, or the job timeout all leave the run green. That covers
+the whole leg on purpose — there is no `cbom_permit_fail` input,
+because the report is advisory by contract rather than by configuration.
+Set `cbom_enabled: false` to drop the job entirely.
+
+It runs in parallel with the test and SBOM legs and gates nothing, so it
+never delays another job. The run as a whole still waits for it, as it
+does for every job, so a scan that outlasts every other branch extends
+the total; `cbom_timeout_minutes` bounds that. In the self-test it takes
+30–40 seconds, well inside the build. `needs: build` orders it
+after the build; it does its own checkout and reads no build output.
+
+One accuracy caveat follows from that. The scanner resolves Java symbols
+from compiled classes and dependency jars where it finds them, and this
+job scans a tree it has not built, so it resolves fewer symbols than a
+scan over a built reactor would. Read the asset count as a floor.
+
+CBOM files upload as `cbom-files-maven` / `cbom-files-gradle` with 45-day
+retention, matching the SBOM artefacts. The job writes reports under
+`RUNNER_TEMP`, never the workspace, so a project that tracks its own
+`cbom.json` keeps it. The scanner image is a digest pinned inside
+`cbom-action`, so it moves when the action pin moves rather than
+through a workflow input.
+
+**Known limitation.** The CBOM's metadata block (repository URL, branch,
+commit) comes from the workflow run's own context, so it names the
+*calling* repository and commit. Where `repository` or `ref` points at a
+different tree, and on a Gerrit-sourced run where the checked-out change
+is not the mirror commit, that metadata describes the caller rather than
+the source scanned. This does not touch the cryptographic findings themselves.
+Fixing it needs explicit metadata inputs on `cbom-action`.
+
+<!-- markdownlint-disable MD013 -->
+
+| Name                   | Type    | Default | Description                                                                              |
+| ---------------------- | ------- | ------- | ---------------------------------------------------------------------------------------- |
+| `cbom_enabled`         | boolean | `true`  | Generate a CBOM (set false to skip the job)                                              |
+| `cbom_languages`       | string  | `''`    | Comma-separated languages to scan (`java`, `python`, `go`, `csharp`); empty auto-detects |
+| `cbom_exclude`         | string  | `''`    | Comma-separated Java regex patterns to exclude; empty skips test sources                 |
+| `cbom_module_cboms`    | boolean | `true`  | Emit a per-module CBOM alongside the consolidated one                                    |
+| `cbom_empty_cboms`     | boolean | `true`  | Write CBOM files even when the scan finds no cryptographic assets                        |
+| `cbom_timeout_minutes` | number  | `30`    | Timeout for the CBOM job, covering the container image pull as well as the scan          |
+
+<!-- markdownlint-enable MD013 -->
 
 ## Usage
 
