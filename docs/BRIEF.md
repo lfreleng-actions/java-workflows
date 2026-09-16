@@ -222,8 +222,13 @@ authoritative record.
 
 ## Self-test approach
 
-`testing.yaml` calls the Maven and Gradle verify workflows by **local
-path**, so it always validates the current branch. Both self-test jobs
+`testing.yaml` calls the Maven and Gradle verify workflows by
+**self-repository path** (`uses: $/.github/workflows/...`), which
+resolves this repository at the commit already running. GitHub added
+the form in July 2026 and recommends it for a workflow in the same
+repository; it replaced the `./` path this brief first recorded, which
+resolves identically. Either way the self-test always validates the
+current branch. Both self-test jobs
 run on **every pull request**.
 
 There is deliberately no `workflow_dispatch` trigger. A manual run
