@@ -153,8 +153,10 @@ run → report vote for verify), never inside the reusable workflows.
 ## Testing
 
 [`.github/workflows/testing.yaml`](.github/workflows/testing.yaml)
-exercises the Maven and Gradle verify workflows through their local
-paths, so it validates the current branch. Both self-test jobs run on
+exercises the Maven and Gradle verify workflows by self-repository path
+(`uses: $/.github/workflows/maven-build-test.yaml` and its Gradle
+counterpart), which resolves this repository at the commit already
+running, so it validates the current branch. Both self-test jobs run on
 every pull request. The Maven lane builds the dedicated
 `test-maven-project` fixture under `block` egress; the Gradle lane
 still builds a pinned upstream project under `audit` egress because no
