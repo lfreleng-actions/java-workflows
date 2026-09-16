@@ -4,8 +4,10 @@
 
 # Exercises the reusable Maven and Gradle build/test (verify) workflows
 # in this repository against downstream fixture repositories. The
-# reusable workflows are referenced by LOCAL path so this always
-# validates the current branch's workflows.
+# reusable workflows are referenced with the self-repository form
+# ('$/'), which resolves this repository at the commit already
+# running, so the workflows under test are always the ones this
+# branch defines.
 #
 # The self-test guards every pull request. The Maven lane builds the
 # dedicated lightweight fixture; the Gradle lane still builds a pinned
@@ -47,7 +49,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
-    uses: ./.github/workflows/maven-build-test.yaml
+    uses: $/.github/workflows/maven-build-test.yaml
     with:
       repository: 'lfreleng-actions/test-maven-project'
 
@@ -61,7 +63,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: read  # repository-metadata-action queries PR data
-    uses: ./.github/workflows/gradle-build-test.yaml
+    uses: $/.github/workflows/gradle-build-test.yaml
     with:
       repository: 'onap/portal-ng-preferences'
       # Pin a known-good commit so the self-test is repeatable and an
