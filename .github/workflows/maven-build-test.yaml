@@ -727,6 +727,45 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
+      # sbom-action runs whichever mvn is on PATH, so install the Maven
+      # the build job provisions: a pinned version (Maven 4, or one a
+      # build extension requires) resolves differently from the runner
+      # image's. Same installer and pin as maven-build-action. Its
+      # checkout is off because this job checked out already, and its
+      # cache is off because this job resolves over the change under
+      # test and should write nothing later runs restore.
+      - name: 'Provision Maven'
+        # yamllint disable-line rule:line-length
+        uses: s4u/setup-maven-action@4a02cbd99769e46198135c31d5097c94618ba3f5  # v1.21.0
+        with:
+          checkout-enabled: false
+          cache-enabled: false
+          # yamllint disable-line rule:line-length
+          java-version: ${{ inputs.java_version != '' && inputs.java_version || needs.build.outputs.java_version || '21' }}
+          maven-version: ${{ inputs.mvn_version }}
+
+      # The same global settings the build uses, since they can define
+      # the mirrors and repositories resolution reaches: without them
+      # the SBOM could resolve a different graph, or none. Written to a
+      # private file under RUNNER_TEMP only when the secret is set, and
+      # removed by the cleanup step below whatever happens.
+      - name: 'Install Maven global settings'
+        id: settings
+        shell: bash
+        env:
+          GLOBAL_SETTINGS: ${{ secrets.maven_global_settings }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GLOBAL_SETTINGS}" ]; then
+            echo 'arg=' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          umask 077
+          file="$(mktemp "${RUNNER_TEMP}/sbom-global-settings.XXXXXXXXXX")"
+          printf '%s' "${GLOBAL_SETTINGS}" > "${file}"
+          echo "arg=--global-settings ${file}" >> "${GITHUB_OUTPUT}"
+          echo "path=${file}" >> "${GITHUB_OUTPUT}"
+
       # Generate the CycloneDX SBOM from Maven's resolved dependency
       # graph (cyclonedx-maven-plugin makeAggregateBom), not from the
       # pom.xml text. A pom.xml is an input to resolution, so a static
@@ -743,10 +782,9 @@ jobs:
       # as untrusted and skips, and a skip here would fail the upload
       # below and lose the SBOM. That guard buys nothing in this
       # workflow: the build job already runs Maven, the compiler and
-      # the tests over this same checkout with the same read-only
-      # token, and holds the global settings secret besides, which
-      # this job never receives. Maven here grants the checked-out code
-      # no reach it lacks there.
+      # the tests over this same checkout, with the same read-only
+      # token and the same global settings. Maven here grants the
+      # checked-out code no reach it lacks there.
       - name: 'Generate SBOM'
         id: sbom
         # yamllint disable-line rule:line-length
@@ -761,11 +799,21 @@ jobs:
           # set by its metadata step, before any build failure.
           # yamllint disable-line rule:line-length
           java_version: ${{ inputs.java_version != '' && inputs.java_version || needs.build.outputs.java_version || '21' }}
-          # Profiles can add modules and dependencies, so the SBOM
-          # activates the ones the build does.
+          # Resolve the graph the build resolves: the same profiles,
+          # global settings and parameters, since each can add modules,
+          # repositories or dependency versions. maven-build-action also
+          # expands workspace variables such as ${GITHUB_WORKSPACE} in
+          # mvn_params; this path passes them to Maven unexpanded.
           # yamllint disable-line rule:line-length
-          maven_args: ${{ inputs.mvn_profiles != '' && format('-P{0}', inputs.mvn_profiles) || '' }}
+          maven_args: ${{ format('{0} {1} {2}', inputs.mvn_profiles != '' && format('-P{0}', inputs.mvn_profiles) || '', steps.settings.outputs.arg, inputs.mvn_params) }}
           untrusted_checkout: 'false'
+
+      - name: 'Remove Maven global settings'
+        if: always() && steps.settings.outputs.path != ''
+        shell: bash
+        env:
+          SETTINGS_FILE: ${{ steps.settings.outputs.path }}
+        run: rm -f -- "${SETTINGS_FILE}"
 
       - name: 'Upload SBOM artifacts'
         # yamllint disable-line rule:line-length

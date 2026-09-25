@@ -65,6 +65,11 @@ jobs:
   sbom-check:
     name: 'SBOM Check (${{ matrix.lane }})'
     needs: [maven-build-test, gradle-build-test]
+    # Runs whatever the lanes' verdicts. A lane fails on any job,
+    # Grype included, and gating on that would let a CVE in a fixture
+    # hide the very check that proves the SBOM is complete. A row whose
+    # SBOM never uploaded still fails, at the download.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
@@ -146,3 +151,9 @@ jobs:
       # upstream change cannot make this workflow appear broken.
       ref: '2796448b11c66b536ecf1bd0c8ae2271606e85a7'
       harden_runner_egress: 'audit'
+      # Report Grype findings without failing on them. This job tests
+      # the workflow, not an upstream project's dependency hygiene, and
+      # a pinned upstream commit only accumulates advisories as they
+      # are published: the resolved-graph SBOM surfaces them all. The
+      # Maven fixture is ours, so its lane keeps the gate strict.
+      grype_permit_fail: true

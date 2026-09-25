@@ -166,9 +166,13 @@ infer it.
 
 `cyclonedx-gradle-plugin` needs Gradle 8.4 or newer, rising with the
 JDK (8.5 on the default Java 21). Below that floor the backend skips
-and writes no document. The Gradle lane passes the wrapper's version
-from `build-metadata-action`, since the SBOM job runs the project's
-wrapper rather than the Gradle the build job provisions, so the check
+and writes no document. The SBOM job runs the same Gradle the build
+does. By default that is the project's wrapper, whose version
+`build-metadata-action` reports. When a caller pins `gradle_version`,
+the build runs a provisioned Gradle instead, so the SBOM job
+provisions the exact version the build resolved and removes `gradlew`
+from its own checkout, since `sbom-action` always prefers the wrapper.
+Either way the lane passes that version to the floor check, which then
 settles before anything downloads. A skip raises a warning and a job
 summary line, uploads nothing and skips Grype, rather than failing the
 upload on a missing file and misattributing an old Gradle to a broken
@@ -180,10 +184,20 @@ scripts, so the checkout is executable input. The action's
 `untrusted_checkout: auto` would skip on a fork pull request, losing the
 SBOM, and cannot recognise a Gerrit change at all. The workflows set
 `untrusted_checkout: 'false'` instead: each build job already runs the
-same build over the same checkout with the same read-only token, so the
-SBOM job exposes nothing the build job does not. The SBOM job resolves
-the same Java version as the build, and the Maven lane activates the
-same `mvn_profiles`, since profiles can change the dependency set.
+same build over the same checkout with the same read-only token and
+settings, so the SBOM job exposes nothing the build job does not.
+
+The SBOM job resolves the graph the build resolves. It uses the same
+Java version, and the Maven lane provisions the same `mvn_version`
+(`sbom-action` runs whichever `mvn` is on `PATH`) and passes the same
+`mvn_profiles`, `mvn_params` and `maven_global_settings`, since each
+can add modules, repositories or dependency versions. The Gradle lane
+forwards the property options in `build_arguments` (`-P`/`-D` and their
+long forms), leaving out tasks and other flags. The settings secret is
+written to a private file under `RUNNER_TEMP` only when set, and
+removed on `always()`. One difference remains: `maven-build-action`
+expands workspace variables such as `${GITHUB_WORKSPACE}` in
+`mvn_params`, and the SBOM path passes them to Maven unexpanded.
 
 ## No dedicated java-audit-action or java-test-action
 
@@ -288,9 +302,18 @@ allow-listed toolchain set. An `sbom-check` matrix job then asserts,
 for each lane, that the SBOM holds one dependency whose version comes
 from an imported BOM and one that arrives only transitively, both with
 real versions (`jackson-databind` and `jackson-core` for Maven; the
-webflux starter and `spring-core` for Gradle). Neither fixture yields
-Grype findings to fail on, so without that assertion both lanes would
-stay green whatever their SBOMs contained.
+webflux starter and `spring-core` for Gradle). A passing Grype scan
+proves nothing about completeness: the Maven fixture has no advisories
+to find, and a near-empty SBOM scans clean. Without that assertion
+both lanes would stay green whatever their SBOMs contained. The check
+runs whatever the lanes' verdicts, so a Grype failure cannot hide it.
+
+The Gradle lane sets `grype_permit_fail`: its upstream project's
+resolved graph carries published advisories (Netty, Jackson, PostgreSQL
+and others, reached through Spring Boot), and a pinned upstream commit
+only accumulates more. The job tests the workflow, not that project's
+dependency hygiene, so it reports those findings without failing on
+them. The Maven fixture is ours, and its gate stays strict.
 The Gradle lane still builds a pinned upstream project under `audit`
 egress, because no `test-gradle-project` fixture exists yet (issue #50).
 A large upstream project reaches endpoints beyond the toolchain set; a

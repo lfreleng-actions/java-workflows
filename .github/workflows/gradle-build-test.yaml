@@ -380,8 +380,8 @@ jobs:
       java_version: ${{ steps.metadata.outputs.java_version }}
       gradle_version: ${{ steps.build.outputs['gradle-version'] }}
       # The version the project's wrapper declares. The SBOM job runs
-      # the wrapper rather than the Gradle provisioned here, so this is
-      # the version its plugin floor check must weigh.
+      # the wrapper unless gradle_version pins another, so this is the
+      # version its plugin floor check must weigh by default.
       wrapper_gradle_version: ${{ steps.metadata.outputs.java_gradle_version }}
       reports_found: ${{ steps.reports.outputs.found }}
     permissions:
@@ -669,6 +669,83 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
+      # When the caller pins gradle_version, the build job runs that
+      # provisioned Gradle rather than the wrapper, so this job must too
+      # or it would resolve (or skip) under a different version.
+      # sbom-action always prefers an executable ./gradlew, so provision
+      # the version the build resolved (exact, so 'current' cannot
+      # drift between jobs) and remove the wrapper from this job's own
+      # checkout, which nothing else reads, leaving 'gradle' on PATH.
+      - name: 'Provision pinned Gradle'
+        if: inputs.gradle_version != ''
+        # yamllint disable-line rule:line-length
+        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb  # v6.3.0
+        with:
+          # yamllint disable-line rule:line-length
+          gradle-version: ${{ needs.build.outputs.gradle_version || inputs.gradle_version }}
+          # A one-shot resolution over the change under test: write no
+          # cache for later runs to restore.
+          cache-disabled: 'true'
+          add-job-summary: 'never'
+      - name: 'Use the pinned Gradle, not the wrapper'
+        if: inputs.gradle_version != ''
+        shell: bash
+        env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+        run: rm -f -- "${PATH_PREFIX}/gradlew"
+
+      # build_arguments mixes tasks with options, and the options can
+      # select dependencies: a project property choosing a variant, or
+      # a system property pinning a version. Forward those, split the
+      # way gradle-build-action splits them, so the SBOM describes the
+      # graph the build resolved. Task names and other options stay
+      # out: the SBOM job runs its own task.
+      #
+      # Options selecting another project, settings file, build file,
+      # init script or included build fail the job instead. Dropping
+      # one would have the SBOM describe a different project from the
+      # one built, under the same name, and sbom-action rejects them
+      # for the same reason. The patterns match its own, in every
+      # spelling. path_prefix is the supported way to choose a project.
+      - name: 'Select Gradle resolution options'
+        id: gradle-args
+        shell: bash
+        env:
+          BUILD_ARGUMENTS: ${{ inputs.build_arguments }}
+        run: |
+          set -euo pipefail
+          words=()
+          if [ -n "${BUILD_ARGUMENTS}" ]; then
+            read -r -a words <<< "${BUILD_ARGUMENTS}"
+          fi
+          keep=()
+          take_value='no'
+          for word in "${words[@]}"; do
+            if [ "${take_value}" = 'yes' ]; then
+              keep+=("${word}")
+              take_value='no'
+              continue
+            fi
+            case "${word}" in
+              -p|-p?*|--project-dir|--project-dir=*|\
+              -c|-c?*|--settings-file|--settings-file=*|\
+              -b|-b?*|--build-file|--build-file=*|\
+              -I|-I?*|--init-script|--init-script=*|\
+              --include-build|--include-build=*)
+                echo "::error::build_arguments selects another project," \
+                  "settings, build file or init script, so the SBOM" \
+                  "cannot describe the build. Use path_prefix to choose" \
+                  "the project."
+                exit 1 ;;
+              -P|-D|--project-prop|--system-prop)
+                keep+=("${word}")
+                take_value='yes' ;;
+              -P?*|-D?*|--project-prop=*|--system-prop=*)
+                keep+=("${word}") ;;
+            esac
+          done
+          echo "args=${keep[*]:-}" >> "${GITHUB_OUTPUT}"
+
       # Generate the CycloneDX SBOM from Gradle's resolved dependency
       # graph: an init script applies cyclonedx-gradle-plugin and runs
       # cyclonedxBom on the root project, covering every subproject.
@@ -700,8 +777,12 @@ jobs:
           # set by its metadata step, before any build failure.
           # yamllint disable-line rule:line-length
           java_version: ${{ inputs.java_version != '' && inputs.java_version || needs.build.outputs.java_version || '21' }}
-          # Settles the plugin's Gradle floor before anything downloads.
-          gradle_version: ${{ needs.build.outputs.wrapper_gradle_version }}
+          # Settles the plugin's Gradle floor before anything downloads:
+          # the pinned version when the caller set one, else the
+          # version the project's wrapper declares.
+          # yamllint disable-line rule:line-length
+          gradle_version: ${{ inputs.gradle_version != '' && (needs.build.outputs.gradle_version || inputs.gradle_version) || needs.build.outputs.wrapper_gradle_version }}
+          gradle_args: ${{ steps.gradle-args.outputs.args }}
           untrusted_checkout: 'false'
 
       # cyclonedx-gradle-plugin needs Gradle 8.4 or newer, and more on
