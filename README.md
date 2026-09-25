@@ -66,6 +66,24 @@ project without a `gradle.lockfile` (issues #47 and #48). A Gradle
 wrapper older than the plugin supports (8.4, or 8.5 on Java 21) skips
 the SBOM and Grype with a warning rather than failing the run.
 
+The Maven `build` job passes `mvn_opts`, `mvn_pom_file` and `env_vars`
+through to `maven-build-action`; each empty value keeps the action's
+default. Java detection reads the selected POM's directory, and a POM
+not named `pom.xml` requires `java_version`. The SBOM job resolves the
+graph the build resolves, so it receives `mvn_opts` alongside
+`mvn_profiles` and `mvn_params`, and exports the same `env_vars`. It
+resolves `path_prefix/pom.xml`, and fails when `mvn_pom_file` names
+another POM rather than describe a different project; set `path_prefix`
+to that POM's directory instead. `env_vars` takes a JSON object of named
+variables in place of `toJSON(vars)`. The export upper-cases each name
+and skips one whose variable already holds a non-empty value; it
+overwrites a variable that is present but empty. The SBOM job fails on
+a name that is not an ASCII identifier, and on one that either Maven
+step sets itself, such as `MAVEN_ARGS`. Both lanes take
+`checkout_submodules` (default `false`), which checks out submodules in
+every job that checks out the repository, including those a Gerrit
+change adds.
+
 The generic template's standalone `audit` job does not appear here: on
 the JVM, dependency-risk auditing is the SBOM/Grype chain plus the
 separate Sonatype CLM lane, and the build tool (`surefire`/`failsafe` or
@@ -166,7 +184,12 @@ running, so it validates the current branch. Both self-test jobs run on
 every pull request. The Maven lane builds the dedicated
 `test-maven-project` fixture under `block` egress; the Gradle lane
 still builds a pinned upstream project under `audit` egress because no
-`test-gradle-project` fixture exists yet (issue #50). See
+`test-gradle-project` fixture exists yet (issue #50). A
+`pass-through-check` job proves the Maven lane's `mvn_opts` and
+`env_vars` reach both the build and the SBOM, and a `pom-check` job
+proves a second Maven call builds the `mvn_pom_file` it names. A
+`wiring-check` job runs `.github/scripts/wiring-check.sh` to test the
+guard steps and the submodule wiring the fixtures cannot exercise. See
 [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
 
 ## Design

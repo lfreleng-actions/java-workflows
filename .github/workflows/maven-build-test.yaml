@@ -38,6 +38,15 @@ on:
         required: false
         type: string
         default: ''
+      checkout_submodules:
+        description: >-
+          Check out git submodules in every job that checks out the
+          repository, on the Gerrit and plain checkout paths alike, so
+          the build, SBOM and CBOM all see modules a submodule carries.
+          The Gerrit path also initialises submodules the change adds.
+        required: false
+        type: boolean
+        default: false
 
       # --- Project layout ---
       path_prefix:
@@ -74,6 +83,45 @@ on:
         required: false
         type: string
         default: ''
+      mvn_opts:
+        description: >-
+          Maven options for the build (maven-build-action mvn-opts),
+          placed on the mvn command line ahead of mvn_params, for
+          example '-Dmaven.repo.local=/tmp/r -Dkaraf.keep.unpack'.
+          Non-empty replaces the action's default options, which set
+          maven.repo.local and the Pax URL local repository to /tmp/r
+          and quiet transfer logging; empty keeps them. The SBOM job
+          receives the value too.
+        required: false
+        type: string
+        default: ''
+      mvn_pom_file:
+        description: >-
+          POM to build, relative to path_prefix (maven-build-action
+          mvn-pom-file). Empty means pom.xml. Java detection reads the
+          selected POM's directory; a POM not named pom.xml requires
+          java_version. The SBOM job resolves path_prefix/pom.xml, so it
+          fails when this names another POM rather than describe a
+          different project. For a pom.xml in a subdirectory, set
+          path_prefix to that directory instead.
+        required: false
+        type: string
+        default: ''
+      env_vars:
+        description: >-
+          JSON object of named variables exported to the environment of
+          the build (maven-build-action env-vars) and of the SBOM job,
+          which resolves the same graph, for example '{"MY_FLAG": "1"}'.
+          Names are upper-cased. A name whose variable already holds a
+          non-empty value is skipped; an empty one is overwritten. The
+          SBOM job fails on a name that is not an ASCII identifier, and
+          on one either Maven step sets itself, such as MAVEN_ARGS.
+          Name each variable rather than
+          passing toJSON(vars), which exports every repository
+          variable. Inputs are not masked, so never pass secrets.
+        required: false
+        type: string
+        default: '{}'
       run_jacoco:
         description: 'Run JaCoCo coverage during the build'
         required: false
@@ -375,6 +423,18 @@ jobs:
           delay: '0s'
           repository: ${{ inputs.repository || github.repository }}
           ref: refs/heads/${{ inputs.gerrit_branch }}
+          submodules: ${{ inputs.checkout_submodules }}
+      # checkout-gerrit-change-action v1.1.0 initialises submodules on
+      # the base branch, then runs a plain git submodule update after
+      # switching to the change, which skips any submodule the change
+      # adds or moves. Initialise them here; see docs/BRIEF.md.
+      - name: 'Initialise Gerrit change submodules'
+        if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync
+          git submodule update --init
       - name: 'Checkout repository'
         if: inputs.gerrit_refspec == ''
         # yamllint disable-line rule:line-length
@@ -384,6 +444,7 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
           persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
 
       - name: 'Gather repository metadata'
         id: repo-metadata
@@ -451,6 +512,18 @@ jobs:
           delay: '0s'
           repository: ${{ inputs.repository || github.repository }}
           ref: refs/heads/${{ inputs.gerrit_branch }}
+          submodules: ${{ inputs.checkout_submodules }}
+      # checkout-gerrit-change-action v1.1.0 initialises submodules on
+      # the base branch, then runs a plain git submodule update after
+      # switching to the change, which skips any submodule the change
+      # adds or moves. Initialise them here; see docs/BRIEF.md.
+      - name: 'Initialise Gerrit change submodules'
+        if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync
+          git submodule update --init
       - name: 'Checkout repository'
         if: inputs.gerrit_refspec == ''
         # yamllint disable-line rule:line-length
@@ -459,6 +532,7 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
           persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
 
       # Detect Java/Maven project metadata: Java version (including
       # maven.compiler.release plus parent/reactor resolution), module
@@ -466,12 +540,47 @@ jobs:
       # build pick the Java version when the caller does not pin one.
       # The action takes no github_summary input; one was passed here
       # until it was noticed in the run annotations, ignored throughout.
+      #
+      # It reads the pom.xml in the directory it is given, so point it
+      # at the directory of the POM the build runs. It cannot read a
+      # POM under any other name, and would then report on whichever
+      # pom.xml sits beside it, so that case requires java_version.
+      - name: 'Locate the POM for metadata'
+        id: pom
+        shell: bash
+        env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+          MVN_POM_FILE: ${{ inputs.mvn_pom_file }}
+          JAVA_VERSION: ${{ inputs.java_version }}
+        run: |
+          set -euo pipefail
+          case "${PATH_PREFIX}${MVN_POM_FILE}" in
+            *$'\n'* | *$'\r'*)
+              echo '::error::path_prefix and mvn_pom_file may not hold' \
+                'a line break.'
+              exit 1 ;;
+          esac
+          pom="${MVN_POM_FILE:-pom.xml}"
+          dir="$(dirname -- "${pom}")"
+          metadata_path="${PATH_PREFIX}"
+          if [ "$(basename -- "${pom}")" != 'pom.xml' ]; then
+            if [ -z "${JAVA_VERSION}" ]; then
+              echo "::error::mvn_pom_file names a POM build-metadata-action" \
+                "cannot read, so the Java version cannot come from it." \
+                "Set java_version."
+              exit 1
+            fi
+          elif [ "${dir}" != '.' ]; then
+            metadata_path="${PATH_PREFIX}/${dir}"
+          fi
+          printf 'metadata_path=%s\n' "${metadata_path}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Detect build metadata'
         id: metadata
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/build-metadata-action@37764159ab25aac45d0a04edf78935877c0283f5  # v0.8.2
         with:
-          path_prefix: ${{ inputs.path_prefix }}
+          path_prefix: ${{ steps.pom.outputs.metadata_path }}
 
       - name: 'Build with Maven'
         id: build
@@ -490,6 +599,20 @@ jobs:
           # verdict to the tests job's report gate.
           # yamllint disable-line rule:line-length
           mvn-params: ${{ inputs.test_permit_fail && format('{0} -Dmaven.test.failure.ignore=true', inputs.mvn_params) || inputs.mvn_params }}
+          # A composite action applies an input default only when the
+          # input is absent, never when it arrives empty, so each empty
+          # value below falls back to the action's own default. The
+          # mvn-opts fallback restates maven-build-action v0.4.3's
+          # default verbatim: it keeps the /tmp/r local repository
+          # every existing caller builds with. Recheck it when the pin
+          # above moves.
+          # yamllint disable-line rule:line-length
+          mvn-opts: ${{ inputs.mvn_opts != '' && inputs.mvn_opts || '-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn -Dmaven.repo.local=/tmp/r -Dorg.ops4j.pax.url.mvn.localRepository=/tmp/r' }}
+          # yamllint disable-line rule:line-length
+          mvn-pom-file: ${{ inputs.mvn_pom_file != '' && inputs.mvn_pom_file || 'pom.xml' }}
+          # vars-to-env-action requires a JSON document, and '{}' is
+          # the empty one.
+          env-vars: ${{ inputs.env_vars != '' && inputs.env_vars || '{}' }}
           global-settings: ${{ secrets.maven_global_settings }}
           run-jacoco: ${{ inputs.run_jacoco }}
 
@@ -706,6 +829,98 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
+      # sbom-action resolves path_prefix/pom.xml and rejects -f/--file,
+      # since an alternate POM would escape the directory it validated.
+      # A build of any other POM would leave this job describing a
+      # different project from the one built, under the same name, so
+      # fail rather than upload it. The Gradle lane fails the same way
+      # on its project-selection options. Runs first: it needs no
+      # checkout, so a mismatch costs nothing.
+      - name: 'Require the POM the SBOM resolves'
+        shell: bash
+        env:
+          MVN_POM_FILE: ${{ inputs.mvn_pom_file }}
+        run: |
+          set -euo pipefail
+          pom="${MVN_POM_FILE}"
+          while [ "${pom#./}" != "${pom}" ]; do
+            pom="${pom#./}"
+          done
+          case "${pom}" in
+            '' | 'pom.xml') exit 0 ;;
+          esac
+          # Escape the workflow-command metacharacters, % first, so the
+          # value cannot end the annotation and start another command.
+          shown="${MVN_POM_FILE//'%'/'%25'}"
+          shown="${shown//$'\r'/'%0D'}"
+          shown="${shown//$'\n'/'%0A'}"
+          echo "::error::mvn_pom_file selects '${shown}', but the" \
+            "SBOM job resolves path_prefix/pom.xml, so the SBOM would" \
+            "not describe the build. Set path_prefix to the directory" \
+            "holding the POM, or set sbom_enabled: false."
+          exit 1
+
+      # env_vars reaches resolution: a profile can activate on an
+      # env.* property, a POM can read one into a version, and
+      # MAVEN_OPTS carries system properties into Maven. The export
+      # below repeats the build job's, so this job must be able to
+      # reproduce it. A name that either Maven step sets itself would
+      # hold one value there and the exported value here, or the
+      # reverse: sbom-action's generate step forces MAVEN_ARGS empty,
+      # for one. Fail on those rather than resolve another graph. The
+      # lists come from sbom-action v0.2.0 and maven-build-action
+      # v0.4.3; recheck them when either pin moves.
+      - name: 'Require an environment the SBOM can reproduce'
+        shell: bash
+        env:
+          ENV_VARS: ${{ inputs.env_vars }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ENV_VARS}" ]; then
+            exit 0
+          fi
+          if ! jq -e 'type == "object"' <<< "${ENV_VARS}" > /dev/null; then
+            echo '::error::env_vars must be a JSON object of named' \
+              'variables.'
+            exit 1
+          fi
+          # vars-to-env-action upper-cases each name with JavaScript's
+          # toUpperCase(), which maps some non-ASCII letters onto ASCII
+          # ones: 'maven_arg\u017f' exports as MAVEN_ARGS. jq's
+          # ascii_upcase leaves them, so such a name would pass the
+          # comparison below. Reject every name that is not an ASCII
+          # identifier, since both upper-case those alike. The count
+          # keeps the names themselves out of the annotation.
+          invalid="$(jq -r '[keys[]
+            | select(test("\\A[A-Za-z_][A-Za-z0-9_]*\\z") | not)]
+            | length' <<< "${ENV_VARS}")"
+          if [ "${invalid}" != '0' ]; then
+            echo "::error::env_vars holds ${invalid} name(s) that are" \
+              'not ASCII identifiers ([A-Za-z_][A-Za-z0-9_]*).'
+            exit 1
+          fi
+          reserved=' MAVEN_ARGS BACKEND DEPENDENCY_MANAGER SKIPPED'
+          reserved+=' SKIP_REASON SYFT_CMD PROJECT_DIR SBOM_FORMAT'
+          reserved+=' SPEC_VERSION FILENAME_PREFIX OUTPUT_DIRECTORY'
+          reserved+=' INCLUDE_DEV FAIL_ON_ERROR MAVEN_PLUGIN_VERSION'
+          reserved+=' INPUT_MAVEN_ARGS GRADLE_PLUGIN_VERSION'
+          reserved+=' GRADLE_VERSION GRADLE_MINIMUM JAVA_VERSION'
+          reserved+=' INPUT_GRADLE_ARGS'
+          reserved+=' SYFT_JAVASCRIPT_INCLUDE_DEV_DEPENDENCIES'
+          reserved+=' PATH_PREFIX GLOBAL_SETTINGS MVN_PHASES MVN_POM_FILE'
+          reserved+=' MVN_PROFILES MVN_OPTS MVN_PARAMS JACOCO_ARGS '
+          status=0
+          while IFS= read -r name; do
+            case "${reserved}" in
+              *" ${name} "*)
+                echo "::error::env_vars sets ${name}, which a Maven step" \
+                  "in the build or SBOM job sets itself, so the two" \
+                  "would resolve with different values."
+                status=1 ;;
+            esac
+          done < <(jq -r 'keys[] | ascii_upcase' <<< "${ENV_VARS}")
+          exit "${status}"
+
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
@@ -718,6 +933,18 @@ jobs:
           delay: '0s'
           repository: ${{ inputs.repository || github.repository }}
           ref: refs/heads/${{ inputs.gerrit_branch }}
+          submodules: ${{ inputs.checkout_submodules }}
+      # checkout-gerrit-change-action v1.1.0 initialises submodules on
+      # the base branch, then runs a plain git submodule update after
+      # switching to the change, which skips any submodule the change
+      # adds or moves. Initialise them here; see docs/BRIEF.md.
+      - name: 'Initialise Gerrit change submodules'
+        if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync
+          git submodule update --init
       - name: 'Checkout repository'
         if: inputs.gerrit_refspec == ''
         # yamllint disable-line rule:line-length
@@ -726,6 +953,7 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
           persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
 
       # sbom-action runs whichever mvn is on PATH, so install the Maven
       # the build job provisions: a pinned version (Maven 4, or one a
@@ -743,6 +971,17 @@ jobs:
           # yamllint disable-line rule:line-length
           java-version: ${{ inputs.java_version != '' && inputs.java_version || needs.build.outputs.java_version || '21' }}
           maven-version: ${{ inputs.mvn_version }}
+
+      # The build job's env_vars export, with the same action pin and
+      # in the same place: maven-build-action runs it after its own
+      # Java and Maven setup, so a name those set is skipped in both.
+      # The action skips a name whose variable is non-empty and
+      # overwrites one that is present but empty.
+      - name: 'Export env variables'
+        # yamllint disable-line rule:line-length
+        uses: infovista-opensource/vars-to-env-action@3d3e7c8ae1e9e5fcd9ce83e56ab85a6a135d2ffa  # 2.0.0
+        with:
+          secrets: ${{ inputs.env_vars != '' && inputs.env_vars || '{}' }}
 
       # The same global settings the build uses, since they can define
       # the mirrors and repositories resolution reaches: without them
@@ -800,12 +1039,18 @@ jobs:
           # yamllint disable-line rule:line-length
           java_version: ${{ inputs.java_version != '' && inputs.java_version || needs.build.outputs.java_version || '21' }}
           # Resolve the graph the build resolves: the same profiles,
-          # global settings and parameters, since each can add modules,
-          # repositories or dependency versions. maven-build-action also
-          # expands workspace variables such as ${GITHUB_WORKSPACE} in
-          # mvn_params; this path passes them to Maven unexpanded.
+          # global settings, options and parameters, in the build's
+          # order, since each can add modules, repositories or
+          # dependency versions. maven-build-action places mvn-opts on
+          # the mvn command line, not in MAVEN_OPTS, so its -D and -P
+          # reach resolution there too. An empty mvn_opts forwards
+          # nothing: the action's /tmp/r default relocates the local
+          # repository and selects no dependency. maven-build-action
+          # also expands workspace variables such as ${GITHUB_WORKSPACE}
+          # in both strings; this path passes them to Maven unexpanded.
+          # env_vars arrives through the export step above.
           # yamllint disable-line rule:line-length
-          maven_args: ${{ format('{0} {1} {2}', inputs.mvn_profiles != '' && format('-P{0}', inputs.mvn_profiles) || '', steps.settings.outputs.arg, inputs.mvn_params) }}
+          maven_args: ${{ format('{0} {1} {2} {3}', inputs.mvn_profiles != '' && format('-P{0}', inputs.mvn_profiles) || '', steps.settings.outputs.arg, inputs.mvn_opts, inputs.mvn_params) }}
           untrusted_checkout: 'false'
 
       - name: 'Remove Maven global settings'
@@ -958,6 +1203,18 @@ jobs:
           delay: '0s'
           repository: ${{ inputs.repository || github.repository }}
           ref: refs/heads/${{ inputs.gerrit_branch }}
+          submodules: ${{ inputs.checkout_submodules }}
+      # checkout-gerrit-change-action v1.1.0 initialises submodules on
+      # the base branch, then runs a plain git submodule update after
+      # switching to the change, which skips any submodule the change
+      # adds or moves. Initialise them here; see docs/BRIEF.md.
+      - name: 'Initialise Gerrit change submodules'
+        if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync
+          git submodule update --init
       - name: 'Checkout repository'
         if: inputs.gerrit_refspec == ''
         # yamllint disable-line rule:line-length
@@ -966,6 +1223,7 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
           persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
 
       # The action writes its own job summary (languages scanned,
       # asset count, file count), so no summary step follows.

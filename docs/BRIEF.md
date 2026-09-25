@@ -69,6 +69,21 @@ gerrit-validate ─┬─ repository-metadata (informational)
    The Java version resolves as
    `inputs.java_version || metadata.java_version || '21'` so an explicit
    caller value wins, project detection is next, and 21 is the floor.
+   `mvn_opts`, `mvn_pom_file` and `env_vars` pass through to the
+   action's `mvn-opts`, `mvn-pom-file` and `env-vars`. A composite
+   action applies a default only when an input is absent, never when it
+   arrives empty, so each empty value falls back to the action's own
+   default: the workflow restates v0.4.3's `mvn-opts` default (the
+   `/tmp/r` local repository and quiet transfer logging), `pom.xml`,
+   and `{}`. A non-empty `mvn_opts` replaces that default rather than
+   adding to it, as it does on the action. `env_vars` takes a JSON
+   object of named variables and replaces the legacy `toJSON(vars)`
+   pattern, which exported every repository variable into the build.
+   `build-metadata-action` reads the `pom.xml` in the directory it is
+   given, so the build points it at the selected POM's directory. It
+   cannot read a POM under another name and would report on whichever
+   `pom.xml` sits beside it, so such a POM requires `java_version`, and
+   the build fails early without one.
 3. A "Collect JUnit reports" step (id `reports`, `if: always()`) finds
    `*/target/*-reports/*.xml`, copies them under `junit-reports/`, and
    sets `found`.
@@ -190,14 +205,48 @@ settings, so the SBOM job exposes nothing the build job does not.
 The SBOM job resolves the graph the build resolves. It uses the same
 Java version, and the Maven lane provisions the same `mvn_version`
 (`sbom-action` runs whichever `mvn` is on `PATH`) and passes the same
-`mvn_profiles`, `mvn_params` and `maven_global_settings`, since each
-can add modules, repositories or dependency versions. The Gradle lane
-forwards the property options in `build_arguments` (`-P`/`-D` and their
-long forms), leaving out tasks and other flags. The settings secret is
-written to a private file under `RUNNER_TEMP` only when set, and
-removed on `always()`. One difference remains: `maven-build-action`
-expands workspace variables such as `${GITHUB_WORKSPACE}` in
-`mvn_params`, and the SBOM path passes them to Maven unexpanded.
+`mvn_profiles`, `mvn_opts`, `mvn_params` and `maven_global_settings`,
+since each can add modules, repositories or dependency versions.
+`mvn_opts` belongs in that list because `maven-build-action` places
+`mvn-opts` on the `mvn` command line, not in `MAVEN_OPTS`, where a `-D`
+or `-P` selects dependencies as surely as one in `mvn_params`. An empty
+`mvn_opts` forwards nothing: the build's `/tmp/r` default only
+relocates the local repository.
+
+`env_vars` reaches resolution as well: a profile can activate on an
+`env.*` property, a POM can read one into a dependency version, and
+`MAVEN_OPTS` carries system properties into Maven (a `projectType` set
+there retypes the SBOM's root component). The SBOM job therefore
+exports the same variables with the same `vars-to-env-action` pin, at
+the same point relative to its Java and Maven setup, so a name those
+set is skipped in both jobs. The action skips a name whose variable
+holds a non-empty value, and overwrites one that is present but empty.
+A name that either Maven step sets itself would hold different values
+in the two runs: `sbom-action`'s generate step forces `MAVEN_ARGS`
+empty, and both steps set their own inputs as variables. The SBOM job
+fails before checkout on any of those names, on a name that is not an
+ASCII identifier, and on a value that is not a JSON object. The ASCII
+rule closes a bypass: the action upper-cases with JavaScript's
+`toUpperCase()`, which maps some non-ASCII letters onto ASCII ones
+(`maven_arg` followed by U+017F exports as `MAVEN_ARGS`), while the
+guard's `ascii_upcase` leaves them. The name lists follow `sbom-action`
+v0.2.0 and `maven-build-action` v0.4.3 and move with their pins.
+
+`sbom-action` resolves `path_prefix/pom.xml` and rejects `-f`/`--file`
+in `maven_args`, because an alternate POM would escape the directory it
+validated, so `mvn_pom_file` cannot reach it. When `mvn_pom_file` names
+any POM other than `pom.xml` the SBOM job fails before checkout rather
+than describe a different project from the one built under the same
+name; the caller sets `path_prefix` to the POM's directory instead, or
+`sbom_enabled: false`. A warning would still upload the wrong document
+for Grype to pass. The Gradle lane fails closed the same way on the
+project-selection options in `build_arguments`, which forwards the
+property options (`-P`/`-D` and their long forms) and leaves out tasks
+and other flags. The settings secret is written to a private file
+under `RUNNER_TEMP` only when set, and removed on `always()`. One
+difference remains: `maven-build-action` expands workspace variables
+such as `${GITHUB_WORKSPACE}` in `mvn_opts` and `mvn_params`, and the
+SBOM path passes them to Maven unexpanded.
 
 ## No dedicated java-audit-action or java-test-action
 
@@ -308,6 +357,43 @@ to find, and a near-empty SBOM scans clean. Without that assertion
 both lanes would stay green whatever their SBOMs contained. The check
 runs whatever the lanes' verdicts, so a Grype failure cannot hide it.
 
+Both lanes also set `checkout_submodules`, and the Maven lane sets
+`mvn_opts` and `env_vars`, to non-default values that leave the
+fixture's graph and egress alone. A `pass-through-check` job then
+proves each reached both Maven runs. `mvn_opts` sets a marker
+property that surefire records in the uploaded JUnit reports, and
+`-DincludeBomSerialNumber=false`, which drops the SBOM's serial
+number. `env_vars` sets `MAVEN_OPTS` to
+`-Dsurefire.reportNameSuffix=env-vars -DprojectType=application`,
+which renames the reports and retypes the SBOM's root component.
+Remove any wiring and its mark disappears.
+
+`mvn_pom_file` gets a second Maven call, `maven-pom-test`, since the
+first call's `./pom.xml` names the same POM as the fallback. It builds
+the fixture's `core/pom.xml` with `-DskipTests` and uploads the
+packaged output, and a `pom-check` job asserts that output holds the
+`test-maven-core` jar and no `test-maven-app` jar, which a root build
+would add. The call disables the SBOM, which rejects that POM, and
+leaves tests, JaCoCo and the CBOM off, so it uploads none of the
+artefact names the first call uploads for the checks to read. The
+first call's `./pom.xml` still runs the SBOM guard's accept path live.
+The rejection itself runs in `wiring-check`: a job that calls a
+reusable workflow cannot set `continue-on-error`, so a live rejection
+would fail the run.
+
+The fixtures cannot show the rest: neither carries a submodule. A
+`wiring-check` job runs `.github/scripts/wiring-check.sh` over this
+branch's workflows. It extracts the POM, environment and
+metadata-location guards and runs their accept and reject paths,
+including a line break that must not start a workflow command and
+names `toUpperCase()` maps onto reserved ones. It requires
+`checkout_submodules` on every checkout in both lanes, and the
+initialisation step after every Gerrit checkout. It also rebuilds, in
+local repositories, the Gerrit path's sequence: the base checkout
+`actions/checkout` performs, then a switch to a change that adds a
+submodule. It asserts that the plain update leaves the submodule empty,
+then that the initialisation step fills it.
+
 The Gradle lane sets `grype_permit_fail`: its upstream project's
 resolved graph carries published advisories (Netty, Jackson, PostgreSQL
 and others, reached through Spring Boot), and a pinned upstream commit
@@ -370,7 +456,17 @@ context that is neither available nor safe on a pull request.
   safe.
 - Dual checkout switch on `gerrit_refspec`
   (`checkout-gerrit-change-action` when set, `actions/checkout`
-  otherwise).
+  otherwise). `checkout_submodules` (boolean, default `false`) drives
+  both paths' `submodules` input in every job that checks out, in both
+  lanes: a submodule can carry modules, so the build, SBOM and CBOM
+  must see the same tree. The legacy lane cloned submodules
+  unconditionally; here it is opt-in. `checkout-gerrit-change-action`
+  v1.1.0 initialises submodules on the base branch, then runs a plain
+  `git submodule update` after switching to the change, which leaves a
+  submodule the change adds or moves uninitialised. An
+  "Initialise Gerrit change submodules" step after every Gerrit
+  checkout runs `git submodule sync` and `git submodule update --init`
+  until the action does so itself.
 
 ## Follow-ups
 
@@ -380,3 +476,6 @@ context that is neither available nor safe on a pull request.
    Model B data bus).
 3. Wire the ONAP `cps` Gerrit verify/merge workflows onto these reusable
    workflows.
+4. Have `checkout-gerrit-change-action` run `git submodule update
+   --init` after switching to the change, then drop the workflows'
+   "Initialise Gerrit change submodules" steps.
