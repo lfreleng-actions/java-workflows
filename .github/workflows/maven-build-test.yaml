@@ -180,11 +180,13 @@ on:
         default: 'block'
       build_permit_egress_traffic:
         description: >
-          Run harden-runner in audit mode for the build job only,
-          permitting unrestricted egress. Use when the build fetches
-          dependencies from CDNs that are impractical to enumerate in the
-          allow-list. Other jobs stay governed by harden_runner_egress;
-          left unset, the build job follows it too.
+          Run harden-runner in audit mode for the build and SBOM jobs
+          only, permitting unrestricted egress. Use when the build
+          fetches dependencies from CDNs that are impractical to
+          enumerate in the allow-list; the SBOM job resolves the same
+          dependency graph, so it needs the same reach. Other jobs stay
+          governed by harden_runner_egress; left unset, the build and
+          SBOM jobs follow it too.
         required: false
         type: boolean
         default: false
@@ -193,7 +195,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ec0736244fc776e326283c6af6840e30f316f63c'  # v0.16.1
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@beca7ffe87eac9212c70fe52d0d38d3bd61bf9d1'  # v0.16.2
 
       # --- Job timeouts (minutes) ---
       # Sized per job rather than uniformly. The build, test-report and
@@ -349,7 +351,7 @@ jobs:
       # first would win, and audit mode would be unreachable.
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
         with:
           config: ${{ inputs.harden_runner_allowlist }}
       - name: 'Harden runner'
@@ -424,7 +426,7 @@ jobs:
       # first would win, and audit mode would be unreachable.
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
@@ -467,14 +469,14 @@ jobs:
       - name: 'Detect build metadata'
         id: metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/build-metadata-action@504ee845e954566de1d220137fd40635e15468a9  # v0.8.0
+        uses: lfreleng-actions/build-metadata-action@37764159ab25aac45d0a04edf78935877c0283f5  # v0.8.2
         with:
           path_prefix: ${{ inputs.path_prefix }}
 
       - name: 'Build with Maven'
         id: build
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-build-action@3c48aed21aa422b16e1a15f31adbb2331aa59e83  # v0.4.2
+        uses: lfreleng-actions/maven-build-action@7781c31c0c5e7d345313807cde36377d0932e5d6  # v0.4.3
         with:
           path_prefix: ${{ inputs.path_prefix }}
           # Caller override wins, else the detected version, else 21.
@@ -622,7 +624,7 @@ jobs:
       # first would win, and audit mode would be unreachable.
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
@@ -650,7 +652,7 @@ jobs:
       - name: 'Summarise test results'
         if: ${{ needs.build.outputs.reports_found == '1' }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/junit-test-report-action@8b93aedff045366029288e976026290d4dc9b349  # v0.0.1
+        uses: lfreleng-actions/junit-test-report-action@cbc41af8f2e0cf6363d5b04df00025f938bf9a5e  # v0.0.2
         with:
           report-paths: 'junit-reports/**/*.xml'
           fail-on-failure: ${{ !inputs.test_permit_fail }}
@@ -673,7 +675,9 @@ jobs:
     # Runs whenever build was not skipped: the SBOM job does its own
     # checkout and does not depend on the build's artefacts, so it keeps
     # producing the dependency-scan signal even when the build fails
-    # (for example on a test failure).
+    # (for example on a test failure). The cyclonedx backend resolves
+    # dependencies without compiling, so only a dependency resolution
+    # failure fails this job, and then there is no graph to describe.
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.build.result != 'skipped' && inputs.sbom_enabled }}
     timeout-minutes: ${{ inputs.sbom_timeout_minutes }}
@@ -687,7 +691,7 @@ jobs:
       # first would win, and audit mode would be unreachable.
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
@@ -695,8 +699,10 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
         with:
+          # Shares the build job's egress switch: resolving the graph
+          # reaches the same repositories the build does.
           # yamllint disable-line rule:line-length
-          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          egress-policy: ${{ (inputs.build_permit_egress_traffic || inputs.harden_runner_egress == 'audit') && 'audit' || 'block' }}
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
@@ -721,17 +727,93 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # Generate a real CycloneDX SBOM with syft (static analysis of the
-      # checked-out tree). The defaults emit sbom-cyclonedx.json and
-      # sbom-cyclonedx.xml at the workspace root; the JSON document is the
-      # Grype job's scan contract. The action writes its own SBOM summary
-      # to the job summary, including the component count.
+      # sbom-action runs whichever mvn is on PATH, so install the Maven
+      # the build job provisions: a pinned version (Maven 4, or one a
+      # build extension requires) resolves differently from the runner
+      # image's. Same installer and pin as maven-build-action. Its
+      # checkout is off because this job checked out already, and its
+      # cache is off because this job resolves over the change under
+      # test and should write nothing later runs restore.
+      - name: 'Provision Maven'
+        # yamllint disable-line rule:line-length
+        uses: s4u/setup-maven-action@4a02cbd99769e46198135c31d5097c94618ba3f5  # v1.21.0
+        with:
+          checkout-enabled: false
+          cache-enabled: false
+          # yamllint disable-line rule:line-length
+          java-version: ${{ inputs.java_version != '' && inputs.java_version || needs.build.outputs.java_version || '21' }}
+          maven-version: ${{ inputs.mvn_version }}
+
+      # The same global settings the build uses, since they can define
+      # the mirrors and repositories resolution reaches: without them
+      # the SBOM could resolve a different graph, or none. Written to a
+      # private file under RUNNER_TEMP only when the secret is set, and
+      # removed by the cleanup step below whatever happens.
+      - name: 'Install Maven global settings'
+        id: settings
+        shell: bash
+        env:
+          GLOBAL_SETTINGS: ${{ secrets.maven_global_settings }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GLOBAL_SETTINGS}" ]; then
+            echo 'arg=' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          umask 077
+          file="$(mktemp "${RUNNER_TEMP}/sbom-global-settings.XXXXXXXXXX")"
+          printf '%s' "${GLOBAL_SETTINGS}" > "${file}"
+          echo "arg=--global-settings ${file}" >> "${GITHUB_OUTPUT}"
+          echo "path=${file}" >> "${GITHUB_OUTPUT}"
+
+      # Generate the CycloneDX SBOM from Maven's resolved dependency
+      # graph (cyclonedx-maven-plugin makeAggregateBom), not from the
+      # pom.xml text. A pom.xml is an input to resolution, so a static
+      # scan misses every transitive dependency and reports BOM-managed
+      # versions as UNKNOWN, which Grype cannot match (issue #47). The
+      # defaults emit sbom-cyclonedx.json and sbom-cyclonedx.xml at the
+      # workspace root; the JSON document is the Grype job's scan
+      # contract. The action writes its own summary, including the
+      # component count.
+      #
+      # untrusted_checkout is 'false' deliberately. The backend runs
+      # Maven, and Maven loads project extensions, so a checkout is
+      # executable input. Its 'auto' mode classifies fork pull requests
+      # as untrusted and skips, and a skip here would fail the upload
+      # below and lose the SBOM. That guard buys nothing in this
+      # workflow: the build job already runs Maven, the compiler and
+      # the tests over this same checkout, with the same read-only
+      # token and the same global settings. Maven here grants the
+      # checked-out code no reach it lacks there.
       - name: 'Generate SBOM'
         id: sbom
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/sbom-action@7834632c8458679c813adf3c06e496980808fcbe  # v0.0.2
+        uses: lfreleng-actions/sbom-action@58b6094cf67d072d6eb772590c43ee52c8c69bb6  # v0.2.0
         with:
+          backend: 'cyclonedx'
+          # Named rather than left to 'auto', so the lane states the
+          # build tool its caller chose instead of inferring it.
+          dependency_manager: 'maven'
           path_prefix: ${{ inputs.path_prefix }}
+          # Same resolution as the build job; the build job's output is
+          # set by its metadata step, before any build failure.
+          # yamllint disable-line rule:line-length
+          java_version: ${{ inputs.java_version != '' && inputs.java_version || needs.build.outputs.java_version || '21' }}
+          # Resolve the graph the build resolves: the same profiles,
+          # global settings and parameters, since each can add modules,
+          # repositories or dependency versions. maven-build-action also
+          # expands workspace variables such as ${GITHUB_WORKSPACE} in
+          # mvn_params; this path passes them to Maven unexpanded.
+          # yamllint disable-line rule:line-length
+          maven_args: ${{ format('{0} {1} {2}', inputs.mvn_profiles != '' && format('-P{0}', inputs.mvn_profiles) || '', steps.settings.outputs.arg, inputs.mvn_params) }}
+          untrusted_checkout: 'false'
+
+      - name: 'Remove Maven global settings'
+        if: always() && steps.settings.outputs.path != ''
+        shell: bash
+        env:
+          SETTINGS_FILE: ${{ steps.settings.outputs.path }}
+        run: rm -f -- "${SETTINGS_FILE}"
 
       - name: 'Upload SBOM artifacts'
         # yamllint disable-line rule:line-length
@@ -768,7 +850,7 @@ jobs:
       # first would win, and audit mode would be unreachable.
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
@@ -845,7 +927,7 @@ jobs:
       # first would win, and audit mode would be unreachable.
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           allow_list_summary: 'false'
