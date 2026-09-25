@@ -39,11 +39,11 @@ permissions: {}
 
 jobs:
   # Self-test of the Maven verify lane against the dedicated fixture.
-  # The fixture is a three-module reactor (parent/core/app) whose only
-  # dependency is JUnit, so its egress footprint is the allow-listed
-  # toolchain set and block mode applies. Its Failing*Test classes stay
-  # out of this build: the fixture's parent POM excludes them unless the
-  # failing-tests profile is active.
+  # The fixture is a three-module reactor (parent/core/app) depending
+  # only on JUnit and Jackson from Maven Central, so its egress footprint
+  # is the allow-listed toolchain set and block mode applies. Its
+  # Failing*Test classes stay out of this build: the fixture's parent
+  # POM excludes them unless the failing-tests profile is active.
   maven-build-test:
     name: 'Maven Build/Test'
     permissions:
@@ -52,6 +52,82 @@ jobs:
     uses: $/.github/workflows/maven-build-test.yaml
     with:
       repository: 'lfreleng-actions/test-maven-project'
+
+  # Proves each lane's SBOM comes from the resolved dependency graph.
+  # Without this the self-test stays green whatever the SBOM contains:
+  # the Maven fixture has no known vulnerabilities for Grype to find,
+  # and the Gradle lane cannot tell an empty document from a clean one
+  # (issues #47 and #48). Each row names one dependency declared with
+  # no version of its own, taking it from an imported BOM, and one
+  # reached only transitively. A static scan can produce neither with a
+  # version, so both present and versioned means the graph was
+  # resolved.
+  sbom-check:
+    name: 'SBOM Check (${{ matrix.lane }})'
+    needs: [maven-build-test, gradle-build-test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # test-maven-project: core declares jackson-databind, versioned
+          # by jackson-bom, which pulls in jackson-core.
+          - lane: 'maven'
+            expect: >-
+              com.fasterxml.jackson.core:jackson-databind
+              com.fasterxml.jackson.core:jackson-core
+          # portal-ng-preferences: app declares the webflux starter,
+          # versioned by the Spring Boot BOM, which pulls in spring-core.
+          - lane: 'gradle'
+            expect: >-
+              org.springframework.boot:spring-boot-starter-webflux
+              org.springframework:spring-core
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@805eedb0508c07714b61887a2b87a5c4bbeff22a  # v0.12.1
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ec0736244fc776e326283c6af6840e30f316f63c'  # v0.16.1
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Download SBOM artefact'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sbom-files-${{ matrix.lane }}
+
+      - name: 'Assert resolved dependencies'
+        shell: bash
+        env:
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          set -euo pipefail
+          sbom='sbom-cyclonedx.json'
+          status=0
+          for coordinate in ${EXPECT}; do
+            version="$(jq -r --arg g "${coordinate%%:*}" \
+              --arg a "${coordinate#*:}" \
+              '[.components[]? | select(.group == $g and .name == $a)
+                | .version // ""] | first // ""' "${sbom}")"
+            if [ -z "${version}" ] || [ "${version}" = 'UNKNOWN' ]; then
+              echo "::error::${coordinate} missing or unversioned in ${sbom}"
+              status=1
+            else
+              echo "${coordinate} ${version}"
+            fi
+          done
+          echo "Components: $(jq '.components | length' "${sbom}")"
+          exit "${status}"
 
   # Self-test of the Gradle verify lane. Audit egress because this
   # builds a large upstream project whose full egress footprint exceeds

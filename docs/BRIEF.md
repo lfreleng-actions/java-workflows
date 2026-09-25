@@ -135,16 +135,55 @@ report discovery on `*/build/test-results/*/*.xml`, and the
 reports itself by default, so the workflow sets `artifact-upload: false`
 and manages the artefact under a stable name for the tests job.
 
-`sbom` generates a real CycloneDX document with `sbom-action` (a syft
-backend performing static analysis of the checked-out tree) and feeds the
-JSON output to `grype`, honouring `grype_fail_on`, `grype_permit_fail` and
-the `NO_BLOCK_AUDIT_FAIL` repository variable (carried verbatim from the
-template). With the action's defaults it writes `sbom-cyclonedx.json` and
-`sbom-cyclonedx.xml` at the workspace root — the JSON document is the
+`sbom` generates a real CycloneDX document with `sbom-action` and feeds
+the JSON output to `grype`, honouring `grype_fail_on`, `grype_permit_fail`
+and the `NO_BLOCK_AUDIT_FAIL` repository variable (carried verbatim from
+the template). With the action's defaults it writes `sbom-cyclonedx.json`
+and `sbom-cyclonedx.xml` at the workspace root — the JSON document is the
 Grype job's scan contract — and reports the component count to the job
 summary. Because the SBOM job does its own checkout and does not depend on
 the build's artefacts, it still produces a dependency-scan signal when the
 build fails.
+
+Both lanes use `sbom-action`'s `cyclonedx` backend, because a Java
+build file is an input to dependency resolution rather than a product
+of it. Static analysis of `pom.xml` sees only the dependencies written
+there, misses every transitive one, and reports versions managed by a
+parent or an imported BOM as `UNKNOWN`, which Grype cannot match
+(issue #47). Gradle fares worse: static analysis reads only a
+`gradle.lockfile`, and dependency locking is opt-in, so most projects
+yield nothing at all (issue #48). The backend drives each build tool's
+own resolver instead: `cyclonedx-maven-plugin`'s `makeAggregateBom` for
+Maven, and for Gradle an init script that applies
+`cyclonedx-gradle-plugin` and runs `cyclonedxBom` on the root project,
+covering every subproject without editing the consumer's build files.
+Neither compiles, so the job still succeeds when the build fails on a
+test, and fails only when resolution fails, where there is no graph to
+describe. Test-scoped dependencies (Gradle test configurations) stay
+out: the SBOM describes the shipped artefact. Each lane names its build
+tool through `dependency_manager` rather than leaving the action to
+infer it.
+
+`cyclonedx-gradle-plugin` needs Gradle 8.4 or newer, rising with the
+JDK (8.5 on the default Java 21). Below that floor the backend skips
+and writes no document. The Gradle lane passes the wrapper's version
+from `build-metadata-action`, since the SBOM job runs the project's
+wrapper rather than the Gradle the build job provisions, so the check
+settles before anything downloads. A skip raises a warning and a job
+summary line, uploads nothing and skips Grype, rather than failing the
+upload on a missing file and misattributing an old Gradle to a broken
+SBOM job.
+
+The `cyclonedx` backend runs the build tool over the checkout. Maven
+loads project extensions, and evaluating a Gradle build runs its build
+scripts, so the checkout is executable input. The action's
+`untrusted_checkout: auto` would skip on a fork pull request, losing the
+SBOM, and cannot recognise a Gerrit change at all. The workflows set
+`untrusted_checkout: 'false'` instead: each build job already runs the
+same build over the same checkout with the same read-only token, so the
+SBOM job exposes nothing the build job does not. The SBOM job resolves
+the same Java version as the build, and the Maven lane activates the
+same `mvn_profiles`, since profiles can change the dependency set.
 
 ## No dedicated java-audit-action or java-test-action
 
@@ -190,15 +229,19 @@ The verify lane composes actions from sibling `lfreleng-actions` repos.
 The Java-specific enhancements landed (or are in review) as separate PRs
 before this repository wired them together:
 
-| Action                      | Role in the lane                               |
-| --------------------------- | ---------------------------------------------- |
-| `build-metadata-action`     | Java version + release metadata detection      |
-| `maven-build-action`        | Maven setup + lifecycle build                  |
-| `gradle-build-action`       | Gradle setup + build (brought to Maven parity) |
-| `junit-test-report-action`  | JUnit XML rendering + check                    |
-| `sbom-action`               | CycloneDX SBOM generation (syft backend)       |
-| `grype-scan-action`         | Vulnerability scan over the generated SBOM     |
-| `maven-xml-settings-action` | Nexus `settings.xml` synthesis (merge lane)    |
+<!-- markdownlint-disable MD013 -->
+
+| Action                      | Role in the lane                                              |
+| --------------------------- | ------------------------------------------------------------- |
+| `build-metadata-action`     | Java version + release metadata detection                     |
+| `maven-build-action`        | Maven setup + lifecycle build                                 |
+| `gradle-build-action`       | Gradle setup + build (brought to Maven parity)                |
+| `junit-test-report-action`  | JUnit XML rendering + check                                   |
+| `sbom-action`               | CycloneDX SBOM generation (cyclonedx backend, resolved graph) |
+| `grype-scan-action`         | Vulnerability scan over the generated SBOM                    |
+| `maven-xml-settings-action` | Nexus `settings.xml` synthesis (merge lane)                   |
+
+<!-- markdownlint-enable MD013 -->
 
 The `java-version` input naming was normalised across every build action
 before the workflows depended on it, since renaming a consumed input
@@ -239,8 +282,15 @@ third-party code; that code could then poison caches later runs restore
 matches `python-workflows`.
 
 The Maven lane builds `lfreleng-actions/test-maven-project` under
-`block` egress: the fixture is a three-module reactor whose only
-dependency is JUnit, so its footprint is the allow-listed toolchain set.
+`block` egress: the fixture is a three-module reactor depending only on
+JUnit and Jackson from Maven Central, so its footprint is the
+allow-listed toolchain set. An `sbom-check` matrix job then asserts,
+for each lane, that the SBOM holds one dependency whose version comes
+from an imported BOM and one that arrives only transitively, both with
+real versions (`jackson-databind` and `jackson-core` for Maven; the
+webflux starter and `spring-core` for Gradle). Neither fixture yields
+Grype findings to fail on, so without that assertion both lanes would
+stay green whatever their SBOMs contained.
 The Gradle lane still builds a pinned upstream project under `audit`
 egress, because no `test-gradle-project` fixture exists yet (issue #50).
 A large upstream project reaches endpoints beyond the toolchain set; a
@@ -286,10 +336,12 @@ context that is neither available nor safe on a pull request.
   allow-list is pinned in the `harden_runner_allowlist` default.
   The build job additionally honours `build_permit_egress_traffic`
   (boolean, default `false`): when true it runs harden-runner in audit
-  for the build lane only — for dependency fetches from CDNs impractical
-  to enumerate in the allow-list — while every other job stays governed by
-  `harden_runner_egress`. This is a first, build-scoped hook; per-job
-  egress control can be generalised later if further lanes need it.
+  for the build and SBOM jobs only — for dependency fetches from CDNs
+  impractical to enumerate in the allow-list — while every other job
+  stays governed by `harden_runner_egress`. The Maven SBOM job shares
+  the switch because it resolves the same dependency graph the build
+  does. This is a first, build-scoped hook; per-job egress control can
+  be generalised later if further lanes need it.
 - Never interpolate `${{ }}` into `run:` blocks; env-mediate dynamic
   values (zizmor template-injection). `with:`-block interpolation is
   safe.

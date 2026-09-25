@@ -168,11 +168,13 @@ on:
         default: 'block'
       build_permit_egress_traffic:
         description: >
-          Run harden-runner in audit mode for the build job only,
-          permitting unrestricted egress. Use when the build fetches
-          dependencies from CDNs that are impractical to enumerate in the
-          allow-list. Other jobs stay governed by harden_runner_egress;
-          left unset, the build job follows it too.
+          Run harden-runner in audit mode for the build and SBOM jobs
+          only, permitting unrestricted egress. Use when the build
+          fetches dependencies from CDNs that are impractical to
+          enumerate in the allow-list; the SBOM job resolves the same
+          dependency graph, so it needs the same reach. Other jobs stay
+          governed by harden_runner_egress; left unset, the build and
+          SBOM jobs follow it too.
         required: false
         type: boolean
         default: false
@@ -377,6 +379,10 @@ jobs:
     outputs:
       java_version: ${{ steps.metadata.outputs.java_version }}
       gradle_version: ${{ steps.build.outputs['gradle-version'] }}
+      # The version the project's wrapper declares. The SBOM job runs
+      # the wrapper rather than the Gradle provisioned here, so this is
+      # the version its plugin floor check must weigh.
+      wrapper_gradle_version: ${{ steps.metadata.outputs.java_gradle_version }}
       reports_found: ${{ steps.reports.outputs.found }}
     permissions:
       contents: read
@@ -607,10 +613,16 @@ jobs:
     # Runs whenever build was not skipped: the SBOM job does its own
     # checkout and does not depend on the build's artefacts, so it keeps
     # producing the dependency-scan signal even when the build fails
-    # (for example on a test failure).
+    # (for example on a test failure). The cyclonedx backend resolves
+    # dependencies without compiling, so only a dependency resolution
+    # failure fails this job, and then there is no graph to describe.
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.build.result != 'skipped' && inputs.sbom_enabled }}
     timeout-minutes: ${{ inputs.sbom_timeout_minutes }}
+    outputs:
+      # 'false' when the backend declined to generate (a Gradle version
+      # below the plugin floor); the Grype job has nothing to scan then.
+      generated: ${{ steps.sbom.outputs.skipped != 'true' }}
     permissions:
       contents: read
     steps:
@@ -629,8 +641,10 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
         with:
+          # Shares the build job's egress switch: resolving the graph
+          # reaches the same repositories the build does.
           # yamllint disable-line rule:line-length
-          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          egress-policy: ${{ (inputs.build_permit_egress_traffic || inputs.harden_runner_egress == 'audit') && 'audit' || 'block' }}
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
@@ -655,19 +669,59 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # Generate a real CycloneDX SBOM with syft (static analysis of the
-      # checked-out tree). The defaults emit sbom-cyclonedx.json and
-      # sbom-cyclonedx.xml at the workspace root; the JSON document is the
-      # Grype job's scan contract. The action writes its own SBOM summary
-      # to the job summary, including the component count.
+      # Generate the CycloneDX SBOM from Gradle's resolved dependency
+      # graph: an init script applies cyclonedx-gradle-plugin and runs
+      # cyclonedxBom on the root project, covering every subproject.
+      # Static analysis sees only a gradle.lockfile, and dependency
+      # locking is opt-in, so on most projects it finds nothing
+      # (issue #48). The defaults emit sbom-cyclonedx.json and
+      # sbom-cyclonedx.xml at the workspace root; the JSON document is
+      # the Grype job's scan contract. The action writes its own
+      # summary, including the component count.
+      #
+      # untrusted_checkout is 'false' deliberately. Evaluating a Gradle
+      # build runs its build scripts, so a checkout is executable
+      # input. Its 'auto' mode classifies fork pull requests as
+      # untrusted and skips, losing the SBOM. That guard buys nothing
+      # in this workflow: the build job already evaluates and runs this
+      # same build with the same read-only token, so Gradle here grants
+      # the checked-out code no reach it lacks there.
       - name: 'Generate SBOM'
         id: sbom
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/sbom-action@7834632c8458679c813adf3c06e496980808fcbe  # v0.0.2
+        uses: lfreleng-actions/sbom-action@58b6094cf67d072d6eb772590c43ee52c8c69bb6  # v0.2.0
         with:
+          backend: 'cyclonedx'
+          # Named rather than left to 'auto', which resolves a tree
+          # holding both a pom.xml and a Gradle build as Maven.
+          dependency_manager: 'gradle'
           path_prefix: ${{ inputs.path_prefix }}
+          # Same resolution as the build job; the build job's output is
+          # set by its metadata step, before any build failure.
+          # yamllint disable-line rule:line-length
+          java_version: ${{ inputs.java_version != '' && inputs.java_version || needs.build.outputs.java_version || '21' }}
+          # Settles the plugin's Gradle floor before anything downloads.
+          gradle_version: ${{ needs.build.outputs.wrapper_gradle_version }}
+          untrusted_checkout: 'false'
+
+      # cyclonedx-gradle-plugin needs Gradle 8.4 or newer, and more on
+      # newer JDKs; below that the backend skips and writes nothing.
+      # Warn rather than fail, as the action does, but say so plainly:
+      # otherwise the upload below fails on a missing file, and the
+      # cause reads as a broken SBOM job rather than an old Gradle.
+      - name: 'Report skipped SBOM'
+        if: steps.sbom.outputs.skipped == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          msg='SBOM skipped: this Gradle version is below the floor'
+          msg+=' cyclonedx-gradle-plugin supports. Upgrade the wrapper'
+          msg+=' to produce an SBOM and a Grype scan.'
+          echo "::warning::${msg}"
+          echo "### ⚠️ ${msg}" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: 'Upload SBOM artifacts'
+        if: steps.sbom.outputs.skipped != 'true'
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -690,7 +744,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: 'sbom'
     # yamllint disable-line rule:line-length
-    if: ${{ !cancelled() && needs.sbom.result == 'success' && inputs.grype_enabled }}
+    if: ${{ !cancelled() && needs.sbom.result == 'success' && needs.sbom.outputs.generated == 'true' && inputs.grype_enabled }}
     timeout-minutes: ${{ inputs.grype_timeout_minutes }}
     permissions:
       contents: read

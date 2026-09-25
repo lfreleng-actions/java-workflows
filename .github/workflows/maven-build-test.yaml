@@ -180,11 +180,13 @@ on:
         default: 'block'
       build_permit_egress_traffic:
         description: >
-          Run harden-runner in audit mode for the build job only,
-          permitting unrestricted egress. Use when the build fetches
-          dependencies from CDNs that are impractical to enumerate in the
-          allow-list. Other jobs stay governed by harden_runner_egress;
-          left unset, the build job follows it too.
+          Run harden-runner in audit mode for the build and SBOM jobs
+          only, permitting unrestricted egress. Use when the build
+          fetches dependencies from CDNs that are impractical to
+          enumerate in the allow-list; the SBOM job resolves the same
+          dependency graph, so it needs the same reach. Other jobs stay
+          governed by harden_runner_egress; left unset, the build and
+          SBOM jobs follow it too.
         required: false
         type: boolean
         default: false
@@ -673,7 +675,9 @@ jobs:
     # Runs whenever build was not skipped: the SBOM job does its own
     # checkout and does not depend on the build's artefacts, so it keeps
     # producing the dependency-scan signal even when the build fails
-    # (for example on a test failure).
+    # (for example on a test failure). The cyclonedx backend resolves
+    # dependencies without compiling, so only a dependency resolution
+    # failure fails this job, and then there is no graph to describe.
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.build.result != 'skipped' && inputs.sbom_enabled }}
     timeout-minutes: ${{ inputs.sbom_timeout_minutes }}
@@ -695,8 +699,10 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
         with:
+          # Shares the build job's egress switch: resolving the graph
+          # reaches the same repositories the build does.
           # yamllint disable-line rule:line-length
-          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          egress-policy: ${{ (inputs.build_permit_egress_traffic || inputs.harden_runner_egress == 'audit') && 'audit' || 'block' }}
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
@@ -721,17 +727,45 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
-      # Generate a real CycloneDX SBOM with syft (static analysis of the
-      # checked-out tree). The defaults emit sbom-cyclonedx.json and
-      # sbom-cyclonedx.xml at the workspace root; the JSON document is the
-      # Grype job's scan contract. The action writes its own SBOM summary
-      # to the job summary, including the component count.
+      # Generate the CycloneDX SBOM from Maven's resolved dependency
+      # graph (cyclonedx-maven-plugin makeAggregateBom), not from the
+      # pom.xml text. A pom.xml is an input to resolution, so a static
+      # scan misses every transitive dependency and reports BOM-managed
+      # versions as UNKNOWN, which Grype cannot match (issue #47). The
+      # defaults emit sbom-cyclonedx.json and sbom-cyclonedx.xml at the
+      # workspace root; the JSON document is the Grype job's scan
+      # contract. The action writes its own summary, including the
+      # component count.
+      #
+      # untrusted_checkout is 'false' deliberately. The backend runs
+      # Maven, and Maven loads project extensions, so a checkout is
+      # executable input. Its 'auto' mode classifies fork pull requests
+      # as untrusted and skips, and a skip here would fail the upload
+      # below and lose the SBOM. That guard buys nothing in this
+      # workflow: the build job already runs Maven, the compiler and
+      # the tests over this same checkout with the same read-only
+      # token, and holds the global settings secret besides, which
+      # this job never receives. Maven here grants the checked-out code
+      # no reach it lacks there.
       - name: 'Generate SBOM'
         id: sbom
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/sbom-action@7834632c8458679c813adf3c06e496980808fcbe  # v0.0.2
+        uses: lfreleng-actions/sbom-action@58b6094cf67d072d6eb772590c43ee52c8c69bb6  # v0.2.0
         with:
+          backend: 'cyclonedx'
+          # Named rather than left to 'auto', so the lane states the
+          # build tool its caller chose instead of inferring it.
+          dependency_manager: 'maven'
           path_prefix: ${{ inputs.path_prefix }}
+          # Same resolution as the build job; the build job's output is
+          # set by its metadata step, before any build failure.
+          # yamllint disable-line rule:line-length
+          java_version: ${{ inputs.java_version != '' && inputs.java_version || needs.build.outputs.java_version || '21' }}
+          # Profiles can add modules and dependencies, so the SBOM
+          # activates the ones the build does.
+          # yamllint disable-line rule:line-length
+          maven_args: ${{ inputs.mvn_profiles != '' && format('-P{0}', inputs.mvn_profiles) || '' }}
+          untrusted_checkout: 'false'
 
       - name: 'Upload SBOM artifacts'
         # yamllint disable-line rule:line-length

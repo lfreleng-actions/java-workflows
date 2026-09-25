@@ -56,9 +56,15 @@ The `build` job detects the project's Java version through
 it as an artefact. The `tests` job renders that XML through
 `junit-test-report-action` into the job summary (it does not create a
 check-run) and runs even when the build fails, so test failures
-still surface a report. The `sbom` job generates a real CycloneDX SBOM
-with `sbom-action` (syft static analysis of the checked-out tree) and
-feeds the JSON document to `grype` under the `grype_fail_on` gate.
+still surface a report. The `sbom` job generates a CycloneDX SBOM with
+`sbom-action` and feeds the JSON document to `grype` under the
+`grype_fail_on` gate. Both lanes use the action's `cyclonedx` backend,
+which runs the CycloneDX Maven or Gradle plugin over the build tool's
+resolved dependency graph. A static scan misses transitive dependencies
+and BOM-managed versions in a `pom.xml`, and finds nothing in a Gradle
+project without a `gradle.lockfile` (issues #47 and #48). A Gradle
+wrapper older than the plugin supports (8.4, or 8.5 on Java 21) skips
+the SBOM and Grype with a warning rather than failing the run.
 
 The generic template's standalone `audit` job does not appear here: on
 the JVM, dependency-risk auditing is the SBOM/Grype chain plus the
