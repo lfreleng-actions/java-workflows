@@ -52,6 +52,199 @@ jobs:
     uses: $/.github/workflows/maven-build-test.yaml
     with:
       repository: 'lfreleng-actions/test-maven-project'
+      # Drive mvn_opts and env_vars down a non-default path whose
+      # effect the pass-through-check job below can observe, on the
+      # build side and on the SBOM side. Neither changes the fixture's
+      # graph or egress. mvn_opts sets a marker property surefire
+      # records in its reports, and drops the SBOM serial number.
+      # env_vars carries MAVEN_OPTS, whose system properties rename
+      # the surefire reports and retype the SBOM's root component.
+      # './pom.xml' is the root POM with a prefix the SBOM job's guard
+      # strips, running its accept path live; maven-pom-test observes
+      # the build side of mvn_pom_file. The fixture has no submodules,
+      # so the wiring-check job covers those.
+      checkout_submodules: true
+      # yamllint disable-line rule:line-length
+      mvn_opts: '-Dmaven.repo.local=/tmp/m2 -Djava.workflows.mvn.opts=forwarded -DincludeBomSerialNumber=false'
+      mvn_pom_file: './pom.xml'
+      # yamllint disable-line rule:line-length
+      env_vars: '{"MAVEN_OPTS": "-Dsurefire.reportNameSuffix=env-vars -DprojectType=application"}'
+
+  # Proves the Maven lane's pass-through inputs reach both Maven runs:
+  # the build, through the JUnit reports it uploads, and the SBOM
+  # job, through the document it generates. Each value set above
+  # leaves a mark there, and dropping the wiring removes it.
+  pass-through-check:
+    name: 'Pass-through Check'
+    needs: maven-build-test
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@beca7ffe87eac9212c70fe52d0d38d3bd61bf9d1'  # v0.16.2
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Download JUnit reports'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: maven-junit-reports
+          path: junit-reports
+      - name: 'Download SBOM artefact'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sbom-files-maven
+          path: sbom
+
+      - name: 'Assert the inputs reached both Maven runs'
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          fail() { echo "::error::$1"; status=1; }
+          marker='name="java.workflows.mvn.opts" value="forwarded"'
+          if ! grep -rqF "${marker}" junit-reports; then
+            fail 'mvn_opts did not reach the build'
+          fi
+          if ! find junit-reports -name 'TEST-*-env-vars.xml' | grep -q .
+          then
+            fail 'env_vars did not reach the build'
+          fi
+          sbom='sbom/sbom-cyclonedx.json'
+          if jq -e 'has("serialNumber")' "${sbom}" > /dev/null; then
+            fail 'mvn_opts did not reach the SBOM job'
+          fi
+          type="$(jq -r '.metadata.component.type // ""' "${sbom}")"
+          if [ "${type}" != 'application' ]; then
+            fail "env_vars did not reach the SBOM job (type '${type}')"
+          fi
+          exit "${status}"
+
+  # Observes mvn_pom_file end to end: build core/pom.xml on its own,
+  # which packages core and not app, where the root POM (the wiring
+  # dropped) packages both. The SBOM job rejects any POM other than
+  # pom.xml, so it stays off here; wiring-check runs that rejection.
+  # A job calling a reusable workflow cannot set continue-on-error, so
+  # a live rejection would fail this run. Tests, JaCoCo and the CBOM
+  # stay off too, so this call uploads none of the artefact names the
+  # call above does: download-artifact resolves a name to the newest
+  # upload, and the checks reading those would race this one.
+  maven-pom-test:
+    name: 'Maven Build/Test (alternate POM)'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: $/.github/workflows/maven-build-test.yaml
+    with:
+      repository: 'lfreleng-actions/test-maven-project'
+      mvn_pom_file: 'core/pom.xml'
+      mvn_params: '-DskipTests'
+      run_jacoco: false
+      sbom_enabled: false
+      grype_enabled: false
+      cbom_enabled: false
+      upload_build_artifacts: true
+
+  pom-check:
+    name: 'POM Check'
+    needs: maven-pom-test
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@beca7ffe87eac9212c70fe52d0d38d3bd61bf9d1'  # v0.16.2
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Download build artefacts'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: maven-build-artifacts-reactor
+          path: build-artifacts
+
+      - name: 'Assert the build ran the selected POM'
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=0
+          find build-artifacts -type f | sort
+          if ! find build-artifacts -name 'test-maven-core-*.jar' \
+            | grep -q .; then
+            echo '::error::core/pom.xml built no test-maven-core jar'
+            status=1
+          fi
+          if find build-artifacts -name 'test-maven-app-*.jar' \
+            | grep -q .; then
+            echo '::error::the build packaged app, so it ran the root' \
+              'POM rather than mvn_pom_file'
+            status=1
+          fi
+          exit "${status}"
+
+  # Exercises what the fixtures cannot: the guard steps' rejection
+  # paths, the Gerrit submodule initialisation, and the submodule
+  # wiring of every checkout in both lanes, which neither fixture
+  # (having no submodules) can tell apart from no wiring at all. The
+  # guard scripts run as extracted from the workflows on this branch,
+  # so a change to either shows up here.
+  wiring-check:
+    name: 'Wiring Check'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@beca7ffe87eac9212c70fe52d0d38d3bd61bf9d1'  # v0.16.2
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Check the guards and the submodule wiring'
+        shell: bash
+        run: bash .github/scripts/wiring-check.sh
 
   # Proves each lane's SBOM comes from the resolved dependency graph.
   # Without this the self-test stays green whatever the SBOM contains:
@@ -150,6 +343,10 @@ jobs:
       # Pin a known-good commit so the self-test is repeatable and an
       # upstream change cannot make this workflow appear broken.
       ref: '2796448b11c66b536ecf1bd0c8ae2271606e85a7'
+      # The project carries no submodules, so this proves the input is
+      # accepted and harmless; wiring-check proves each checkout uses
+      # it.
+      checkout_submodules: true
       harden_runner_egress: 'audit'
       # Report Grype findings without failing on them. This job tests
       # the workflow, not an upstream project's dependency hygiene, and
