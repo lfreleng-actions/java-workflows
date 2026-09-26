@@ -37,10 +37,11 @@ not by folder:
 | `maven-build-test.yaml`  | Maven  | Verify (PR) |
 | `gradle-build-test.yaml` | Gradle | Verify (PR) |
 
-This initial repository ships only the verify lane. The planned merge and
+This initial repository ships only the verify lane. The merge and
 release lanes will follow the same prefix convention when added
-(`maven-merge.yaml`, `maven-build-test-release.yaml`, and their Gradle
-counterparts); see [Planned: merge and release lanes](#planned-merge-and-release-lanes).
+(`maven-merge.yaml`, `maven-stage.yaml`, `maven-build-test-release.yaml`,
+and their Gradle counterparts); see [Merge lane](#merge-lane-designed)
+and [Release lane](#release-lane-planned).
 
 Only `examples/` and `docs/` use real subfolders (`examples/maven/…`,
 `examples/gradle/…`). Gradle is a first-class parallel track, not an
@@ -215,45 +216,396 @@ Java jobs, by deliberate decision:
   rendering the JUnit XML the build already produced. A separate
   test-runner action would duplicate the build tool's own contract.
 
-## Planned: merge and release lanes
+## Merge lane (designed)
 
-The merge (`*-merge.yaml`) and release (`*-build-test-release.yaml`) lanes
-are **not part of this initial repository**. They are intentionally
-sequenced **last**, because the stage/release lane depends on design
-decisions that are not yet settled:
+`maven-merge.yaml` publishes Maven SNAPSHOTs when a change merges. The
+design below is agreed; the workflow is not written yet, because the
+building blocks it pins are still in review (see
+[Merge-lane prerequisites](#merge-lane-prerequisites)). It replaces the OpenDaylight
+`compose-maven-merge.yaml` from `lfit/releng-reusable-workflows`, keeping
+the behaviour worth keeping and none of its code.
 
-- **Signing**: Sigul (LF's traditional signing bridge) versus Sigstore
-  keyless/OIDC. Some Gerrit-mirrored or air-gapped consumers cannot reach
-  public Sigstore infrastructure.
-- **Nexus2 staging semantics**: the ONAP flow stages to a Sonatype Nexus2
-  open/close/promote lifecycle; the reusable equivalent (staging profile,
-  auto-release gating) needs modelling.
-- **Model B data bus**: the Jenkins `releases/*.yaml` +
-  `log_dir` convention needs a GitHub-native replacement for carrying
-  release coordinates between the merge trigger and the publish step.
-
-These lanes are omitted rather than committed as placeholders: the initial
-repository ships only complete, functional workflows. They will be added
-under the filename-prefix convention above once the design decisions are
-resolved.
-
-## Supporting building-block actions
-
-The verify lane composes actions from sibling `lfreleng-actions` repos.
-The Java-specific enhancements landed (or are in review) as separate PRs
-before this repository wired them together:
+### Decisions
 
 <!-- markdownlint-disable MD013 -->
 
-| Action                      | Role in the lane                                              |
-| --------------------------- | ------------------------------------------------------------- |
-| `build-metadata-action`     | Java version + release metadata detection                     |
-| `maven-build-action`        | Maven setup + lifecycle build                                 |
-| `gradle-build-action`       | Gradle setup + build (brought to Maven parity)                |
-| `junit-test-report-action`  | JUnit XML rendering + check                                   |
-| `sbom-action`               | CycloneDX SBOM generation (cyclonedx backend, resolved graph) |
-| `grype-scan-action`         | Vulnerability scan over the generated SBOM                    |
-| `maven-xml-settings-action` | Nexus `settings.xml` synthesis (merge lane)                   |
+| ID  | Question                     | Decision                                                                                 |
+| --- | ---------------------------- | ---------------------------------------------------------------------------------------- |
+| D-1 | Publish credential           | `credential-load-action`, as the node and docker lanes use; optional GitHub environment  |
+| D-2 | What the lane builds         | The branch head, as the legacy lane and global-jjb do                                    |
+| D-3 | SBOM, Grype and provenance   | SBOM and Grype for information only; signing and attestation on full releases alone      |
+| D-4 | Reactor coordinates          | Maven's own `help:effective-pom`, inside `maven-snapshot-metadata-action`                |
+| D-5 | Artifactory                  | Kept for later; no project needs it, so neither lane ships it initially                  |
+
+<!-- markdownlint-enable MD013 -->
+
+### Job graph
+
+```text
+gerrit-validate ─┬─ repository-metadata (informational)
+                 └─ build ─┬─ publish-snapshot
+                           └─ sbom ─ grype (informational)
+```
+
+The shape is build once, publish from the artefact, as the node and
+docker merge lanes do: the job that runs the project's code never holds
+the write credential, and the job that holds it never runs the code.
+
+### Build job
+
+1. Check out the branch head (D-2), with `persist-credentials: false`.
+2. `build-metadata-action`, for the Java version, as in the verify lane.
+3. `maven-snapshot-metadata-action` in `fetch` mode. It runs
+   `help:effective-pom` once over the reactor, then seeds the published
+   `maven-metadata.xml` for every module into the `m2repo`, so
+   `maven-deploy-plugin` carries on from the published `buildNumber`.
+4. `maven-build-action` with `mvn-phases: clean deploy`, deploying to its
+   fixed `m2repo`. `run-jacoco` and `artifact-upload` are off: coverage
+   belongs to the verify lane, and the workflow uploads the tree itself.
+   The seeding relies on the action leaving an existing `m2repo` in
+   place, a contract lfreleng-actions/maven-build-action#157 adds a test and
+   documentation for. It also relies on the deploy landing there, which
+   a caller can currently break: the action places `mvn-opts` and
+   `mvn-params` after its own `-DaltDeploymentRepository`, and Maven
+   honours the last one given, so a caller's own would redirect the
+   deploy while `prune` and the upload still read `m2repo`, publishing
+   only the seeded metadata. The action must refuse that override, or
+   place its value last, before the lane passes caller arguments.
+5. `maven-snapshot-metadata-action` in `prune` mode, removing metadata
+   the deploy left unchanged, which would otherwise overwrite newer
+   copies a sibling build published meanwhile.
+6. Upload the pruned `m2repo` as the hand-off artefact, kept three days:
+   enough to re-run a failed publish job without rebuilding, without
+   carrying a whole reactor's output for the default 90.
+
+`fetch` takes no credentials. OpenDaylight's `opendaylight.snapshot` and
+ONAP's `snapshots` repositories both serve metadata anonymously (checked
+against both servers), and passing even a read credential into this job
+would expose it to the build. A project with a private snapshot
+repository would need a scoped read credential added deliberately, with
+that trade-off stated.
+
+### Publish job
+
+1. Download the `m2repo` artefact.
+2. Load the Nexus password with `credential-load-action`, gated on the
+   `CREDENTIAL_LOAD_GRANTS` variable and with `export_env: false`, so the
+   secret stays a step output and never enters the job environment. The
+   username comes from an input, falling back to the repository name, as
+   in the node lane.
+3. `nexus-publish-action` in `maven2_upload` mode, once per top-level
+   group path from `fetch`'s `group_paths` output, so artefacts outside
+   the root `groupId` publish too. The action retries transient failures,
+   uploads `maven-metadata.xml` after everything it describes, and holds
+   the metadata back when anything before it failed, so a partial publish
+   never advertises a SNAPSHOT that is not there.
+4. A step summary with the built commit, branch, group paths, metadata
+   seeded and pruned, and files published and failed (gap analysis G-15).
+
+An optional `publish_environment` input puts this job, and only this
+job, in a GitHub environment, for projects that keep the credential
+behind environment protection rules.
+
+### What the lane does not do
+
+- **Signing and attestation (D-3).** SNAPSHOTs are neither signed nor
+  attested, as the node lane skips them for snapshots too; that belongs
+  to the release lane.
+- **Maven Central and Artifactory.** Central is a release target (G-10);
+  Artifactory is deferred until a project needs it (D-5).
+- **Concurrency.** The caller owns it; see below.
+
+### Caller responsibilities
+
+The caller keeps what depends on the project's own setup:
+
+- **Triggers:** the `gerrit_to_platform` dispatch with its `GERRIT_*`
+  inputs, and a daily scheduled rebuild, which the legacy lane runs at
+  02:49 UTC, the retired Jenkins slot.
+- **Replication:** wait until the merged `GERRIT_PATCHSET_REVISION` is
+  reachable from the mirrored `GERRIT_BRANCH` before calling the lane.
+  Gerrit dispatches on merge, possibly before its replication to the
+  GitHub mirror lands, and the lane builds the branch head (D-2); without
+  the wait it could publish the previous head's SNAPSHOT while voting on
+  the new change. Poll for the revision rather than sleep a fixed time,
+  as the legacy caller's 10-second wait does.
+- **Votes:** clear before building and vote on the result, both skipped
+  on scheduled runs, with `gerrit-review-action`.
+- **Secrets by name:** `OP_SERVICE_ACCOUNT_TOKEN` and
+  `VAULT_MAPPING_JSON`, since `secrets: inherit` does not cross
+  organisations.
+- **Concurrency, keyed on the repository:**
+
+  ```yaml
+  concurrency:
+    group: maven-merge-${{ github.repository }}
+    cancel-in-progress: false
+  ```
+
+  This departs from the legacy caller, which keys on the branch. Every
+  version of an artifact shares one artifact-level `maven-metadata.xml`,
+  so lanes for two branches, at `1.1.0-SNAPSHOT` and `1.0.1-SNAPSHOT`
+  say, would each add their version and the later publish would drop
+  the other's. A running lane is never cancelled, since one stopped
+  between fetch and publish would leave the numbering behind.
+  A concurrency group covers one GitHub repository and no further;
+  publishers in different repositories need disjoint group paths.
+
+### Self-test
+
+The lane runs on merges, but most of it can run on a pull request. The
+self-test will build `test-maven-project` with `clean deploy`, run
+`fetch` and `prune` against a mock Nexus serving published metadata,
+and publish with `nexus-publish-action`'s `dry_run`, asserting that the
+`buildNumber` carries on and untouched metadata stays unpublished.
+`maven-snapshot-metadata-action` already runs that sequence on a real
+Maven deploy, on Maven 3.9 and Maven 4, so the self-test proves the
+wiring rather than the mechanism.
+
+### Merge-lane prerequisites
+
+<!-- markdownlint-disable MD013 -->
+
+| Building block                   | Needed for                                         | State                                                                                               |
+| -------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `maven-snapshot-metadata-action` | `fetch` and `prune`                                | First release in review                                                                             |
+| `nexus-publish-action`           | Retries, metadata last and held back; `dry_run`    | In review (lfreleng-actions/nexus-publish-action#171 and lfreleng-actions/nexus-publish-action#172) |
+| `maven-build-action`             | The tested `m2repo` contract                       | In review (lfreleng-actions/maven-build-action#157)                                                 |
+| `maven-build-action`             | An `m2repo` deploy path callers cannot override    | To do                                                                                               |
+| `java-workflows`                 | `mvn_opts`, `mvn_pom_file`, `env_vars`, submodules | In review (#68)                                                                                     |
+| `maven-xml-settings-action`      | Mirror-only settings without credentials           | In review (lfreleng-actions/maven-xml-settings-action#32)                                           |
+
+<!-- markdownlint-enable MD013 -->
+
+## Release lane (planned)
+
+The release lane reproduces the stage-then-release flow both target
+projects run on Jenkins today. ONAP `cps` (`ci-management`) and
+OpenDaylight `infrautils` (`releng/builder`, through the
+`odl-maven-jobs-jdk21` group) both use global-jjb's
+`gerrit-maven-stage` with `sign-artifacts: true`, and both release by
+merging a release file. One lane shape serves both.
+
+### Two workflows
+
+<!-- markdownlint-disable MD013 -->
+
+| Workflow                        | Trigger              | Does                                                         |
+| ------------------------------- | -------------------- | ------------------------------------------------------------ |
+| `maven-stage.yaml`              | Dispatch or schedule | Build a release candidate, sign it, stage it in Nexus        |
+| `maven-build-test-release.yaml` | A release file merge | Validate the file, promote the named staged build, tag it    |
+
+<!-- markdownlint-enable MD013 -->
+
+Staging and releasing stay apart, as on Jenkins: a candidate is staged
+and tested first, and a release file later promotes one exact staging
+repository, identified by the file's `log_dir`. Rebuilding at release
+time would publish something nobody tested.
+
+The release commit travels with the staged build, and two commits are
+involved. Jenkins' stage job (global-jjb `maven-patch-release.sh`)
+first records the **source** commit, the branch head it built from, in
+`taglist.log`; it then commits the release version and archives that
+**release** commit as a git bundle, both beside the build logs under
+`log_dir`. The release job checks out the source commit, fast-forwards
+it from the bundle to the release commit, and tags the result
+(`release-job.sh`). Tagging the recorded source commit directly would
+tag the SNAPSHOT code, not what was staged.
+
+The lane keeps that guarantee through a **stage record**: one durable
+object per staged build, written by the stage workflow and read by the
+release workflow. It holds the project and release version it staged,
+the staging repository ID, the source commit, the release commit as a
+bundle, the attestation subjects, and, where the project publishes to
+Central, the Central deployment ID. It
+must outlive GitHub artefact retention (see below). Where it lives is
+the main question the staging model still has to answer.
+
+### Stage workflow
+
+global-jjb's `gerrit-maven-stage` runs, in one job:
+
+```text
+versions-plugin -> maven-patch-release -> build -> SBOM
+  -> lf-sigul-sign-dir ($WORKSPACE/m2repo) -> lf-maven-stage -> lf-maven-central
+```
+
+The lane keeps that order and splits it across jobs, so no job holding a
+credential runs project code:
+
+```text
+build ─┬─ sign ─┬─ stage
+       │        └─ central (where the project publishes there)
+       └─ sbom ─ grype
+```
+
+- **build:** set the release version with `maven-stage-prep-action`
+  (Jenkins uses the versions plugin, or strips `-SNAPSHOT` from every
+  POM), commit it, `clean deploy` to the `m2repo`, and upload both the
+  tree and the release commit as artefacts. No credentials.
+- **sign:** download the `m2repo`, sign every file in it, upload the
+  signed tree. Holds the signing credential and nothing else. This is
+  where Sigul goes; see below.
+- **stage:** download the signed `m2repo` and stage it with
+  `nexus-staging-action`, holding the Nexus credential alone.
+- **central:** for a project that publishes to Maven Central, a
+  separate job downloads the same signed tree and publishes it with
+  `central-publish-action`, holding the Central token alone. Neither
+  publishing job sees the other's credential.
+
+The Jenkins job runs signing in the same job as the build, so the
+signing credentials sit beside the project's code (gap analysis G-09).
+Splitting the job removes that; it is the main change from Jenkins,
+and the reason the stage workflow is not a one-job port.
+
+### Signing: Sigul now, the interface fixed
+
+Both projects sign with Sigul, LF's signing bridge, and the lane is
+built for it. `sigul-sign-action` is being reworked separately, so the
+lane depends only on what each signing point takes and produces, taken
+from the global-jjb scripts it replaces. Jenkins signs in three places, the
+last of them outside these Maven workflows:
+
+<!-- markdownlint-disable MD013 -->
+
+| Point             | Signs                           | With   | global-jjb source               |
+| ----------------- | ------------------------------- | ------ | ------------------------------- |
+| Stage, `sign` job | Every file in the `m2repo`      | Sigul  | `sigul-sign-dir.sh`             |
+| Release, tag step | The annotated release tag       | Sigul  | `release-job.sh` `tag-git-repo` |
+| Container release | Each container image, by digest | cosign | `release-job.sh`                |
+
+<!-- markdownlint-enable MD013 -->
+
+- **Stage artefacts:** a directory in, the built `m2repo`; a detached,
+  ASCII-armoured `<file>.asc` beside every file not already `*.asc`,
+  the form Nexus staging and Maven Central expect.
+- **Release tag:** an annotated tag, signed through Sigul and verified
+  against the project's public GPG key before it is pushed. A
+  lightweight tag already present blocks the push, as on Jenkins.
+- **Container images:** signed by digest with a cosign key pair, not
+  keyless. This belongs to a container release lane, not these Maven
+  workflows: `cps` stages images in a separate `gerrit-maven-docker-stage`
+  job, with its own release file (`distribution_type: container`) and
+  its own `log_dir`, and that file names images by tag, not digest. A
+  container lane has to record the digests at stage time before cosign
+  can sign them. Jenkins downloads cosign from `releases/latest` with no
+  pin or checksum; that lane will pin it like every other tool.
+
+Sigul needs the client configuration, key passphrase, NSS PKI bundle
+and the bridge's address. On Jenkins these are three managed files
+(`sigul-config`, `sigul-password`, `sigul-pki`); here they load through
+`credential-load-action` into the signing job alone, never the build.
+
+Each signing job takes an artefact in and hands one on, so what follows
+does not care how the signatures were made. Sigstore keyless signing,
+if a consumer ever needs it and can reach it, would replace a job, not
+reshape the lane. Some Gerrit-mirrored and air-gapped consumers cannot
+reach public Sigstore infrastructure, which is why Sigul stays the
+default.
+
+### Release workflow
+
+1. `verify-release-schema-action` validates the release file that
+   triggered the run. From v1.0.0 it publishes the file's fields as
+   outputs (`version`, `log_dir`, `ref`, `git_tag` and the rest), so
+   no step re-parses the YAML. The release file and its `log_dir` stay
+   the data bus: `log_dir` is what locates the stage record.
+2. Read the stage record, and refuse to continue unless its project
+   and version match the release file exactly. A stale or mistyped
+   `log_dir` would otherwise promote one version and tag another.
+   Jenkins checks this by searching the stage job's console log for the
+   version string (`release-job.sh` `verify_version_match_release`),
+   which a substring can satisfy; the record makes it an exact
+   comparison. Only then promote its staging repository with
+   `nexus-staging-action`'s `release` mode, under the Nexus credential.
+3. For a project that publishes to Central, publish the deployment the
+   stage record names. The stage workflow uploads with
+   `central-publish-action` in its default `USER_MANAGED` mode, which
+   validates without publishing, so publication waits for the release,
+   as the Nexus promotion does. `AUTOMATIC` would publish at stage time
+   and break that.
+4. Recreate the release commit from the stage record's source commit
+   and bundle, tag it with a Sigul-signed annotated tag, and create the
+   GitHub release, the signing in a job of its own.
+
+SBOM and Grype run on both lanes, for information on merges (D-3).
+Attestation runs on the release path alone and, like signing, in its
+own job, as the node lane's `attest` job does. The Nexus promotion
+moves files by repository ID without downloading them, so the job
+attests the subjects the stage record lists, verified against the
+closed staging repository, rather than a build artefact long gone. The
+Python release lane attests inside its build job, which holds
+`id-token: write` while the project builds; this lane deliberately does
+not follow it.
+
+### Release-lane prerequisites
+
+`nexus-staging-action` v0.1.1 cannot yet guarantee a complete, closed
+candidate, which the release lane depends on:
+
+- **Partial uploads:** stage mode fails only when every upload fails,
+  so a staging repository missing files still closes and succeeds.
+  Any upload failure must fail the stage.
+- **Close is asynchronous:** stage mode requests the close with one
+  call to `/finish` and reports success without waiting. Nexus closes
+  in the background and runs its staging rules, which can fail; the
+  action must poll for the outcome, as its `release` mode already
+  checks for the `CLOSED` state before promoting.
+
+Without both, the lane could report a staged candidate and later promote
+an incomplete repository, or one whose close failed.
+
+`central-publish-action` v0.1.1 uploads and validates (`USER_MANAGED`)
+and reports the `deployment_id`, but has no mode that publishes an
+existing deployment by ID. The release workflow needs one, or Central
+publishing stays out of the first release lane.
+
+### Open questions
+
+- **Nexus2 staging model:** `maven-stage-prep-action` and
+  `nexus-staging-action` (`stage`, `close`, `release`, `drop`) exist,
+  but the reusable model still needs designing: the staging profile per
+  project (OpenDaylight passes `staging-profile-id`), and where the
+  stage record lives for the release file's `log_dir` to find. Jenkins
+  keeps the equivalent in its log archive; the GitHub equivalent could
+  be a release asset or an object store, but not a workflow artefact,
+  which expires. A release file picks a staged build whenever the
+  project decides to release: `cps` 3.8.1 and 3.8.2 name stage builds
+  975 and 978, three builds apart, yet their release files merged seven
+  weeks apart.
+- **OpenDaylight autorelease:** OpenDaylight also stages and signs
+  through its cross-project autorelease and MRI stage jobs. This lane
+  covers a single project's stage and release; whether autorelease moves
+  onto it is a later decision.
+
+Neither lane ships as a placeholder: each lands complete and functional,
+under the filename-prefix convention above.
+
+## Supporting building-block actions
+
+The lanes compose actions from sibling `lfreleng-actions` repos. The
+Java-specific enhancements land as separate PRs in those repos before
+this repository wires them together:
+
+<!-- markdownlint-disable MD013 -->
+
+| Action                           | Lane                | Role                                                          |
+| -------------------------------- | ------------------- | ------------------------------------------------------------- |
+| `build-metadata-action`          | All                 | Java version + release metadata detection                     |
+| `maven-build-action`             | All                 | Maven setup + lifecycle build                                 |
+| `gradle-build-action`            | Verify              | Gradle setup + build (brought to Maven parity)                |
+| `junit-test-report-action`       | Verify              | JUnit XML rendering + check                                   |
+| `sbom-action`                    | All                 | CycloneDX SBOM generation (cyclonedx backend, resolved graph) |
+| `grype-scan-action`              | All                 | Vulnerability scan over the generated SBOM                    |
+| `maven-xml-settings-action`      | Merge, release      | Nexus `settings.xml` synthesis                                |
+| `maven-snapshot-metadata-action` | Merge               | Seed and prune SNAPSHOT metadata around the deploy            |
+| `nexus-publish-action`           | Merge               | Upload the SNAPSHOT `m2repo` to Nexus                         |
+| `credential-load-action`         | Merge, release      | Load a publish or signing credential into one job             |
+| `maven-stage-prep-action`        | Release             | Version the reactor for a release build                       |
+| `nexus-staging-action`           | Release             | Stage, then promote, in Nexus2                                |
+| `sigul-sign-action`              | Release             | Sigul signing of artefacts and the release tag (in rework)    |
+| `verify-release-schema-action`   | Release             | Validate the release file and publish its fields              |
+| `central-publish-action`         | Release             | Maven Central publishing, where a project uses it             |
 
 <!-- markdownlint-enable MD013 -->
 
