@@ -38,6 +38,15 @@ on:
         required: false
         type: string
         default: ''
+      checkout_submodules:
+        description: >-
+          Check out git submodules in every job that checks out the
+          repository, on the Gerrit and plain checkout paths alike, so
+          the build, SBOM and CBOM all see modules a submodule carries.
+          The Gerrit path also initialises submodules the change adds.
+        required: false
+        type: boolean
+        default: false
 
       # --- Project layout ---
       path_prefix:
@@ -351,6 +360,18 @@ jobs:
           delay: '0s'
           repository: ${{ inputs.repository || github.repository }}
           ref: refs/heads/${{ inputs.gerrit_branch }}
+          submodules: ${{ inputs.checkout_submodules }}
+      # checkout-gerrit-change-action v1.1.0 initialises submodules on
+      # the base branch, then runs a plain git submodule update after
+      # switching to the change, which skips any submodule the change
+      # adds or moves. Initialise them here; see docs/BRIEF.md.
+      - name: 'Initialise Gerrit change submodules'
+        if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync
+          git submodule update --init
       - name: 'Checkout repository'
         if: inputs.gerrit_refspec == ''
         # yamllint disable-line rule:line-length
@@ -360,6 +381,7 @@ jobs:
           ref: ${{ inputs.ref }}
           fetch-depth: 0
           persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
 
       - name: 'Gather repository metadata'
         id: repo-metadata
@@ -425,6 +447,18 @@ jobs:
           delay: '0s'
           repository: ${{ inputs.repository || github.repository }}
           ref: refs/heads/${{ inputs.gerrit_branch }}
+          submodules: ${{ inputs.checkout_submodules }}
+      # checkout-gerrit-change-action v1.1.0 initialises submodules on
+      # the base branch, then runs a plain git submodule update after
+      # switching to the change, which skips any submodule the change
+      # adds or moves. Initialise them here; see docs/BRIEF.md.
+      - name: 'Initialise Gerrit change submodules'
+        if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync
+          git submodule update --init
       - name: 'Checkout repository'
         if: inputs.gerrit_refspec == ''
         # yamllint disable-line rule:line-length
@@ -433,6 +467,7 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
           persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
 
       # Detect Java/Gradle project metadata: Java version (including
       # sourceCompatibility/targetCompatibility and toolchain settings),
@@ -660,6 +695,18 @@ jobs:
           delay: '0s'
           repository: ${{ inputs.repository || github.repository }}
           ref: refs/heads/${{ inputs.gerrit_branch }}
+          submodules: ${{ inputs.checkout_submodules }}
+      # checkout-gerrit-change-action v1.1.0 initialises submodules on
+      # the base branch, then runs a plain git submodule update after
+      # switching to the change, which skips any submodule the change
+      # adds or moves. Initialise them here; see docs/BRIEF.md.
+      - name: 'Initialise Gerrit change submodules'
+        if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync
+          git submodule update --init
       - name: 'Checkout repository'
         if: inputs.gerrit_refspec == ''
         # yamllint disable-line rule:line-length
@@ -668,6 +715,7 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
           persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
 
       # When the caller pins gradle_version, the build job runs that
       # provisioned Gradle rather than the wrapper, so this job must too
@@ -945,6 +993,18 @@ jobs:
           delay: '0s'
           repository: ${{ inputs.repository || github.repository }}
           ref: refs/heads/${{ inputs.gerrit_branch }}
+          submodules: ${{ inputs.checkout_submodules }}
+      # checkout-gerrit-change-action v1.1.0 initialises submodules on
+      # the base branch, then runs a plain git submodule update after
+      # switching to the change, which skips any submodule the change
+      # adds or moves. Initialise them here; see docs/BRIEF.md.
+      - name: 'Initialise Gerrit change submodules'
+        if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync
+          git submodule update --init
       - name: 'Checkout repository'
         if: inputs.gerrit_refspec == ''
         # yamllint disable-line rule:line-length
@@ -953,6 +1013,7 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           ref: ${{ inputs.ref }}
           persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
 
       # The action writes its own job summary (languages scanned,
       # asset count, file count), so no summary step follows.
