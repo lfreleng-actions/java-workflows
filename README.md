@@ -42,44 +42,63 @@ their own. "Caller trigger" is the event on which the shipped
 
 The `maven-build-test.yaml` and `gradle-build-test.yaml` workflows are
 complete. A `repository-metadata` job runs in parallel as an
-informational step that does not gate the build. After `build`, the
-test, SBOM/Grype and CBOM branches run in parallel (jobs in `{ }` run
-concurrently; `->` denotes sequence):
+informational step that does not gate the build. Everything that needs
+the built tree runs inside `build`. The Grype audit, which needs
+nothing but the SBOM document, runs after it (`->` denotes sequence):
 
 ```text
-build -> { tests | sbom -> grype | cbom }
+build -> grype
 ```
 
-The `build` job detects the project's Java version through
-`build-metadata-action`, runs the build with `maven-build-action` or
-`gradle-build-action`, gathers the JUnit XML the build emits, and uploads
-it as an artefact. The `tests` job renders that XML through
-`junit-test-report-action` into the job summary (it does not create a
-check-run) and runs even when the build fails, so test failures
-still surface a report. The `sbom` job generates a CycloneDX SBOM with
-`sbom-action` and feeds the JSON document to `grype` under the
-`grype_fail_on` gate. Both lanes use the action's `cyclonedx` backend,
-which runs the CycloneDX Maven or Gradle plugin over the build tool's
-resolved dependency graph. A static scan misses transitive dependencies
-and BOM-managed versions in a `pom.xml`, and finds nothing in a Gradle
-project without a `gradle.lockfile` (issues #47 and #48). A Gradle
-wrapper older than the plugin supports (8.4, or 8.5 on Java 21) skips
-the SBOM and Grype with a warning rather than failing the run.
+The `build` job builds the project once and does everything that
+depends on the result in the same job, so no job checks out, resolves
+or builds it a second time. It detects the project's Java version
+through `build-metadata-action`, runs the build with
+`maven-build-action` or `gradle-build-action`, then:
+
+1. gathers the JUnit XML, uploads it, and renders it through
+   `junit-test-report-action` into the job summary (it does not create a
+   check-run);
+2. generates a CycloneDX SBOM with `sbom-action` and uploads it;
+3. generates a CBOM with `cbom-action` and uploads it.
+
+Each of these runs whatever the build's outcome, so a test failure still
+surfaces its report, SBOM and CBOM. The `grype` job then audits the SBOM
+under the `grype_fail_on` gate. It stays a separate job because it
+judges rather than describes: it reads nothing but the document,
+fetches its own vulnerability database, and reports its verdict as a
+status of its own.
+
+Both lanes use `sbom-action`'s `cyclonedx` backend, which runs the
+CycloneDX Maven or Gradle plugin over the dependency graph the build
+resolved, from the local repository or Gradle user home the build
+populated. A static scan misses transitive dependencies and BOM-managed
+versions in a `pom.xml`, and finds nothing in a Gradle project without a
+`gradle.lockfile` (issues #47 and #48). A Gradle wrapper older than the
+plugin supports (8.4, or 8.5 on Java 21) skips the SBOM and Grype with a
+warning rather than failing the run.
+
+The per-step timeout inputs (`tests_timeout_minutes`,
+`sbom_timeout_minutes`, `cbom_timeout_minutes`) each bound their own
+step, and each falls within `build_timeout_minutes`, which bounds the
+whole job.
 
 The Maven `build` job passes `mvn_opts`, `mvn_pom_file` and `env_vars`
 through to `maven-build-action`; each empty value keeps the action's
 default. Java detection reads the selected POM's directory, and a POM
-not named `pom.xml` requires `java_version`. The SBOM job resolves the
+not named `pom.xml` requires `java_version`. The SBOM step resolves the
 graph the build resolves, so it receives `mvn_opts` alongside
-`mvn_profiles` and `mvn_params`, and exports the same `env_vars`. It
-resolves `path_prefix/pom.xml`, and fails when `mvn_pom_file` names
-another POM rather than describe a different project; set `path_prefix`
-to that POM's directory instead. `env_vars` takes a JSON object of named
+`mvn_profiles` and `mvn_params`, and inherits the build's `env_vars`
+export. It resolves `path_prefix/pom.xml`, so with `sbom_enabled` set
+the build job fails when `mvn_pom_file` names another POM rather than
+describe a different project; set `path_prefix` to that POM's directory
+instead. `env_vars` takes a JSON object of named
 variables in place of `toJSON(vars)`. The export upper-cases each name
 and skips one whose variable already holds a non-empty value; it
-overwrites a variable that is present but empty. The SBOM job fails on
-a name that is not an ASCII identifier, and on one that either Maven
-step sets itself, such as `MAVEN_ARGS`. Both lanes take
+overwrites a variable that is present but empty. With `sbom_enabled`
+set, the build job fails on a name that is not an ASCII identifier, and
+on one that either Maven step sets itself, such as `MAVEN_ARGS`. Both
+lanes take
 `checkout_submodules` (default `false`), which checks out submodules in
 every job that checks out the repository, including those a Gerrit
 change adds.
@@ -91,32 +110,33 @@ the Gradle `test` task) runs the tests as part of its own lifecycle.
 
 ### CBOM (informational)
 
-The `cbom` job runs `cbom-action` to produce a CycloneDX Cryptography
+The CBOM steps run `cbom-action` to produce a CycloneDX Cryptography
 Bill of Materials: the algorithms, key sizes, modes, protocols and
 certificates the code actually calls. An SBOM cannot express that, and
 a CBOM is what post-quantum readiness assessments read.
 
-**It never fails the workflow run.** The job sets `continue-on-error`
-and pins the action's `fail_on_error` to `false`, so a scanner error, a
-rejected input, or the job timeout all leave the run green. That covers
-the whole leg on purpose — there is no `cbom_permit_fail` input,
-because the report is advisory by contract rather than by configuration.
-Set `cbom_enabled: false` to drop the job entirely.
+**It never fails the workflow run.** Both steps set `continue-on-error`
+and the lane pins the action's `fail_on_error` to `false`, so a scanner
+error, a rejected input, or the step timeout all leave the run green.
+The scan's timeout is also clamped to what remains of
+`build_timeout_minutes`, less a five-minute margin, so the job timeout
+cannot land on it; with no time left, the scan skips with a warning.
+That covers the whole leg on purpose — there is no `cbom_permit_fail`
+input, because the report is advisory by contract rather than by
+configuration. Set `cbom_enabled: false` to drop it.
 
-It runs in parallel with the test and SBOM legs and gates nothing, so it
-never delays another job. The run as a whole still waits for it, as it
-does for every job, so a scan that outlasts every other branch extends
-the total; `cbom_timeout_minutes` bounds that. In the self-test it takes
-30–40 seconds, well inside the build. `needs: build` orders it
-after the build; it does its own checkout and reads no build output.
-
-One accuracy caveat follows from that. The scanner resolves Java symbols
-from compiled classes and dependency jars where it finds them, and this
-job scans a tree it has not built, so it resolves fewer symbols than a
-scan over a built reactor would. Read the asset count as a floor.
+It scans the tree the build job has built, so the scanner resolves
+Java symbols against compiled classes rather than bare source, which
+`cbom-action` documents as resolving fewer. Dependency jars sit in the
+local repository or Gradle user home, outside the directory the action
+scans, so they stay out of its reach. Detection also covers specific
+cryptographic libraries rather than the whole language; see the
+[CBOMkit documentation](https://github.com/PQCA/cbomkit) for which. An
+empty CBOM means the scanner found none of those libraries, not that
+the code uses no cryptography.
 
 CBOM files upload as `cbom-files-maven` / `cbom-files-gradle` with 45-day
-retention, matching the SBOM artefacts. The job writes reports under
+retention, matching the SBOM artefacts. The steps write reports under
 `RUNNER_TEMP`, never the workspace, so a project that tracks its own
 `cbom.json` keeps it. The scanner image is a digest pinned inside
 `cbom-action`, so it moves when the action pin moves rather than
@@ -139,7 +159,7 @@ Fixing it needs explicit metadata inputs on `cbom-action`.
 | `cbom_exclude`         | string  | `''`    | Comma-separated Java regex patterns to exclude; empty skips test sources                 |
 | `cbom_module_cboms`    | boolean | `true`  | Emit a per-module CBOM alongside the consolidated one                                    |
 | `cbom_empty_cboms`     | boolean | `true`  | Write CBOM files even when the scan finds no cryptographic assets                        |
-| `cbom_timeout_minutes` | number  | `30`    | Timeout for the CBOM job, covering the container image pull as well as the scan          |
+| `cbom_timeout_minutes` | number  | `30`    | Timeout for the CBOM step, covering the container image pull as well as the scan         |
 
 <!-- markdownlint-enable MD013 -->
 

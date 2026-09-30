@@ -90,7 +90,7 @@ on:
           example '-Dmaven.repo.local=/tmp/r -Dkaraf.keep.unpack'.
           Non-empty replaces the action's default options, which set
           maven.repo.local and the Pax URL local repository to /tmp/r
-          and quiet transfer logging; empty keeps them. The SBOM job
+          and quiet transfer logging; empty keeps them. The SBOM step
           receives the value too.
         required: false
         type: string
@@ -100,22 +100,24 @@ on:
           POM to build, relative to path_prefix (maven-build-action
           mvn-pom-file). Empty means pom.xml. Java detection reads the
           selected POM's directory; a POM not named pom.xml requires
-          java_version. The SBOM job resolves path_prefix/pom.xml, so it
-          fails when this names another POM rather than describe a
-          different project. For a pom.xml in a subdirectory, set
-          path_prefix to that directory instead.
+          java_version. The SBOM step resolves path_prefix/pom.xml, so
+          the build job fails when this names another POM and
+          sbom_enabled is set, rather than describe a different
+          project. For a pom.xml in a subdirectory, set path_prefix to
+          that directory instead.
         required: false
         type: string
         default: ''
       env_vars:
         description: >-
           JSON object of named variables exported to the environment of
-          the build (maven-build-action env-vars) and of the SBOM job,
-          which resolves the same graph, for example '{"MY_FLAG": "1"}'.
+          the build job (maven-build-action env-vars), where the SBOM
+          step inherits them, for example '{"MY_FLAG": "1"}'.
           Names are upper-cased. A name whose variable already holds a
-          non-empty value is skipped; an empty one is overwritten. The
-          SBOM job fails on a name that is not an ASCII identifier, and
-          on one either Maven step sets itself, such as MAVEN_ARGS.
+          non-empty value is skipped; an empty one is overwritten. With
+          sbom_enabled set, the build job fails on a name that is not
+          an ASCII identifier, and on one either Maven step sets
+          itself, such as MAVEN_ARGS.
           Name each variable rather than
           passing toJSON(vars), which exports every repository
           variable. Inputs are not masked, so never pass secrets.
@@ -133,7 +135,7 @@ on:
         description: >-
           Permit test failures without failing the workflow. Adds
           -Dmaven.test.failure.ignore=true so the build completes, then
-          the tests job reports results without failing.
+          the test summary reports results without failing.
         required: false
         type: boolean
         default: false
@@ -177,14 +179,14 @@ on:
       # express, and it feeds post-quantum readiness assessments.
       #
       # There is deliberately no cbom_permit_fail alongside these: the
-      # leg is advisory by contract, so the job pins the action's
-      # fail_on_error to false and carries continue-on-error. Callers
-      # that do not want the report turn the whole job off instead.
+      # leg is advisory by contract, so its steps pin the action's
+      # fail_on_error to false and carry continue-on-error. Callers
+      # that do not want the report turn it off instead.
       cbom_enabled:
         description: >-
           Generate a CycloneDX Cryptography Bill of Materials (CBOM).
-          Informational: the job never fails the workflow run. Set
-          false to drop it.
+          Informational: it never fails the workflow run. Set false
+          to drop it.
         required: false
         type: boolean
         default: true
@@ -228,13 +230,13 @@ on:
         default: 'block'
       build_permit_egress_traffic:
         description: >
-          Run harden-runner in audit mode for the build and SBOM jobs
-          only, permitting unrestricted egress. Use when the build
-          fetches dependencies from CDNs that are impractical to
-          enumerate in the allow-list; the SBOM job resolves the same
-          dependency graph, so it needs the same reach. Other jobs stay
-          governed by harden_runner_egress; left unset, the build and
-          SBOM jobs follow it too.
+          Run harden-runner in audit mode for the build job only,
+          permitting unrestricted egress. Use when the build fetches
+          dependencies from CDNs that are impractical to enumerate in
+          the allow-list. The SBOM and CBOM run inside the build job,
+          so they share its policy. Other jobs stay governed by
+          harden_runner_egress; left unset, the build job follows it
+          too.
         required: false
         type: boolean
         default: false
@@ -245,26 +247,29 @@ on:
         # yamllint disable-line rule:line-length
         default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@beca7ffe87eac9212c70fe52d0d38d3bd61bf9d1'  # v0.16.2
 
-      # --- Job timeouts (minutes) ---
-      # Sized per job rather than uniformly. The build, test-report and
-      # audit jobs scale with the size of the project, so they are
-      # configurable; the validation and metadata jobs do fixed work and
-      # are not. Defaults suit a large multi-module reactor on a busy
-      # shared runner, where dependency resolution, image pulls and
-      # vulnerability database downloads are all slower than they look
-      # locally. They bound a hung job, so erring high costs nothing.
+      # --- Timeouts (minutes) ---
+      # The test summary, SBOM and CBOM run as steps inside the build
+      # job, each bounded by its own step timeout below, and all of them
+      # within build_timeout_minutes, which bounds the whole job. Size
+      # that one for the build plus these steps. Grype stays a separate
+      # job with its own timeout. The validation and metadata jobs do
+      # fixed work and are not configurable. Defaults suit a large
+      # multi-module reactor on a busy shared runner; they bound a hung
+      # job or step, so erring high costs nothing.
       build_timeout_minutes:
-        description: 'Timeout for the build job'
+        description: >-
+          Timeout for the build job, including the test summary, SBOM
+          and CBOM steps that run within it.
         required: false
         type: number
         default: 45
       tests_timeout_minutes:
-        description: 'Timeout for the test reporting job'
+        description: 'Timeout for the test summary step'
         required: false
         type: number
         default: 30
       sbom_timeout_minutes:
-        description: 'Timeout for the SBOM generation job'
+        description: 'Timeout for the SBOM generation step'
         required: false
         type: number
         default: 30
@@ -275,7 +280,7 @@ on:
         default: 30
       cbom_timeout_minutes:
         description: >-
-          Timeout for the CBOM generation job. Covers a container image
+          Timeout for the CBOM generation step. Covers a container image
           pull as well as the scan itself.
         required: false
         type: number
@@ -462,10 +467,11 @@ jobs:
     needs: gerrit-validate
     runs-on: ubuntu-latest
     outputs:
-      java_version: ${{ steps.metadata.outputs.java_version }}
       coverage: ${{ steps.build.outputs.coverage }}
       branch_coverage: ${{ steps.build.outputs.branch_coverage }}
-      reports_found: ${{ steps.reports.outputs.found }}
+      # Read by the Grype job, which runs whenever an SBOM was uploaded,
+      # including after a test failure.
+      sbom_uploaded: ${{ steps.upload-sbom.outcome == 'success' }}
       # Surfaced so a caller's downstream job can locate the
       # publish-ready repository layout without re-deriving the path.
       m2repo_exists: ${{ steps.build.outputs.m2repo_exists }}
@@ -494,11 +500,122 @@ jobs:
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        env:
+          # The CBOM scanner is a container, so its image pull needs the
+          # registry endpoints. The organisation allow-list already
+          # carries both; naming them here keeps the CBOM working when a
+          # caller points harden_runner_allowlist at a narrower list.
+          # yamllint disable-line rule:line-length
+          CBOM_ENDPOINTS: ${{ inputs.cbom_enabled && 'ghcr.io:443 pkg-containers.githubusercontent.com:443' || '' }}
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ (inputs.build_permit_egress_traffic || inputs.harden_runner_egress == 'audit') && 'audit' || 'block' }}
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
+            ${{ env.CBOM_ENDPOINTS }}
+
+      # sbom-action resolves path_prefix/pom.xml and rejects -f/--file,
+      # since an alternate POM would escape the directory it validated.
+      # A build of any other POM would leave the SBOM step describing a
+      # different project from the one built, under the same name, so
+      # fail rather than upload it. The Gradle lane fails the same way
+      # on its project-selection options. Runs first: it needs no
+      # checkout, so a mismatch costs nothing. Skipped with the SBOM,
+      # which is how a caller builds another POM.
+      - name: 'Require the POM the SBOM resolves'
+        id: pom-guard
+        if: inputs.sbom_enabled
+        shell: bash
+        env:
+          MVN_POM_FILE: ${{ inputs.mvn_pom_file }}
+        run: |
+          set -euo pipefail
+          pom="${MVN_POM_FILE}"
+          while [ "${pom#./}" != "${pom}" ]; do
+            pom="${pom#./}"
+          done
+          case "${pom}" in
+            '' | 'pom.xml') exit 0 ;;
+          esac
+          # Escape the workflow-command metacharacters, % first, so the
+          # value cannot end the annotation and start another command.
+          shown="${MVN_POM_FILE//'%'/'%25'}"
+          shown="${shown//$'\r'/'%0D'}"
+          shown="${shown//$'\n'/'%0A'}"
+          echo "::error::mvn_pom_file selects '${shown}', but the" \
+            "SBOM step resolves path_prefix/pom.xml, so the SBOM would" \
+            "not describe the build. Set path_prefix to the directory" \
+            "holding the POM, or set sbom_enabled: false."
+          exit 1
+
+      # env_vars reaches resolution: a profile can activate on an
+      # env.* property, a POM can read one into a version, and
+      # MAVEN_OPTS carries system properties into Maven. The build
+      # step exports it to GITHUB_ENV, so the SBOM step inherits it. A
+      # name that either Maven step sets itself would hold one value
+      # there and the exported value in the other, since a step's own
+      # env: wins over GITHUB_ENV: sbom-action's generate step forces
+      # MAVEN_ARGS empty, for one. Fail on those rather than resolve
+      # another graph. The lists come from sbom-action v0.2.0 and
+      # maven-build-action v0.4.3; recheck them when either pin moves.
+      - name: 'Require an environment the SBOM can reproduce'
+        id: env-guard
+        if: inputs.sbom_enabled
+        shell: bash
+        env:
+          ENV_VARS: ${{ inputs.env_vars }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ENV_VARS}" ]; then
+            exit 0
+          fi
+          if ! jq -e 'type == "object"' <<< "${ENV_VARS}" > /dev/null; then
+            echo '::error::env_vars must be a JSON object of named' \
+              'variables.'
+            exit 1
+          fi
+          # vars-to-env-action upper-cases each name with JavaScript's
+          # toUpperCase(), which maps some non-ASCII letters onto ASCII
+          # ones: 'maven_arg\u017f' exports as MAVEN_ARGS. jq's
+          # ascii_upcase leaves them, so such a name would pass the
+          # comparison below. Reject every name that is not an ASCII
+          # identifier, since both upper-case those alike. The count
+          # keeps the names themselves out of the annotation.
+          invalid="$(jq -r '[keys[]
+            | select(test("\\A[A-Za-z_][A-Za-z0-9_]*\\z") | not)]
+            | length' <<< "${ENV_VARS}")"
+          if [ "${invalid}" != '0' ]; then
+            echo "::error::env_vars holds ${invalid} name(s) that are" \
+              'not ASCII identifiers ([A-Za-z_][A-Za-z0-9_]*).'
+            exit 1
+          fi
+          reserved=' MAVEN_ARGS BACKEND DEPENDENCY_MANAGER SKIPPED'
+          reserved+=' SKIP_REASON SYFT_CMD PROJECT_DIR SBOM_FORMAT'
+          reserved+=' SPEC_VERSION FILENAME_PREFIX OUTPUT_DIRECTORY'
+          reserved+=' INCLUDE_DEV FAIL_ON_ERROR MAVEN_PLUGIN_VERSION'
+          reserved+=' INPUT_MAVEN_ARGS GRADLE_PLUGIN_VERSION'
+          reserved+=' GRADLE_VERSION GRADLE_MINIMUM JAVA_VERSION'
+          reserved+=' INPUT_GRADLE_ARGS'
+          reserved+=' SYFT_JAVASCRIPT_INCLUDE_DEV_DEPENDENCIES'
+          reserved+=' PATH_PREFIX GLOBAL_SETTINGS MVN_PHASES MVN_POM_FILE'
+          reserved+=' MVN_PROFILES MVN_OPTS MVN_PARAMS JACOCO_ARGS '
+          status=0
+          while IFS= read -r name; do
+            case "${reserved}" in
+              *" ${name} "*)
+                echo "::error::env_vars sets ${name}, which the build or" \
+                  "SBOM step sets itself, so the two would resolve" \
+                  "with different values."
+                status=1 ;;
+            esac
+          done < <(jq -r 'keys[] | ascii_upcase' <<< "${ENV_VARS}")
+          exit "${status}"
+
+      # Read by the CBOM budget step below.
+      - name: 'Record job start'
+        id: job-start
+        shell: bash
+        run: echo "epoch=$(date +%s)" >> "${GITHUB_OUTPUT}"
 
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
@@ -596,7 +713,7 @@ jobs:
           mvn-profiles: ${{ inputs.mvn_profiles }}
           # When test failures are permitted, let Maven complete the build
           # (so artefacts and reports are produced) and defer the pass/fail
-          # verdict to the tests job's report gate.
+          # verdict to the test summary's report gate.
           # yamllint disable-line rule:line-length
           mvn-params: ${{ inputs.test_permit_fail && format('{0} -Dmaven.test.failure.ignore=true', inputs.mvn_params) || inputs.mvn_params }}
           # A composite action applies an input default only when the
@@ -623,8 +740,8 @@ jobs:
         env:
           PATH_PREFIX: ${{ inputs.path_prefix }}
         run: |
-          # Copy Surefire/Failsafe XML out of the reactor so the tests
-          # job can render a summary without rebuilding the project.
+          # Copy Surefire/Failsafe XML out of the reactor, for the
+          # summary below and for the uploaded artefact.
           set -euo pipefail
           dest="junit-reports"
           found=0
@@ -646,6 +763,29 @@ jobs:
           name: maven-junit-reports
           path: junit-reports
           if-no-files-found: warn
+
+      # Maven ran the tests during the build step, so a test failure has
+      # already failed it. This only renders the collected XML, and so
+      # runs whatever the build's outcome.
+      - name: 'Summarise test results'
+        if: ${{ !cancelled() && steps.reports.outputs.found == '1' }}
+        timeout-minutes: ${{ inputs.tests_timeout_minutes }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/junit-test-report-action@cbc41af8f2e0cf6363d5b04df00025f938bf9a5e  # v0.0.2
+        with:
+          report-paths: 'junit-reports/**/*.xml'
+          fail-on-failure: ${{ !inputs.test_permit_fail }}
+          # Uploaded above as maven-junit-reports; disable the action's
+          # own upload to avoid a duplicate artefact.
+          artifact-upload: 'false'
+
+      - name: 'No test reports'
+        if: ${{ !cancelled() && steps.reports.outputs.found != '1' }}
+        shell: bash
+        run: |
+          # The build produced no Surefire/Failsafe XML (a project with
+          # no tests, or a build that stopped before the test phase).
+          echo 'No JUnit reports were produced by the build'
 
       # Two shapes can come out of a Maven build and they are not
       # interchangeable. A deploy phase writes a repository layout to
@@ -727,269 +867,26 @@ jobs:
           retention-days: ${{ inputs.build_artifact_retention_days }}
           if-no-files-found: error
 
-  tests:
-    name: 'Tests'
-    runs-on: ubuntu-latest
-    needs: 'build'
-    # Run whenever build was not skipped, INCLUDING a failed build: Maven
-    # runs the tests during the build, so a test failure fails the build
-    # job. The report must still render, so gate on 'not skipped' rather
-    # than 'success'.
-    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
-    permissions:
-      contents: read
-    timeout-minutes: ${{ inputs.tests_timeout_minutes }}
-    steps:
-      # One harden-runner step with the policy computed, rather than
-      # two selected by condition: harden-runner declares a 'pre'
-      # entry point and no 'pre-if', so its pre-phase runs whatever
-      # a step-level 'if:' says. Both would engage the agent, the
-      # first would win, and audit mode would be unreachable.
-      - name: 'Load egress allow-list'
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
-        with:
-          config: ${{ inputs.harden_runner_allowlist }}
-          allow_list_summary: 'false'
-      - name: 'Harden runner'
-        # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
-        with:
-          # yamllint disable-line rule:line-length
-          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
-          allowed-endpoints: >
-            ${{ env.CONNECTION_ALLOW_LIST }}
+      # --- SBOM ---
+      # Generated in the job that built the project, so it describes the
+      # dependency graph this build has just resolved rather than
+      # resolving it a second time. The cyclonedx backend resolves
+      # without compiling, so these steps still produce an SBOM after a
+      # test or compile failure; only a resolution failure leaves
+      # nothing to describe.
 
-      # Maven runs the unit tests during the build (mvn install), which
-      # already gates this job. This job only renders a JUnit summary
-      # from the XML the build job collected, so it does not check out
-      # the source tree; it consumes the downloaded artefact instead.
-      - name: 'Download JUnit reports'
-        if: ${{ needs.build.outputs.reports_found == '1' }}
-        # yamllint disable-line rule:line-length
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: maven-junit-reports
-          path: junit-reports
-
-      - name: 'Summarise test results'
-        if: ${{ needs.build.outputs.reports_found == '1' }}
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/junit-test-report-action@cbc41af8f2e0cf6363d5b04df00025f938bf9a5e  # v0.0.2
-        with:
-          report-paths: 'junit-reports/**/*.xml'
-          fail-on-failure: ${{ !inputs.test_permit_fail }}
-          # The build job already uploads the XML as maven-junit-reports;
-          # disable the action's own upload to avoid a duplicate artefact.
-          artifact-upload: 'false'
-
-      - name: 'No test reports'
-        if: ${{ needs.build.outputs.reports_found != '1' }}
-        shell: bash
-        run: |
-          # The build produced no Surefire/Failsafe XML (a project with
-          # no tests, or a build that stopped before the test phase).
-          echo 'No JUnit reports were produced by the build'
-
-  sbom:
-    name: 'Generate SBOM'
-    runs-on: ubuntu-latest
-    needs: 'build'
-    # Runs whenever build was not skipped: the SBOM job does its own
-    # checkout and does not depend on the build's artefacts, so it keeps
-    # producing the dependency-scan signal even when the build fails
-    # (for example on a test failure). The cyclonedx backend resolves
-    # dependencies without compiling, so only a dependency resolution
-    # failure fails this job, and then there is no graph to describe.
-    # yamllint disable-line rule:line-length
-    if: ${{ !cancelled() && needs.build.result != 'skipped' && inputs.sbom_enabled }}
-    timeout-minutes: ${{ inputs.sbom_timeout_minutes }}
-    permissions:
-      contents: read
-    steps:
-      # One harden-runner step with the policy computed, rather than
-      # two selected by condition: harden-runner declares a 'pre'
-      # entry point and no 'pre-if', so its pre-phase runs whatever
-      # a step-level 'if:' says. Both would engage the agent, the
-      # first would win, and audit mode would be unreachable.
-      - name: 'Load egress allow-list'
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
-        with:
-          config: ${{ inputs.harden_runner_allowlist }}
-          allow_list_summary: 'false'
-      - name: 'Harden runner'
-        # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
-        with:
-          # Shares the build job's egress switch: resolving the graph
-          # reaches the same repositories the build does.
-          # yamllint disable-line rule:line-length
-          egress-policy: ${{ (inputs.build_permit_egress_traffic || inputs.harden_runner_egress == 'audit') && 'audit' || 'block' }}
-          allowed-endpoints: >
-            ${{ env.CONNECTION_ALLOW_LIST }}
-
-      # sbom-action resolves path_prefix/pom.xml and rejects -f/--file,
-      # since an alternate POM would escape the directory it validated.
-      # A build of any other POM would leave this job describing a
-      # different project from the one built, under the same name, so
-      # fail rather than upload it. The Gradle lane fails the same way
-      # on its project-selection options. Runs first: it needs no
-      # checkout, so a mismatch costs nothing.
-      - name: 'Require the POM the SBOM resolves'
-        shell: bash
-        env:
-          MVN_POM_FILE: ${{ inputs.mvn_pom_file }}
-        run: |
-          set -euo pipefail
-          pom="${MVN_POM_FILE}"
-          while [ "${pom#./}" != "${pom}" ]; do
-            pom="${pom#./}"
-          done
-          case "${pom}" in
-            '' | 'pom.xml') exit 0 ;;
-          esac
-          # Escape the workflow-command metacharacters, % first, so the
-          # value cannot end the annotation and start another command.
-          shown="${MVN_POM_FILE//'%'/'%25'}"
-          shown="${shown//$'\r'/'%0D'}"
-          shown="${shown//$'\n'/'%0A'}"
-          echo "::error::mvn_pom_file selects '${shown}', but the" \
-            "SBOM job resolves path_prefix/pom.xml, so the SBOM would" \
-            "not describe the build. Set path_prefix to the directory" \
-            "holding the POM, or set sbom_enabled: false."
-          exit 1
-
-      # env_vars reaches resolution: a profile can activate on an
-      # env.* property, a POM can read one into a version, and
-      # MAVEN_OPTS carries system properties into Maven. The export
-      # below repeats the build job's, so this job must be able to
-      # reproduce it. A name that either Maven step sets itself would
-      # hold one value there and the exported value here, or the
-      # reverse: sbom-action's generate step forces MAVEN_ARGS empty,
-      # for one. Fail on those rather than resolve another graph. The
-      # lists come from sbom-action v0.2.0 and maven-build-action
-      # v0.4.3; recheck them when either pin moves.
-      - name: 'Require an environment the SBOM can reproduce'
-        shell: bash
-        env:
-          ENV_VARS: ${{ inputs.env_vars }}
-        run: |
-          set -euo pipefail
-          if [ -z "${ENV_VARS}" ]; then
-            exit 0
-          fi
-          if ! jq -e 'type == "object"' <<< "${ENV_VARS}" > /dev/null; then
-            echo '::error::env_vars must be a JSON object of named' \
-              'variables.'
-            exit 1
-          fi
-          # vars-to-env-action upper-cases each name with JavaScript's
-          # toUpperCase(), which maps some non-ASCII letters onto ASCII
-          # ones: 'maven_arg\u017f' exports as MAVEN_ARGS. jq's
-          # ascii_upcase leaves them, so such a name would pass the
-          # comparison below. Reject every name that is not an ASCII
-          # identifier, since both upper-case those alike. The count
-          # keeps the names themselves out of the annotation.
-          invalid="$(jq -r '[keys[]
-            | select(test("\\A[A-Za-z_][A-Za-z0-9_]*\\z") | not)]
-            | length' <<< "${ENV_VARS}")"
-          if [ "${invalid}" != '0' ]; then
-            echo "::error::env_vars holds ${invalid} name(s) that are" \
-              'not ASCII identifiers ([A-Za-z_][A-Za-z0-9_]*).'
-            exit 1
-          fi
-          reserved=' MAVEN_ARGS BACKEND DEPENDENCY_MANAGER SKIPPED'
-          reserved+=' SKIP_REASON SYFT_CMD PROJECT_DIR SBOM_FORMAT'
-          reserved+=' SPEC_VERSION FILENAME_PREFIX OUTPUT_DIRECTORY'
-          reserved+=' INCLUDE_DEV FAIL_ON_ERROR MAVEN_PLUGIN_VERSION'
-          reserved+=' INPUT_MAVEN_ARGS GRADLE_PLUGIN_VERSION'
-          reserved+=' GRADLE_VERSION GRADLE_MINIMUM JAVA_VERSION'
-          reserved+=' INPUT_GRADLE_ARGS'
-          reserved+=' SYFT_JAVASCRIPT_INCLUDE_DEV_DEPENDENCIES'
-          reserved+=' PATH_PREFIX GLOBAL_SETTINGS MVN_PHASES MVN_POM_FILE'
-          reserved+=' MVN_PROFILES MVN_OPTS MVN_PARAMS JACOCO_ARGS '
-          status=0
-          while IFS= read -r name; do
-            case "${reserved}" in
-              *" ${name} "*)
-                echo "::error::env_vars sets ${name}, which a Maven step" \
-                  "in the build or SBOM job sets itself, so the two" \
-                  "would resolve with different values."
-                status=1 ;;
-            esac
-          done < <(jq -r 'keys[] | ascii_upcase' <<< "${ENV_VARS}")
-          exit "${status}"
-
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
-        with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-          submodules: ${{ inputs.checkout_submodules }}
-      # checkout-gerrit-change-action v1.1.0 initialises submodules on
-      # the base branch, then runs a plain git submodule update after
-      # switching to the change, which skips any submodule the change
-      # adds or moves. Initialise them here; see docs/BRIEF.md.
-      - name: 'Initialise Gerrit change submodules'
-        if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
-        shell: bash
-        run: |
-          set -euo pipefail
-          git submodule sync
-          git submodule update --init
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-          submodules: ${{ inputs.checkout_submodules }}
-
-      # sbom-action runs whichever mvn is on PATH, so install the Maven
-      # the build job provisions: a pinned version (Maven 4, or one a
-      # build extension requires) resolves differently from the runner
-      # image's. Same installer and pin as maven-build-action. Its
-      # checkout is off because this job checked out already, and its
-      # cache is off because this job resolves over the change under
-      # test and should write nothing later runs restore.
-      - name: 'Provision Maven'
-        # yamllint disable-line rule:line-length
-        uses: s4u/setup-maven-action@4a02cbd99769e46198135c31d5097c94618ba3f5  # v1.21.0
-        with:
-          checkout-enabled: false
-          cache-enabled: false
-          # yamllint disable-line rule:line-length
-          java-version: ${{ inputs.java_version != '' && inputs.java_version || needs.build.outputs.java_version || '21' }}
-          maven-version: ${{ inputs.mvn_version }}
-
-      # The build job's env_vars export, with the same action pin and
-      # in the same place: maven-build-action runs it after its own
-      # Java and Maven setup, so a name those set is skipped in both.
-      # The action skips a name whose variable is non-empty and
-      # overwrites one that is present but empty.
-      - name: 'Export env variables'
-        # yamllint disable-line rule:line-length
-        uses: infovista-opensource/vars-to-env-action@3d3e7c8ae1e9e5fcd9ce83e56ab85a6a135d2ffa  # 2.0.0
-        with:
-          secrets: ${{ inputs.env_vars != '' && inputs.env_vars || '{}' }}
-
-      # The same global settings the build uses, since they can define
-      # the mirrors and repositories resolution reaches: without them
-      # the SBOM could resolve a different graph, or none. Written to a
-      # private file under RUNNER_TEMP only when the secret is set, and
-      # removed by the cleanup step below whatever happens.
+      # The same global settings the build used, since they can define
+      # the mirrors and repositories resolution reaches. maven-build-action
+      # removes its own copy when it finishes, so this writes another,
+      # to a private file under RUNNER_TEMP only when the secret is set,
+      # and removes it below whatever happens. The explicit condition
+      # drops the implicit success() gate, so require both SBOM guards
+      # by name: the steps below chain on this one, and a POM or
+      # environment the guards rejected would describe another graph.
       - name: 'Install Maven global settings'
         id: settings
+        # yamllint disable-line rule:line-length
+        if: ${{ !cancelled() && inputs.sbom_enabled && steps.pom-guard.outcome == 'success' && steps.env-guard.outcome == 'success' }}
         shell: bash
         env:
           GLOBAL_SETTINGS: ${{ secrets.maven_global_settings }}
@@ -1015,17 +912,30 @@ jobs:
       # contract. The action writes its own summary, including the
       # component count.
       #
+      # Resolution reuses the local repository the build step populated.
+      # A non-empty mvn_opts reaches the build verbatim, so it is
+      # forwarded as is and names that repository itself, or leaves it
+      # at ~/.m2 in both places. An empty one gives the build the
+      # fallback above, which places it at /tmp/r, so the same
+      # maven.repo.local stands in for it here; without it Maven would
+      # use ~/.m2 and download the graph again. Should that fallback
+      # move, the SBOM stays correct and only loses the reuse.
+      #
       # untrusted_checkout is 'false' deliberately. The backend runs
       # Maven, and Maven loads project extensions, so a checkout is
       # executable input. Its 'auto' mode classifies fork pull requests
-      # as untrusted and skips, and a skip here would fail the upload
-      # below and lose the SBOM. That guard buys nothing in this
-      # workflow: the build job already runs Maven, the compiler and
-      # the tests over this same checkout, with the same read-only
-      # token and the same global settings. Maven here grants the
-      # checked-out code no reach it lacks there.
+      # as untrusted and skips, losing the SBOM. That guard buys nothing
+      # here: the build step above has already run Maven, the compiler
+      # and the tests over this same checkout, with the same read-only
+      # token and global settings.
       - name: 'Generate SBOM'
         id: sbom
+        # The explicit condition drops the implicit success() gate, so
+        # require the settings step by name: without it, resolution
+        # would bypass the mirrors and repositories the build used.
+        # yamllint disable-line rule:line-length
+        if: ${{ !cancelled() && inputs.sbom_enabled && steps.settings.outcome == 'success' }}
+        timeout-minutes: ${{ inputs.sbom_timeout_minutes }}
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/sbom-action@58b6094cf67d072d6eb772590c43ee52c8c69bb6  # v0.2.0
         with:
@@ -1034,33 +944,32 @@ jobs:
           # build tool its caller chose instead of inferring it.
           dependency_manager: 'maven'
           path_prefix: ${{ inputs.path_prefix }}
-          # Same resolution as the build job; the build job's output is
-          # set by its metadata step, before any build failure.
           # yamllint disable-line rule:line-length
-          java_version: ${{ inputs.java_version != '' && inputs.java_version || needs.build.outputs.java_version || '21' }}
-          # Resolve the graph the build resolves: the same profiles,
+          java_version: ${{ inputs.java_version != '' && inputs.java_version || steps.metadata.outputs.java_version || '21' }}
+          # Resolve the graph the build resolved: the same profiles,
           # global settings, options and parameters, in the build's
           # order, since each can add modules, repositories or
           # dependency versions. maven-build-action places mvn-opts on
           # the mvn command line, not in MAVEN_OPTS, so its -D and -P
-          # reach resolution there too. An empty mvn_opts forwards
-          # nothing: the action's /tmp/r default relocates the local
-          # repository and selects no dependency. maven-build-action
-          # also expands workspace variables such as ${GITHUB_WORKSPACE}
-          # in both strings; this path passes them to Maven unexpanded.
-          # env_vars arrives through the export step above.
+          # reach resolution there too. maven-build-action also expands
+          # workspace variables such as ${GITHUB_WORKSPACE} in both
+          # strings; this path passes them to Maven unexpanded.
+          # env_vars needs no step here: the build's export writes
+          # GITHUB_ENV, so it holds for the rest of this job.
           # yamllint disable-line rule:line-length
-          maven_args: ${{ format('{0} {1} {2} {3}', inputs.mvn_profiles != '' && format('-P{0}', inputs.mvn_profiles) || '', steps.settings.outputs.arg, inputs.mvn_opts, inputs.mvn_params) }}
+          maven_args: ${{ format('{0} {1} {2} {3}', inputs.mvn_profiles != '' && format('-P{0}', inputs.mvn_profiles) || '', steps.settings.outputs.arg, inputs.mvn_opts != '' && inputs.mvn_opts || '-Dmaven.repo.local=/tmp/r', inputs.mvn_params) }}
           untrusted_checkout: 'false'
 
       - name: 'Remove Maven global settings'
-        if: always() && steps.settings.outputs.path != ''
+        if: ${{ always() && steps.settings.outputs.path != '' }}
         shell: bash
         env:
           SETTINGS_FILE: ${{ steps.settings.outputs.path }}
         run: rm -f -- "${SETTINGS_FILE}"
 
       - name: 'Upload SBOM artifacts'
+        id: upload-sbom
+        if: ${{ !cancelled() && steps.sbom.outcome == 'success' }}
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -1074,16 +983,128 @@ jobs:
           # Glob matches whichever SBOM formats the generator produced
           path: sbom-cyclonedx.*
           retention-days: 45
-          # Fail fast: the downstream Grype job requires this artifact,
-          # so a missing/misnamed SBOM must surface here, not later
+          # The Grype job reads this artifact, so a missing or misnamed
+          # SBOM must surface here rather than there.
           if-no-files-found: error
+
+      # --- CBOM (informational) ---
+      # Scans the tree this job has just built, so the scanner resolves
+      # symbols against the compiled classes under each module's
+      # target/ rather than bare source, which cbom-action documents as
+      # resolving fewer. Dependency jars sit in /tmp/r, outside the
+      # directory the action scans, so they stay out of its reach.
+      #
+      # It cannot fail the run. The action's fail_on_error is pinned
+      # false, and continue-on-error on these steps absorbs anything the
+      # action rejects outright and the step timeout, because the value
+      # of a CBOM is the report it produces, never a verdict it
+      # withholds. Callers who do not want it set cbom_enabled false.
+      #
+      # continue-on-error cannot absorb the JOB timeout, which would end
+      # the whole job as a failure if it landed during the scan. The
+      # budget step therefore clamps the scan's timeout to what remains
+      # of build_timeout_minutes, less a margin for the setup and pre
+      # phases before the job-start stamp, the upload and the post
+      # phases, and skips the scan with a warning when nothing remains.
+      #
+      # Known limitation: the CBOM's metadata block (gitUrl, revision,
+      # commit) comes from the run's own GITHUB_* context, which names
+      # the CALLING repository and commit. Where 'repository' or 'ref'
+      # selects a different tree, and on a Gerrit-sourced run where the
+      # checked-out change is not the mirror commit, that metadata
+      # describes the caller rather than the source scanned. The
+      # cryptographic findings are unaffected. Fixing it needs explicit
+      # metadata inputs on cbom-action, which has none today.
+      #
+      # Its 'image' input is not surfaced as a workflow input. The
+      # default is a digest that travels with the action version pinned
+      # below, and a workflow input defaulting to empty cannot fall
+      # through to it: a composite action applies a default only when
+      # the input is absent, never when it arrives empty. Bump the
+      # action to move the scanner.
+      - name: 'Budget the CBOM step'
+        id: cbom-budget
+        if: ${{ !cancelled() && inputs.cbom_enabled }}
+        continue-on-error: true
+        shell: bash
+        env:
+          STARTED: ${{ steps.job-start.outputs.epoch }}
+          JOB_LIMIT: ${{ inputs.build_timeout_minutes }}
+          STEP_LIMIT: ${{ inputs.cbom_timeout_minutes }}
+          MARGIN: 5
+        run: |
+          set -euo pipefail
+          # Whole minutes, rounding elapsed time up and limits down.
+          elapsed=$(( ($(date +%s) - STARTED + 59) / 60 ))
+          remaining=$(( ${JOB_LIMIT%%.*} - elapsed - MARGIN ))
+          minutes=${STEP_LIMIT%%.*}
+          if [ "${remaining}" -lt "${minutes}" ]; then
+            minutes=${remaining}
+          fi
+          if [ "${minutes}" -lt 1 ]; then
+            echo "::warning::CBOM skipped: build_timeout_minutes leaves" \
+              "no time for it after ${elapsed} minute(s)."
+            echo "- CBOM skipped: no time left within" \
+              "\`build_timeout_minutes\`." >> "${GITHUB_STEP_SUMMARY}"
+            minutes=0
+          fi
+          echo "minutes=${minutes}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Generate CBOM'
+        id: cbom
+        # yamllint disable-line rule:line-length
+        if: ${{ !cancelled() && inputs.cbom_enabled && steps.cbom-budget.outputs.minutes != '' && steps.cbom-budget.outputs.minutes != '0' }}
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(steps.cbom-budget.outputs.minutes) }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/cbom-action@06a25686fe4ebcbb8c9f28d6948cdca7d65ed852  # v0.0.1
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
+          # Reports go to runner temp, never the workspace. The action
+          # defaults output_directory to '.', and its file_count and
+          # cbom_pattern outputs cover every cbom*.json sitting in that
+          # directory rather than only the files this scan wrote. A
+          # project that tracks its own cbom.json at the repository
+          # root would otherwise have it overwritten, counted as scan
+          # output and uploaded as though this scan produced it.
+          output_directory: ${{ runner.temp }}/cbom
+          languages: ${{ inputs.cbom_languages }}
+          exclude: ${{ inputs.cbom_exclude }}
+          module_cboms: ${{ inputs.cbom_module_cboms }}
+          empty_cboms: ${{ inputs.cbom_empty_cboms }}
+          # Pinned rather than exposed: continue-on-error already
+          # absorbs a failure, so an input offering to flip this would
+          # promise a gate the step cannot deliver.
+          fail_on_error: 'false'
+
+      - name: 'Upload CBOM artifacts'
+        # yamllint disable-line rule:line-length
+        if: ${{ !cancelled() && steps.cbom.outcome == 'success' && steps.cbom.outputs.file_count != '0' }}
+        continue-on-error: true
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          # Lane-specific for the same reason as the SBOM upload.
+          name: cbom-files-maven
+          # Absolute glob under runner temp, covering the consolidated
+          # CBOM and, when cbom_module_cboms is on, the per-module files
+          # beside it. upload-artifact roots the archive at the common
+          # ancestor, so the files land at the artefact root.
+          path: ${{ steps.cbom.outputs.cbom_pattern }}
+          retention-days: 45
+          # The condition above already skips an empty scan, so a miss
+          # here is a surprise worth logging but not worth failing an
+          # informational step over.
+          if-no-files-found: warn
 
   grype:
     name: 'Grype Audit SBOM'
     runs-on: ubuntu-latest
-    needs: 'sbom'
+    needs: 'build'
+    # Runs whenever the build job uploaded an SBOM, including after a
+    # test failure: the audit reads the document, not the build.
     # yamllint disable-line rule:line-length
-    if: ${{ !cancelled() && needs.sbom.result == 'success' && inputs.grype_enabled }}
+    if: ${{ !cancelled() && needs.build.outputs.sbom_uploaded == 'true' && inputs.grype_enabled }}
     timeout-minutes: ${{ inputs.grype_timeout_minutes }}
     permissions:
       contents: read
@@ -1128,163 +1149,3 @@ jobs:
           # yamllint disable-line rule:line-length
           permit-fail: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-
-  # Informational leg. Nothing downstream reads the CBOM, so this job
-  # sits beside the tests and SBOM legs rather than in sequence with
-  # them, and delays neither. It remains a job in the run, though, and
-  # a run is not complete until every job is, so a scan that outlasts
-  # every other branch does extend the total. Observed at roughly 40
-  # seconds against the Maven fixture, well inside the build; the
-  # cbom_timeout_minutes ceiling bounds the pathological case.
-  #
-  # It cannot fail the run. Three things could otherwise: a scanner
-  # error (the action's fail_on_error is pinned false), a runner or
-  # input problem the action rejects outright, and the job timeout.
-  # continue-on-error covers all three, because the value of a CBOM is
-  # the report it produces, never a verdict it withholds. Callers who
-  # do not want the report set cbom_enabled false.
-  #
-  # 'needs: build' orders the job rather than feeding it: the scan does
-  # its own checkout and reads no build output. It follows the SBOM
-  # job's gate, running whenever build was not skipped, so a build that
-  # fails on a test still yields the cryptographic inventory.
-  #
-  # Accuracy note for Java: the scanner resolves symbols from compiled
-  # classes and dependency jars where it finds them, and this job scans
-  # a source tree it has not built. The scan still succeeds; it
-  # resolves fewer symbols than one run over a built reactor, so treat
-  # the asset count as a floor.
-  cbom:
-    name: 'Generate CBOM'
-    runs-on: ubuntu-latest
-    needs: 'build'
-    continue-on-error: true
-    # yamllint disable-line rule:line-length
-    if: ${{ !cancelled() && needs.build.result != 'skipped' && inputs.cbom_enabled }}
-    timeout-minutes: ${{ inputs.cbom_timeout_minutes }}
-    permissions:
-      contents: read
-    steps:
-      # One harden-runner step with the policy computed, rather than
-      # two selected by condition: harden-runner declares a 'pre'
-      # entry point and no 'pre-if', so its pre-phase runs whatever
-      # a step-level 'if:' says. Both would engage the agent, the
-      # first would win, and audit mode would be unreachable.
-      - name: 'Load egress allow-list'
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
-        with:
-          config: ${{ inputs.harden_runner_allowlist }}
-          allow_list_summary: 'false'
-      - name: 'Harden runner'
-        # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
-        with:
-          # yamllint disable-line rule:line-length
-          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
-          # The scanner is a container, so the image pull needs the
-          # registry endpoints. The organisation allow-list already
-          # carries both; naming them here keeps the job working when a
-          # caller points harden_runner_allowlist at a narrower list.
-          allowed-endpoints: >
-            ${{ env.CONNECTION_ALLOW_LIST }}
-            ghcr.io:443
-            pkg-containers.githubusercontent.com:443
-
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
-        with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-          submodules: ${{ inputs.checkout_submodules }}
-      # checkout-gerrit-change-action v1.1.0 initialises submodules on
-      # the base branch, then runs a plain git submodule update after
-      # switching to the change, which skips any submodule the change
-      # adds or moves. Initialise them here; see docs/BRIEF.md.
-      - name: 'Initialise Gerrit change submodules'
-        if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
-        shell: bash
-        run: |
-          set -euo pipefail
-          git submodule sync
-          git submodule update --init
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-          submodules: ${{ inputs.checkout_submodules }}
-
-      # The action writes its own job summary (languages scanned,
-      # asset count, file count), so no summary step follows.
-      #
-      # Known limitation: the CBOM's metadata block (gitUrl, revision,
-      # commit) comes from the run's own GITHUB_* context, which names
-      # the CALLING repository and commit. Where 'repository' or 'ref'
-      # selects a different tree, and on a Gerrit-sourced run where the
-      # checked-out change is not the mirror commit, that metadata
-      # describes the caller rather than the source scanned. The
-      # cryptographic findings are unaffected. Fixing it needs explicit
-      # metadata inputs on cbom-action, which has none today.
-      #
-      # Its 'image' input is not surfaced as a workflow input. The
-      # default is a digest that travels with the action version pinned
-      # above, and a workflow input defaulting to empty cannot fall
-      # through to it: a composite action applies a default only when
-      # the input is absent, never when it arrives empty. Restating
-      # the digest here instead would fork the pin from the action that
-      # owns it. Bump the action to move the scanner.
-      - name: 'Generate CBOM'
-        id: cbom
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/cbom-action@06a25686fe4ebcbb8c9f28d6948cdca7d65ed852  # v0.0.1
-        with:
-          path_prefix: ${{ inputs.path_prefix }}
-          # Reports go to runner temp, never the workspace. The action
-          # defaults output_directory to '.', and its file_count and
-          # cbom_pattern outputs cover every cbom*.json sitting in that
-          # directory rather than only the files this scan wrote. A
-          # project that tracks its own cbom.json at the repository
-          # root would otherwise have it overwritten, counted as scan
-          # output and uploaded as though this job produced it. An
-          # empty directory per job keeps the outputs describing this
-          # scan alone.
-          output_directory: ${{ runner.temp }}/cbom
-          languages: ${{ inputs.cbom_languages }}
-          exclude: ${{ inputs.cbom_exclude }}
-          module_cboms: ${{ inputs.cbom_module_cboms }}
-          empty_cboms: ${{ inputs.cbom_empty_cboms }}
-          # Pinned rather than exposed. continue-on-error above already
-          # absorbs the failure, so an input offering to flip this
-          # would promise a gate the job cannot deliver.
-          fail_on_error: 'false'
-
-      - name: 'Upload CBOM artifacts'
-        if: ${{ steps.cbom.outputs.file_count != '0' }}
-        # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          # Lane-specific for the same reason as the SBOM upload: a
-          # caller invoking both the Maven and Gradle workflows shares
-          # one run, and so one artifact namespace.
-          name: cbom-files-maven
-          # Absolute glob under runner temp, covering the consolidated
-          # CBOM and, when cbom_module_cboms is on, the per-module files
-          # beside it. upload-artifact roots the archive at the common
-          # ancestor, so the files land at the artefact root.
-          path: ${{ steps.cbom.outputs.cbom_pattern }}
-          retention-days: 45
-          # The condition above already skips an empty scan, so a miss
-          # here is a surprise worth logging but not worth failing an
-          # informational job over.
-          if-no-files-found: warn

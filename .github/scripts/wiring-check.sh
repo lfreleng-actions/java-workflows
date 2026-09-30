@@ -63,9 +63,9 @@ expect_path() {
   fi
 }
 
-echo 'SBOM job: POM guard'
+echo 'Build job: SBOM POM guard'
 pom_guard="${tmp}/pom-guard.sh"
-extract "${maven}" sbom 'Require the POM the SBOM resolves' "${pom_guard}"
+extract "${maven}" build 'Require the POM the SBOM resolves' "${pom_guard}"
 for pom in '' 'pom.xml' './pom.xml' '././pom.xml'; do
   expect pass "POM guard accepts '${pom}'" "${pom_guard}" \
     "MVN_POM_FILE=${pom}"
@@ -80,9 +80,9 @@ if grep -q '^::warning::' "${tmp}/log"; then
   fail 'POM guard let a line break start a workflow command'
 fi
 
-echo 'SBOM job: environment guard'
+echo 'Build job: SBOM environment guard'
 env_guard="${tmp}/env-guard.sh"
-extract "${maven}" sbom 'Require an environment the SBOM can reproduce' \
+extract "${maven}" build 'Require an environment the SBOM can reproduce' \
   "${env_guard}"
 for value in '' '{}' '{"MAVEN_OPTS": "-Dx=y"}' '{"my_flag": "1"}' \
   '{"_x": "1", "My_Flag2": "1"}'; do

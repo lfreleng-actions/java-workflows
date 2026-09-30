@@ -79,9 +79,9 @@ on:
       # --- Tests ---
       test_permit_fail:
         description: >-
-          Permit test failures without failing the tests-report job.
+          Permit test failures without failing the test summary.
           Gradle runs tests inside the build, so a test failure fails the
-          build job unless the project tolerates it (test.ignoreFailures);
+          build step unless the project tolerates it (test.ignoreFailures);
           this input governs the report gate, not the build exit code.
         required: false
         type: boolean
@@ -126,13 +126,13 @@ on:
       # express, and it feeds post-quantum readiness assessments.
       #
       # There is deliberately no cbom_permit_fail alongside these: the
-      # leg is advisory by contract, so the job pins the action's
-      # fail_on_error to false and carries continue-on-error. Callers
-      # that do not want the report turn the whole job off instead.
+      # leg is advisory by contract, so its steps pin the action's
+      # fail_on_error to false and carry continue-on-error. Callers
+      # that do not want the report turn it off instead.
       cbom_enabled:
         description: >-
           Generate a CycloneDX Cryptography Bill of Materials (CBOM).
-          Informational: the job never fails the workflow run. Set
+          Informational: it never fails the workflow run. Set
           false to drop it.
         required: false
         type: boolean
@@ -177,13 +177,13 @@ on:
         default: 'block'
       build_permit_egress_traffic:
         description: >
-          Run harden-runner in audit mode for the build and SBOM jobs
-          only, permitting unrestricted egress. Use when the build
-          fetches dependencies from CDNs that are impractical to
-          enumerate in the allow-list; the SBOM job resolves the same
-          dependency graph, so it needs the same reach. Other jobs stay
-          governed by harden_runner_egress; left unset, the build and
-          SBOM jobs follow it too.
+          Run harden-runner in audit mode for the build job only,
+          permitting unrestricted egress. Use when the build fetches
+          dependencies from CDNs that are impractical to enumerate in
+          the allow-list. The SBOM and CBOM run inside the build job,
+          so they share its policy. Other jobs stay governed by
+          harden_runner_egress; left unset, the build job follows it
+          too.
         required: false
         type: boolean
         default: false
@@ -194,26 +194,29 @@ on:
         # yamllint disable-line rule:line-length
         default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@beca7ffe87eac9212c70fe52d0d38d3bd61bf9d1'  # v0.16.2
 
-      # --- Job timeouts (minutes) ---
-      # Sized per job rather than uniformly. The build, test-report and
-      # audit jobs scale with the size of the project, so they are
-      # configurable; the validation and metadata jobs do fixed work and
-      # are not. Defaults suit a large multi-module reactor on a busy
-      # shared runner, where dependency resolution, image pulls and
-      # vulnerability database downloads are all slower than they look
-      # locally. They bound a hung job, so erring high costs nothing.
+      # --- Timeouts (minutes) ---
+      # The test summary, SBOM and CBOM run as steps inside the build
+      # job, each bounded by its own step timeout below, and all of them
+      # within build_timeout_minutes, which bounds the whole job. Size
+      # that one for the build plus these steps. Grype stays a separate
+      # job with its own timeout. The validation and metadata jobs do
+      # fixed work and are not configurable. Defaults suit a large
+      # multi-project build on a busy shared runner; they bound a hung
+      # job or step, so erring high costs nothing.
       build_timeout_minutes:
-        description: 'Timeout for the build job'
+        description: >-
+          Timeout for the build job, including the test summary, SBOM
+          and CBOM steps that run within it.
         required: false
         type: number
         default: 45
       tests_timeout_minutes:
-        description: 'Timeout for the test reporting job'
+        description: 'Timeout for the test summary step'
         required: false
         type: number
         default: 30
       sbom_timeout_minutes:
-        description: 'Timeout for the SBOM generation job'
+        description: 'Timeout for the SBOM generation step'
         required: false
         type: number
         default: 30
@@ -224,7 +227,7 @@ on:
         default: 30
       cbom_timeout_minutes:
         description: >-
-          Timeout for the CBOM generation job. Covers a container image
+          Timeout for the CBOM generation step. Covers a container image
           pull as well as the scan itself.
         required: false
         type: number
@@ -399,13 +402,9 @@ jobs:
     needs: gerrit-validate
     runs-on: ubuntu-latest
     outputs:
-      java_version: ${{ steps.metadata.outputs.java_version }}
-      gradle_version: ${{ steps.build.outputs['gradle-version'] }}
-      # The version the project's wrapper declares. The SBOM job runs
-      # the wrapper unless gradle_version pins another, so this is the
-      # version its plugin floor check must weigh by default.
-      wrapper_gradle_version: ${{ steps.metadata.outputs.java_gradle_version }}
-      reports_found: ${{ steps.reports.outputs.found }}
+      # Read by the Grype job, which runs whenever an SBOM was uploaded,
+      # including after a test failure.
+      sbom_uploaded: ${{ steps.upload-sbom.outcome == 'success' }}
     permissions:
       contents: read
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
@@ -429,11 +428,25 @@ jobs:
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
         uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        env:
+          # The CBOM scanner is a container, so its image pull needs the
+          # registry endpoints. The organisation allow-list already
+          # carries both; naming them here keeps the CBOM working when a
+          # caller points harden_runner_allowlist at a narrower list.
+          # yamllint disable-line rule:line-length
+          CBOM_ENDPOINTS: ${{ inputs.cbom_enabled && 'ghcr.io:443 pkg-containers.githubusercontent.com:443' || '' }}
         with:
           # yamllint disable-line rule:line-length
           egress-policy: ${{ (inputs.build_permit_egress_traffic || inputs.harden_runner_egress == 'audit') && 'audit' || 'block' }}
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
+            ${{ env.CBOM_ENDPOINTS }}
+
+      # Read by the CBOM budget step below.
+      - name: 'Record job start'
+        id: job-start
+        shell: bash
+        run: echo "epoch=$(date +%s)" >> "${GITHUB_OUTPUT}"
 
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
@@ -494,7 +507,7 @@ jobs:
           gradle-version: ${{ inputs.gradle_version }}
           build-arguments: ${{ inputs.build_arguments }}
           # This workflow collects and uploads the test-results XML itself
-          # (below), under a stable artefact name the tests job consumes.
+          # (below), under a stable artefact name the test summary reads.
           # Disable the action's own upload to avoid a duplicate artefact.
           artifact-upload: 'false'
 
@@ -505,8 +518,8 @@ jobs:
         env:
           PATH_PREFIX: ${{ inputs.path_prefix }}
         run: |
-          # Copy Gradle test-results XML out of the build tree so the
-          # tests job can render a summary without rebuilding.
+          # Copy Gradle test-results XML out of the build tree, for the
+          # summary below and for the uploaded artefact.
           set -euo pipefail
           dest="junit-reports"
           found=0
@@ -528,6 +541,29 @@ jobs:
           name: gradle-junit-reports
           path: junit-reports
           if-no-files-found: warn
+
+      # Gradle ran the tests during the build step, so a test failure has
+      # already failed it. This only renders the collected XML, and so
+      # runs whatever the build's outcome.
+      - name: 'Summarise test results'
+        if: ${{ !cancelled() && steps.reports.outputs.found == '1' }}
+        timeout-minutes: ${{ inputs.tests_timeout_minutes }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/junit-test-report-action@cbc41af8f2e0cf6363d5b04df00025f938bf9a5e  # v0.0.2
+        with:
+          report-paths: 'junit-reports/**/*.xml'
+          fail-on-failure: ${{ !inputs.test_permit_fail }}
+          # Uploaded above as gradle-junit-reports; disable the action's
+          # own upload to avoid a duplicate artefact.
+          artifact-upload: 'false'
+
+      - name: 'No test reports'
+        if: ${{ !cancelled() && steps.reports.outputs.found != '1' }}
+        shell: bash
+        run: |
+          # The build produced no test-results XML (a project with no
+          # tests, or a build that stopped before the test task ran).
+          echo 'No JUnit reports were produced by the build'
 
       # Gradle has no m2repo equivalent in a plain build, so there is
       # one shape here: whatever each module packaged into build/libs.
@@ -576,187 +612,30 @@ jobs:
           retention-days: ${{ inputs.build_artifact_retention_days }}
           if-no-files-found: error
 
-  tests:
-    name: 'Tests'
-    runs-on: ubuntu-latest
-    needs: 'build'
-    # Run whenever build was not skipped, INCLUDING a failed build: Gradle
-    # runs the tests during the build, so a test failure fails the build
-    # job. The report must still render, so gate on 'not skipped' rather
-    # than 'success'.
-    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
-    permissions:
-      contents: read
-    timeout-minutes: ${{ inputs.tests_timeout_minutes }}
-    steps:
-      # One harden-runner step with the policy computed, rather than
-      # two selected by condition: harden-runner declares a 'pre'
-      # entry point and no 'pre-if', so its pre-phase runs whatever
-      # a step-level 'if:' says. Both would engage the agent, the
-      # first would win, and audit mode would be unreachable.
-      - name: 'Load egress allow-list'
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
-        with:
-          config: ${{ inputs.harden_runner_allowlist }}
-          allow_list_summary: 'false'
-      - name: 'Harden runner'
-        # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
-        with:
-          # yamllint disable-line rule:line-length
-          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
-          allowed-endpoints: >
-            ${{ env.CONNECTION_ALLOW_LIST }}
-
-      # Gradle runs the unit tests during the build (gradle build),
-      # which already gates this job. This job only renders a JUnit
-      # summary from the XML the build job collected, so it does not
-      # check out the source tree; it consumes the downloaded artefact
-      # instead.
-      - name: 'Download JUnit reports'
-        if: ${{ needs.build.outputs.reports_found == '1' }}
-        # yamllint disable-line rule:line-length
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
-        with:
-          name: gradle-junit-reports
-          path: junit-reports
-
-      - name: 'Summarise test results'
-        if: ${{ needs.build.outputs.reports_found == '1' }}
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/junit-test-report-action@cbc41af8f2e0cf6363d5b04df00025f938bf9a5e  # v0.0.2
-        with:
-          report-paths: 'junit-reports/**/*.xml'
-          fail-on-failure: ${{ !inputs.test_permit_fail }}
-          # The build job already uploads the XML as gradle-junit-reports;
-          # disable the action's own upload to avoid a duplicate artefact.
-          artifact-upload: 'false'
-
-      - name: 'No test reports'
-        if: ${{ needs.build.outputs.reports_found != '1' }}
-        shell: bash
-        run: |
-          # The build produced no test-results XML (a project with no
-          # tests, or a build that stopped before the test task ran).
-          echo 'No JUnit reports were produced by the build'
-
-  sbom:
-    name: 'Generate SBOM'
-    runs-on: ubuntu-latest
-    needs: 'build'
-    # Runs whenever build was not skipped: the SBOM job does its own
-    # checkout and does not depend on the build's artefacts, so it keeps
-    # producing the dependency-scan signal even when the build fails
-    # (for example on a test failure). The cyclonedx backend resolves
-    # dependencies without compiling, so only a dependency resolution
-    # failure fails this job, and then there is no graph to describe.
-    # yamllint disable-line rule:line-length
-    if: ${{ !cancelled() && needs.build.result != 'skipped' && inputs.sbom_enabled }}
-    timeout-minutes: ${{ inputs.sbom_timeout_minutes }}
-    outputs:
-      # 'false' when the backend declined to generate (a Gradle version
-      # below the plugin floor); the Grype job has nothing to scan then.
-      generated: ${{ steps.sbom.outputs.skipped != 'true' }}
-    permissions:
-      contents: read
-    steps:
-      # One harden-runner step with the policy computed, rather than
-      # two selected by condition: harden-runner declares a 'pre'
-      # entry point and no 'pre-if', so its pre-phase runs whatever
-      # a step-level 'if:' says. Both would engage the agent, the
-      # first would win, and audit mode would be unreachable.
-      - name: 'Load egress allow-list'
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
-        with:
-          config: ${{ inputs.harden_runner_allowlist }}
-          allow_list_summary: 'false'
-      - name: 'Harden runner'
-        # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
-        with:
-          # Shares the build job's egress switch: resolving the graph
-          # reaches the same repositories the build does.
-          # yamllint disable-line rule:line-length
-          egress-policy: ${{ (inputs.build_permit_egress_traffic || inputs.harden_runner_egress == 'audit') && 'audit' || 'block' }}
-          allowed-endpoints: >
-            ${{ env.CONNECTION_ALLOW_LIST }}
-
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
-        with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-          submodules: ${{ inputs.checkout_submodules }}
-      # checkout-gerrit-change-action v1.1.0 initialises submodules on
-      # the base branch, then runs a plain git submodule update after
-      # switching to the change, which skips any submodule the change
-      # adds or moves. Initialise them here; see docs/BRIEF.md.
-      - name: 'Initialise Gerrit change submodules'
-        if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
-        shell: bash
-        run: |
-          set -euo pipefail
-          git submodule sync
-          git submodule update --init
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-          submodules: ${{ inputs.checkout_submodules }}
-
-      # When the caller pins gradle_version, the build job runs that
-      # provisioned Gradle rather than the wrapper, so this job must too
-      # or it would resolve (or skip) under a different version.
-      # sbom-action always prefers an executable ./gradlew, so provision
-      # the version the build resolved (exact, so 'current' cannot
-      # drift between jobs) and remove the wrapper from this job's own
-      # checkout, which nothing else reads, leaving 'gradle' on PATH.
-      - name: 'Provision pinned Gradle'
-        if: inputs.gradle_version != ''
-        # yamllint disable-line rule:line-length
-        uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb  # v6.3.0
-        with:
-          # yamllint disable-line rule:line-length
-          gradle-version: ${{ needs.build.outputs.gradle_version || inputs.gradle_version }}
-          # A one-shot resolution over the change under test: write no
-          # cache for later runs to restore.
-          cache-disabled: 'true'
-          add-job-summary: 'never'
-      - name: 'Use the pinned Gradle, not the wrapper'
-        if: inputs.gradle_version != ''
-        shell: bash
-        env:
-          PATH_PREFIX: ${{ inputs.path_prefix }}
-        run: rm -f -- "${PATH_PREFIX}/gradlew"
+      # --- SBOM ---
+      # Generated in the job that built the project, so it describes the
+      # dependency graph this build has just resolved, from the Gradle
+      # user home the build populated, rather than resolving it a second
+      # time. The cyclonedx backend resolves without compiling, so these
+      # steps still produce an SBOM after a test or compile failure; only
+      # a resolution failure leaves nothing to describe.
 
       # build_arguments mixes tasks with options, and the options can
       # select dependencies: a project property choosing a variant, or
       # a system property pinning a version. Forward those, split the
       # way gradle-build-action splits them, so the SBOM describes the
       # graph the build resolved. Task names and other options stay
-      # out: the SBOM job runs its own task.
+      # out: the SBOM step runs its own task.
       #
       # Options selecting another project, settings file, build file,
-      # init script or included build fail the job instead. Dropping
+      # init script or included build fail the step instead. Dropping
       # one would have the SBOM describe a different project from the
       # one built, under the same name, and sbom-action rejects them
       # for the same reason. The patterns match its own, in every
       # spelling. path_prefix is the supported way to choose a project.
       - name: 'Select Gradle resolution options'
         id: gradle-args
+        if: ${{ !cancelled() && inputs.sbom_enabled }}
         shell: bash
         env:
           BUILD_ARGUMENTS: ${{ inputs.build_arguments }}
@@ -794,6 +673,28 @@ jobs:
           done
           echo "args=${keep[*]:-}" >> "${GITHUB_OUTPUT}"
 
+      # When the caller pins gradle_version, the build step ran that
+      # provisioned Gradle rather than the wrapper, and left it on PATH,
+      # so the SBOM must use it too or it would resolve (or skip) under
+      # a different version. sbom-action prefers an executable ./gradlew,
+      # so clear the wrapper's execute bit for the duration of the SBOM
+      # step and restore it afterwards. The file itself is never removed:
+      # this is the build job's workspace, and nothing here may leave it
+      # other than the build left it.
+      - name: 'Set the wrapper aside for the pinned Gradle'
+        id: wrapper
+        # yamllint disable-line rule:line-length
+        if: ${{ !cancelled() && inputs.sbom_enabled && inputs.gradle_version != '' }}
+        shell: bash
+        env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+        run: |
+          set -euo pipefail
+          if [ -x "${PATH_PREFIX}/gradlew" ]; then
+            chmod a-x -- "${PATH_PREFIX}/gradlew"
+            echo 'restore=true' >> "${GITHUB_OUTPUT}"
+          fi
+
       # Generate the CycloneDX SBOM from Gradle's resolved dependency
       # graph: an init script applies cyclonedx-gradle-plugin and runs
       # cyclonedxBom on the root project, covering every subproject.
@@ -808,11 +709,17 @@ jobs:
       # build runs its build scripts, so a checkout is executable
       # input. Its 'auto' mode classifies fork pull requests as
       # untrusted and skips, losing the SBOM. That guard buys nothing
-      # in this workflow: the build job already evaluates and runs this
-      # same build with the same read-only token, so Gradle here grants
-      # the checked-out code no reach it lacks there.
+      # here: the build step above has already evaluated and run this
+      # same build with the same read-only token.
       - name: 'Generate SBOM'
         id: sbom
+        # The explicit condition drops the implicit success() gate, so
+        # require the helper steps by name. A failed wrapper step would
+        # leave gradlew executable, and the SBOM would resolve under the
+        # wrapper's Gradle rather than the pinned one the build ran.
+        # yamllint disable-line rule:line-length
+        if: ${{ !cancelled() && inputs.sbom_enabled && steps.gradle-args.outcome == 'success' && steps.wrapper.outcome != 'failure' }}
+        timeout-minutes: ${{ inputs.sbom_timeout_minutes }}
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/sbom-action@58b6094cf67d072d6eb772590c43ee52c8c69bb6  # v0.2.0
         with:
@@ -821,25 +728,29 @@ jobs:
           # holding both a pom.xml and a Gradle build as Maven.
           dependency_manager: 'gradle'
           path_prefix: ${{ inputs.path_prefix }}
-          # Same resolution as the build job; the build job's output is
-          # set by its metadata step, before any build failure.
           # yamllint disable-line rule:line-length
-          java_version: ${{ inputs.java_version != '' && inputs.java_version || needs.build.outputs.java_version || '21' }}
+          java_version: ${{ inputs.java_version != '' && inputs.java_version || steps.metadata.outputs.java_version || '21' }}
           # Settles the plugin's Gradle floor before anything downloads:
-          # the pinned version when the caller set one, else the
-          # version the project's wrapper declares.
+          # the version the build step ran when the caller pinned one,
+          # else the version the project's wrapper declares.
           # yamllint disable-line rule:line-length
-          gradle_version: ${{ inputs.gradle_version != '' && (needs.build.outputs.gradle_version || inputs.gradle_version) || needs.build.outputs.wrapper_gradle_version }}
+          gradle_version: ${{ inputs.gradle_version != '' && (steps.build.outputs['gradle-version'] || inputs.gradle_version) || steps.metadata.outputs.java_gradle_version }}
           gradle_args: ${{ steps.gradle-args.outputs.args }}
           untrusted_checkout: 'false'
 
+      - name: 'Restore the wrapper'
+        if: ${{ always() && steps.wrapper.outputs.restore == 'true' }}
+        shell: bash
+        env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+        run: chmod a+x -- "${PATH_PREFIX}/gradlew"
+
       # cyclonedx-gradle-plugin needs Gradle 8.4 or newer, and more on
       # newer JDKs; below that the backend skips and writes nothing.
-      # Warn rather than fail, as the action does, but say so plainly:
-      # otherwise the upload below fails on a missing file, and the
-      # cause reads as a broken SBOM job rather than an old Gradle.
+      # Warn rather than fail, as the action does, but say so plainly,
+      # so an old Gradle does not read as a broken SBOM.
       - name: 'Report skipped SBOM'
-        if: steps.sbom.outputs.skipped == 'true'
+        if: ${{ !cancelled() && steps.sbom.outputs.skipped == 'true' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -850,7 +761,9 @@ jobs:
           echo "### ⚠️ ${msg}" >> "${GITHUB_STEP_SUMMARY}"
 
       - name: 'Upload SBOM artifacts'
-        if: steps.sbom.outputs.skipped != 'true'
+        id: upload-sbom
+        # yamllint disable-line rule:line-length
+        if: ${{ !cancelled() && steps.sbom.outcome == 'success' && steps.sbom.outputs.skipped != 'true' }}
         # yamllint disable-line rule:line-length
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -864,16 +777,131 @@ jobs:
           # Glob matches whichever SBOM formats the generator produced
           path: sbom-cyclonedx.*
           retention-days: 45
-          # Fail fast: the downstream Grype job requires this artifact,
-          # so a missing/misnamed SBOM must surface here, not later
+          # The Grype job reads this artifact, so a missing or misnamed
+          # SBOM must surface here rather than there.
           if-no-files-found: error
+
+      # --- CBOM (informational) ---
+      # Scans the tree this job has just built, so the scanner resolves
+      # symbols against the compiled classes under each subproject's
+      # build/ rather than bare source, which cbom-action documents as
+      # resolving fewer. Dependency jars sit in the Gradle user home,
+      # outside the directory the action scans, so they stay out of its
+      # reach.
+      #
+      # It cannot fail the run. The action's fail_on_error is pinned
+      # false, and continue-on-error on these steps absorbs anything the
+      # action rejects outright and the step timeout, because the value
+      # of a CBOM is the report it produces, never a verdict it
+      # withholds. Callers who do not want it set cbom_enabled false.
+      #
+      # continue-on-error cannot absorb the JOB timeout, which would end
+      # the whole job as a failure if it landed during the scan. The
+      # budget step therefore clamps the scan's timeout to what remains
+      # of build_timeout_minutes, less a margin for the setup and pre
+      # phases before the job-start stamp, the upload and the post
+      # phases, and skips the scan with a warning when nothing remains.
+      #
+      # Known limitation: the CBOM's metadata block (gitUrl, revision,
+      # commit) comes from the run's own GITHUB_* context, which names
+      # the CALLING repository and commit. Where 'repository' or 'ref'
+      # selects a different tree, and on a Gerrit-sourced run where the
+      # checked-out change is not the mirror commit, that metadata
+      # describes the caller rather than the source scanned. The
+      # cryptographic findings are unaffected. Fixing it needs explicit
+      # metadata inputs on cbom-action, which has none today.
+      #
+      # Its 'image' input is not surfaced as a workflow input. The
+      # default is a digest that travels with the action version pinned
+      # below, and a workflow input defaulting to empty cannot fall
+      # through to it: a composite action applies a default only when
+      # the input is absent, never when it arrives empty. Bump the
+      # action to move the scanner.
+      - name: 'Budget the CBOM step'
+        id: cbom-budget
+        if: ${{ !cancelled() && inputs.cbom_enabled }}
+        continue-on-error: true
+        shell: bash
+        env:
+          STARTED: ${{ steps.job-start.outputs.epoch }}
+          JOB_LIMIT: ${{ inputs.build_timeout_minutes }}
+          STEP_LIMIT: ${{ inputs.cbom_timeout_minutes }}
+          MARGIN: 5
+        run: |
+          set -euo pipefail
+          # Whole minutes, rounding elapsed time up and limits down.
+          elapsed=$(( ($(date +%s) - STARTED + 59) / 60 ))
+          remaining=$(( ${JOB_LIMIT%%.*} - elapsed - MARGIN ))
+          minutes=${STEP_LIMIT%%.*}
+          if [ "${remaining}" -lt "${minutes}" ]; then
+            minutes=${remaining}
+          fi
+          if [ "${minutes}" -lt 1 ]; then
+            echo "::warning::CBOM skipped: build_timeout_minutes leaves" \
+              "no time for it after ${elapsed} minute(s)."
+            echo "- CBOM skipped: no time left within" \
+              "\`build_timeout_minutes\`." >> "${GITHUB_STEP_SUMMARY}"
+            minutes=0
+          fi
+          echo "minutes=${minutes}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Generate CBOM'
+        id: cbom
+        # yamllint disable-line rule:line-length
+        if: ${{ !cancelled() && inputs.cbom_enabled && steps.cbom-budget.outputs.minutes != '' && steps.cbom-budget.outputs.minutes != '0' }}
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(steps.cbom-budget.outputs.minutes) }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/cbom-action@06a25686fe4ebcbb8c9f28d6948cdca7d65ed852  # v0.0.1
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
+          # Reports go to runner temp, never the workspace. The action
+          # defaults output_directory to '.', and its file_count and
+          # cbom_pattern outputs cover every cbom*.json sitting in that
+          # directory rather than only the files this scan wrote. A
+          # project that tracks its own cbom.json at the repository
+          # root would otherwise have it overwritten, counted as scan
+          # output and uploaded as though this scan produced it.
+          output_directory: ${{ runner.temp }}/cbom
+          languages: ${{ inputs.cbom_languages }}
+          exclude: ${{ inputs.cbom_exclude }}
+          module_cboms: ${{ inputs.cbom_module_cboms }}
+          empty_cboms: ${{ inputs.cbom_empty_cboms }}
+          # Pinned rather than exposed: continue-on-error already
+          # absorbs a failure, so an input offering to flip this would
+          # promise a gate the step cannot deliver.
+          fail_on_error: 'false'
+
+      - name: 'Upload CBOM artifacts'
+        # yamllint disable-line rule:line-length
+        if: ${{ !cancelled() && steps.cbom.outcome == 'success' && steps.cbom.outputs.file_count != '0' }}
+        continue-on-error: true
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          # Lane-specific for the same reason as the SBOM upload.
+          name: cbom-files-gradle
+          # Absolute glob under runner temp, covering the consolidated
+          # CBOM and, when cbom_module_cboms is on, the per-module files
+          # beside it. upload-artifact roots the archive at the common
+          # ancestor, so the files land at the artefact root.
+          path: ${{ steps.cbom.outputs.cbom_pattern }}
+          retention-days: 45
+          # The condition above already skips an empty scan, so a miss
+          # here is a surprise worth logging but not worth failing an
+          # informational step over.
+          if-no-files-found: warn
 
   grype:
     name: 'Grype Audit SBOM'
     runs-on: ubuntu-latest
-    needs: 'sbom'
+    needs: 'build'
+    # Runs whenever the build job uploaded an SBOM, including after a
+    # test failure: the audit reads the document, not the build. No
+    # upload means nothing to scan, which also covers a Gradle below
+    # the SBOM plugin's floor.
     # yamllint disable-line rule:line-length
-    if: ${{ !cancelled() && needs.sbom.result == 'success' && needs.sbom.outputs.generated == 'true' && inputs.grype_enabled }}
+    if: ${{ !cancelled() && needs.build.outputs.sbom_uploaded == 'true' && inputs.grype_enabled }}
     timeout-minutes: ${{ inputs.grype_timeout_minutes }}
     permissions:
       contents: read
@@ -918,163 +946,3 @@ jobs:
           # yamllint disable-line rule:line-length
           permit-fail: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
-
-  # Informational leg. Nothing downstream reads the CBOM, so this job
-  # sits beside the tests and SBOM legs rather than in sequence with
-  # them, and delays neither. It remains a job in the run, though, and
-  # a run is not complete until every job is, so a scan that outlasts
-  # every other branch does extend the total. Observed at roughly 30
-  # seconds against the Gradle fixture, well inside the build; the
-  # cbom_timeout_minutes ceiling bounds the pathological case.
-  #
-  # It cannot fail the run. Three things could otherwise: a scanner
-  # error (the action's fail_on_error is pinned false), a runner or
-  # input problem the action rejects outright, and the job timeout.
-  # continue-on-error covers all three, because the value of a CBOM is
-  # the report it produces, never a verdict it withholds. Callers who
-  # do not want the report set cbom_enabled false.
-  #
-  # 'needs: build' orders the job rather than feeding it: the scan does
-  # its own checkout and reads no build output. It follows the SBOM
-  # job's gate, running whenever build was not skipped, so a build that
-  # fails on a test still yields the cryptographic inventory.
-  #
-  # Accuracy note for Java: the scanner resolves symbols from compiled
-  # classes and dependency jars where it finds them, and this job scans
-  # a source tree it has not built. The scan still succeeds; it
-  # resolves fewer symbols than one run over a built project, so treat
-  # the asset count as a floor.
-  cbom:
-    name: 'Generate CBOM'
-    runs-on: ubuntu-latest
-    needs: 'build'
-    continue-on-error: true
-    # yamllint disable-line rule:line-length
-    if: ${{ !cancelled() && needs.build.result != 'skipped' && inputs.cbom_enabled }}
-    timeout-minutes: ${{ inputs.cbom_timeout_minutes }}
-    permissions:
-      contents: read
-    steps:
-      # One harden-runner step with the policy computed, rather than
-      # two selected by condition: harden-runner declares a 'pre'
-      # entry point and no 'pre-if', so its pre-phase runs whatever
-      # a step-level 'if:' says. Both would engage the agent, the
-      # first would win, and audit mode would be unreachable.
-      - name: 'Load egress allow-list'
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
-        with:
-          config: ${{ inputs.harden_runner_allowlist }}
-          allow_list_summary: 'false'
-      - name: 'Harden runner'
-        # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
-        with:
-          # yamllint disable-line rule:line-length
-          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
-          # The scanner is a container, so the image pull needs the
-          # registry endpoints. The organisation allow-list already
-          # carries both; naming them here keeps the job working when a
-          # caller points harden_runner_allowlist at a narrower list.
-          allowed-endpoints: >
-            ${{ env.CONNECTION_ALLOW_LIST }}
-            ghcr.io:443
-            pkg-containers.githubusercontent.com:443
-
-      - name: 'Checkout Gerrit change'
-        if: inputs.gerrit_refspec != ''
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
-        with:
-          gerrit-refspec: ${{ inputs.gerrit_refspec }}
-          gerrit-project: ${{ inputs.gerrit_project }}
-          # yamllint disable-line rule:line-length
-          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
-          delay: '0s'
-          repository: ${{ inputs.repository || github.repository }}
-          ref: refs/heads/${{ inputs.gerrit_branch }}
-          submodules: ${{ inputs.checkout_submodules }}
-      # checkout-gerrit-change-action v1.1.0 initialises submodules on
-      # the base branch, then runs a plain git submodule update after
-      # switching to the change, which skips any submodule the change
-      # adds or moves. Initialise them here; see docs/BRIEF.md.
-      - name: 'Initialise Gerrit change submodules'
-        if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
-        shell: bash
-        run: |
-          set -euo pipefail
-          git submodule sync
-          git submodule update --init
-      - name: 'Checkout repository'
-        if: inputs.gerrit_refspec == ''
-        # yamllint disable-line rule:line-length
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
-        with:
-          repository: ${{ inputs.repository || github.repository }}
-          ref: ${{ inputs.ref }}
-          persist-credentials: false
-          submodules: ${{ inputs.checkout_submodules }}
-
-      # The action writes its own job summary (languages scanned,
-      # asset count, file count), so no summary step follows.
-      #
-      # Known limitation: the CBOM's metadata block (gitUrl, revision,
-      # commit) comes from the run's own GITHUB_* context, which names
-      # the CALLING repository and commit. Where 'repository' or 'ref'
-      # selects a different tree, and on a Gerrit-sourced run where the
-      # checked-out change is not the mirror commit, that metadata
-      # describes the caller rather than the source scanned. The
-      # cryptographic findings are unaffected. Fixing it needs explicit
-      # metadata inputs on cbom-action, which has none today.
-      #
-      # Its 'image' input is not surfaced as a workflow input. The
-      # default is a digest that travels with the action version pinned
-      # above, and a workflow input defaulting to empty cannot fall
-      # through to it: a composite action applies a default only when
-      # the input is absent, never when it arrives empty. Restating
-      # the digest here instead would fork the pin from the action that
-      # owns it. Bump the action to move the scanner.
-      - name: 'Generate CBOM'
-        id: cbom
-        # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/cbom-action@06a25686fe4ebcbb8c9f28d6948cdca7d65ed852  # v0.0.1
-        with:
-          path_prefix: ${{ inputs.path_prefix }}
-          # Reports go to runner temp, never the workspace. The action
-          # defaults output_directory to '.', and its file_count and
-          # cbom_pattern outputs cover every cbom*.json sitting in that
-          # directory rather than only the files this scan wrote. A
-          # project that tracks its own cbom.json at the repository
-          # root would otherwise have it overwritten, counted as scan
-          # output and uploaded as though this job produced it. An
-          # empty directory per job keeps the outputs describing this
-          # scan alone.
-          output_directory: ${{ runner.temp }}/cbom
-          languages: ${{ inputs.cbom_languages }}
-          exclude: ${{ inputs.cbom_exclude }}
-          module_cboms: ${{ inputs.cbom_module_cboms }}
-          empty_cboms: ${{ inputs.cbom_empty_cboms }}
-          # Pinned rather than exposed. continue-on-error above already
-          # absorbs the failure, so an input offering to flip this
-          # would promise a gate the job cannot deliver.
-          fail_on_error: 'false'
-
-      - name: 'Upload CBOM artifacts'
-        if: ${{ steps.cbom.outputs.file_count != '0' }}
-        # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
-        with:
-          # Lane-specific for the same reason as the SBOM upload: a
-          # caller invoking both the Maven and Gradle workflows shares
-          # one run, and so one artifact namespace.
-          name: cbom-files-gradle
-          # Absolute glob under runner temp, covering the consolidated
-          # CBOM and, when cbom_module_cboms is on, the per-module files
-          # beside it. upload-artifact roots the archive at the common
-          # ancestor, so the files land at the artefact root.
-          path: ${{ steps.cbom.outputs.cbom_pattern }}
-          retention-days: 45
-          # The condition above already skips an empty scan, so a miss
-          # here is a surprise worth logging but not worth failing an
-          # informational job over.
-          if-no-files-found: warn
