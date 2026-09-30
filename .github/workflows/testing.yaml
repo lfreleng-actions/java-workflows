@@ -59,7 +59,7 @@ jobs:
       # records in its reports, and drops the SBOM serial number.
       # env_vars carries MAVEN_OPTS, whose system properties rename
       # the surefire reports and retype the SBOM's root component.
-      # './pom.xml' is the root POM with a prefix the SBOM job's guard
+      # './pom.xml' is the root POM with a prefix the SBOM POM guard
       # strips, running its accept path live; maven-pom-test observes
       # the build side of mvn_pom_file. The fixture has no submodules,
       # so the wiring-check job covers those.
@@ -72,7 +72,7 @@ jobs:
 
   # Proves the Maven lane's pass-through inputs reach both Maven runs:
   # the build, through the JUnit reports it uploads, and the SBOM
-  # job, through the document it generates. Each value set above
+  # step, through the document it generates. Each value set above
   # leaves a mark there, and dropping the wiring removes it.
   pass-through-check:
     name: 'Pass-through Check'
@@ -126,23 +126,24 @@ jobs:
           fi
           sbom='sbom/sbom-cyclonedx.json'
           if jq -e 'has("serialNumber")' "${sbom}" > /dev/null; then
-            fail 'mvn_opts did not reach the SBOM job'
+            fail 'mvn_opts did not reach the SBOM step'
           fi
           type="$(jq -r '.metadata.component.type // ""' "${sbom}")"
           if [ "${type}" != 'application' ]; then
-            fail "env_vars did not reach the SBOM job (type '${type}')"
+            fail "env_vars did not reach the SBOM step (type '${type}')"
           fi
           exit "${status}"
 
   # Observes mvn_pom_file end to end: build core/pom.xml on its own,
   # which packages core and not app, where the root POM (the wiring
-  # dropped) packages both. The SBOM job rejects any POM other than
-  # pom.xml, so it stays off here; wiring-check runs that rejection.
-  # A job calling a reusable workflow cannot set continue-on-error, so
-  # a live rejection would fail this run. Tests, JaCoCo and the CBOM
-  # stay off too, so this call uploads none of the artefact names the
-  # call above does: download-artifact resolves a name to the newest
-  # upload, and the checks reading those would race this one.
+  # dropped) packages both. The SBOM POM guard rejects any POM other
+  # than pom.xml, so it stays off here; wiring-check runs that
+  # rejection. A job calling a reusable workflow cannot set
+  # continue-on-error, so a live rejection would fail this run. Tests,
+  # JaCoCo and the CBOM stay off too, so this call uploads none of the
+  # artefact names the call above does: download-artifact resolves a
+  # name to the newest upload, and the checks reading those would race
+  # this one.
   maven-pom-test:
     name: 'Maven Build/Test (alternate POM)'
     permissions:

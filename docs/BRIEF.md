@@ -57,9 +57,12 @@ wired. The job graph is:
 
 ```text
 gerrit-validate ─┬─ repository-metadata (informational)
-                 └─ build ─┬─ tests
-                           └─ sbom ─ grype
+                 └─ build ─ grype
 ```
+
+One job owns the built tree: every step that reads it runs inside
+`build`, so nothing is checked out, resolved or built twice. Only
+`grype`, which reads nothing but the SBOM document, runs downstream.
 
 `build` job (Maven):
 
@@ -88,9 +91,19 @@ gerrit-validate ─┬─ repository-metadata (informational)
 3. A "Collect JUnit reports" step (id `reports`, `if: always()`) finds
    `*/target/*-reports/*.xml`, copies them under `junit-reports/`, and
    sets `found`.
-4. When reports exist, they upload as the `maven-junit-reports` artefact.
+4. When reports exist, they upload as the `maven-junit-reports` artefact
+   and `junit-test-report-action` renders them into the job summary.
 5. When `upload_build_artifacts` is set, a "Collect build artefacts"
    step stages the packaged output and uploads it.
+6. `sbom-action` generates the SBOM and uploads it as `sbom-files-maven`.
+7. `cbom-action` generates the CBOM and uploads it as `cbom-files-maven`.
+
+Steps 3 onwards run whatever the build's outcome (`!cancelled()` or
+`always()`), so a failed build still reports its tests and produces its
+SBOM and CBOM. Each folded step keeps its own timeout input
+(`tests_timeout_minutes`, `sbom_timeout_minutes`,
+`cbom_timeout_minutes`) as a step-level `timeout-minutes`, all within
+`build_timeout_minutes`, which bounds the whole job.
 
 Build artefact publication is **opt-in**. The packaged output is large
 and most verify lanes never read it back, so uploading it unconditionally
@@ -124,17 +137,16 @@ and the run UI. Callers typically synthesise it with
 `maven-xml-settings-action` and omit the secret entirely when no global
 settings are needed.
 
-`tests` job downloads that artefact and runs `junit-test-report-action`
-against `junit-reports/**/*.xml` with
+The test summary runs `junit-test-report-action` against
+`junit-reports/**/*.xml` with
 `fail-on-failure: ${{ !inputs.test_permit_fail }}`. The action writes a
 results table to the job summary; it does not create a check-run. Its
 own artefact upload is disabled (`artifact-upload: 'false'`) because the
-build job already publishes the XML as `maven-junit-reports`. The job
-runs whenever the build was not skipped
-(`needs.build.result != 'skipped'`), including a failed build: Maven and
-Gradle run the tests inside the build, so a test failure fails the build
-job, and gating the report on build success would hide exactly the
-failures the report exists to show.
+build job already publishes the XML as `maven-junit-reports`. It runs
+after a failed build step too: Maven and Gradle run the tests inside
+the build, so a test failure fails the build step, and gating the
+report on build success would hide exactly the failures the report
+exists to show.
 
 Because tests run in the build, `test_permit_fail` cannot soft-fail by
 itself. The Maven workflow therefore adds
@@ -149,17 +161,16 @@ The Gradle build job is identical in shape: `gradle-build-action` with
 report discovery on `*/build/test-results/*/*.xml`, and the
 `gradle-junit-reports` artefact. `gradle-build-action` uploads test
 reports itself by default, so the workflow sets `artifact-upload: false`
-and manages the artefact under a stable name for the tests job.
+and manages the artefact under a stable name.
 
-`sbom` generates a real CycloneDX document with `sbom-action` and feeds
-the JSON output to `grype`, honouring `grype_fail_on`, `grype_permit_fail`
-and the `NO_BLOCK_AUDIT_FAIL` repository variable (carried verbatim from
-the template). With the action's defaults it writes `sbom-cyclonedx.json`
-and `sbom-cyclonedx.xml` at the workspace root — the JSON document is the
-Grype job's scan contract — and reports the component count to the job
-summary. Because the SBOM job does its own checkout and does not depend on
-the build's artefacts, it still produces a dependency-scan signal when the
-build fails.
+The SBOM steps generate a real CycloneDX document with `sbom-action`
+and upload it for `grype`, which honours `grype_fail_on`,
+`grype_permit_fail` and the `NO_BLOCK_AUDIT_FAIL` repository variable
+(carried verbatim from the template). With the action's defaults it
+writes `sbom-cyclonedx.json` and `sbom-cyclonedx.xml` at the workspace
+root — the JSON document is the Grype job's scan contract — and reports
+the component count to the job summary. The build job exposes
+`sbom_uploaded`, and `grype` runs only when it is `true`.
 
 Both lanes use `sbom-action`'s `cyclonedx` backend, because a Java
 build file is an input to dependency resolution rather than a product
@@ -173,60 +184,66 @@ own resolver instead: `cyclonedx-maven-plugin`'s `makeAggregateBom` for
 Maven, and for Gradle an init script that applies
 `cyclonedx-gradle-plugin` and runs `cyclonedxBom` on the root project,
 covering every subproject without editing the consumer's build files.
-Neither compiles, so the job still succeeds when the build fails on a
+Neither compiles, so the SBOM still generates when the build fails on a
 test, and fails only when resolution fails, where there is no graph to
-describe. Test-scoped dependencies (Gradle test configurations) stay
+describe. Both read the dependencies the build has just resolved:
+the Maven lane passes `-Dmaven.repo.local=/tmp/r`, the local repository
+`maven-build-action`'s default `mvn-opts` populate, and the Gradle lane
+shares the build's Gradle user home. Test-scoped dependencies (Gradle test configurations) stay
 out: the SBOM describes the shipped artefact. Each lane names its build
 tool through `dependency_manager` rather than leaving the action to
 infer it.
 
 `cyclonedx-gradle-plugin` needs Gradle 8.4 or newer, rising with the
 JDK (8.5 on the default Java 21). Below that floor the backend skips
-and writes no document. The SBOM job runs the same Gradle the build
-does. By default that is the project's wrapper, whose version
+and writes no document. The SBOM runs the same Gradle the build does.
+By default that is the project's wrapper, whose version
 `build-metadata-action` reports. When a caller pins `gradle_version`,
-the build runs a provisioned Gradle instead, so the SBOM job
-provisions the exact version the build resolved and removes `gradlew`
-from its own checkout, since `sbom-action` always prefers the wrapper.
-Either way the lane passes that version to the floor check, which then
-settles before anything downloads. A skip raises a warning and a job
-summary line, uploads nothing and skips Grype, rather than failing the
-upload on a missing file and misattributing an old Gradle to a broken
-SBOM job.
+the build runs a provisioned Gradle instead, already on `PATH`. Since
+`sbom-action` prefers an executable `gradlew`, the lane clears the
+wrapper's execute bit for the SBOM step and restores it on `always()`,
+leaving the file itself untouched. Either way the lane passes that
+version to the floor check, which then settles before anything
+downloads. A skip raises a warning and a job summary line, uploads
+nothing and skips Grype, rather than failing the upload on a missing
+file and misattributing an old Gradle to a broken SBOM step.
 
 The `cyclonedx` backend runs the build tool over the checkout. Maven
 loads project extensions, and evaluating a Gradle build runs its build
 scripts, so the checkout is executable input. The action's
 `untrusted_checkout: auto` would skip on a fork pull request, losing the
 SBOM, and cannot recognise a Gerrit change at all. The workflows set
-`untrusted_checkout: 'false'` instead: each build job already runs the
-same build over the same checkout with the same read-only token and
-settings, so the SBOM job exposes nothing the build job does not.
+`untrusted_checkout: 'false'` instead: the build step has already run
+the same build over the same checkout with the same read-only token and
+settings, so the SBOM step exposes nothing the build does not.
 
-The SBOM job resolves the graph the build resolves. It uses the same
-Java version, and the Maven lane provisions the same `mvn_version`
-(`sbom-action` runs whichever `mvn` is on `PATH`) and passes the same
-`mvn_profiles`, `mvn_opts`, `mvn_params` and `maven_global_settings`,
-since each can add modules, repositories or dependency versions.
-`mvn_opts` belongs in that list because `maven-build-action` places
-`mvn-opts` on the `mvn` command line, not in `MAVEN_OPTS`, where a `-D`
-or `-P` selects dependencies as surely as one in `mvn_params`. An empty
-`mvn_opts` forwards nothing: the build's `/tmp/r` default only
-relocates the local repository.
+The SBOM resolves the graph the build resolves. It uses the same
+Java version and, in the Maven lane, the `mvn_version` the build step
+left on `PATH` (`sbom-action` runs whichever `mvn` it finds there). It
+passes the same `mvn_profiles`, `mvn_opts`, `mvn_params` and
+`maven_global_settings`, since each can add modules, repositories or
+dependency versions. `mvn_opts` belongs in that list because
+`maven-build-action` places `mvn-opts` on the `mvn` command line, not in
+`MAVEN_OPTS`, where a `-D` or `-P` selects dependencies as surely as one
+in `mvn_params`. A non-empty `mvn_opts` is forwarded verbatim, so any
+`maven.repo.local` it sets applies to both steps. An empty one gives the
+build the action's default, which places the local repository at
+`/tmp/r`, so the SBOM step passes `-Dmaven.repo.local=/tmp/r` in its
+place and reuses what the build downloaded rather than fetching the
+graph again into `~/.m2`.
 
 `env_vars` reaches resolution as well: a profile can activate on an
 `env.*` property, a POM can read one into a dependency version, and
 `MAVEN_OPTS` carries system properties into Maven (a `projectType` set
-there retypes the SBOM's root component). The SBOM job therefore
-exports the same variables with the same `vars-to-env-action` pin, at
-the same point relative to its Java and Maven setup, so a name those
-set is skipped in both jobs. The action skips a name whose variable
-holds a non-empty value, and overwrites one that is present but empty.
-A name that either Maven step sets itself would hold different values
-in the two runs: `sbom-action`'s generate step forces `MAVEN_ARGS`
-empty, and both steps set their own inputs as variables. The SBOM job
-fails before checkout on any of those names, on a name that is not an
-ASCII identifier, and on a value that is not a JSON object. The ASCII
+there retypes the SBOM's root component). The build step exports it
+with `vars-to-env-action`, which writes `GITHUB_ENV`, so the SBOM step
+later in the same job inherits the same values without exporting them
+again. A name that either Maven step sets itself would still differ
+between the two, because a step's own `env:` wins over `GITHUB_ENV`:
+`sbom-action`'s generate step forces `MAVEN_ARGS` empty, and both steps
+set their own inputs as variables. When `sbom_enabled` is set, the build
+job fails before checkout on any of those names, on a name that is not
+an ASCII identifier, and on a value that is not a JSON object. The ASCII
 rule closes a bypass: the action upper-cases with JavaScript's
 `toUpperCase()`, which maps some non-ASCII letters onto ASCII ones
 (`maven_arg` followed by U+017F exports as `MAVEN_ARGS`), while the
@@ -236,18 +253,34 @@ v0.2.0 and `maven-build-action` v0.4.3 and move with their pins.
 `sbom-action` resolves `path_prefix/pom.xml` and rejects `-f`/`--file`
 in `maven_args`, because an alternate POM would escape the directory it
 validated, so `mvn_pom_file` cannot reach it. When `mvn_pom_file` names
-any POM other than `pom.xml` the SBOM job fails before checkout rather
-than describe a different project from the one built under the same
-name; the caller sets `path_prefix` to the POM's directory instead, or
-`sbom_enabled: false`. A warning would still upload the wrong document
-for Grype to pass. The Gradle lane fails closed the same way on the
-project-selection options in `build_arguments`, which forwards the
-property options (`-P`/`-D` and their long forms) and leaves out tasks
-and other flags. The settings secret is written to a private file
-under `RUNNER_TEMP` only when set, and removed on `always()`. One
-difference remains: `maven-build-action` expands workspace variables
-such as `${GITHUB_WORKSPACE}` in `mvn_opts` and `mvn_params`, and the
-SBOM path passes them to Maven unexpanded.
+any POM other than `pom.xml` and `sbom_enabled` is set, the build job
+fails before checkout rather than describe a different project from the
+one built under the same name; the caller sets `path_prefix` to the
+POM's directory instead, or `sbom_enabled: false`. A warning would still
+upload the wrong document for Grype to pass. The SBOM steps run on
+`!cancelled()`, so they require both guards to have succeeded by name
+rather than relying on the implicit `success()` gate. The Gradle lane
+fails closed the same way on the project-selection options in
+`build_arguments`, which forwards the property options (`-P`/`-D` and
+their long forms) and leaves out tasks and other flags.
+`maven-build-action` removes its own settings file when it finishes, so
+the secret is written again to a private file under `RUNNER_TEMP`, only
+when set, and removed on `always()`. One difference remains:
+`maven-build-action` expands workspace variables such as
+`${GITHUB_WORKSPACE}` in `mvn_opts` and `mvn_params`, and the SBOM path
+passes them to Maven unexpanded.
+
+The CBOM steps scan the same built tree, so `cbom-action` resolves
+symbols against compiled classes rather than bare source. They cannot
+fail the run: `fail_on_error` is pinned `false` and both steps set
+`continue-on-error`. That cannot absorb the job timeout, so a budget
+step clamps the scan's timeout to what remains of
+`build_timeout_minutes` (from a timestamp taken after harden-runner),
+less five minutes for the phases outside that window, and skips the
+scan with a warning when nothing remains. When `cbom_enabled` is set,
+the build job's harden-runner also allows `ghcr.io:443` and
+`pkg-containers.githubusercontent.com:443` for the scanner image, so a
+narrower `harden_runner_allowlist` does not cost the CBOM.
 
 ## No dedicated java-audit-action or java-test-action
 
@@ -872,10 +905,11 @@ context that is neither available nor safe on a pull request.
 - All `workflow_call` inputs `required: false`, lowercase snake_case
   (UPPERCASE `GERRIT_*` names reserved for dispatch inputs on callers).
 - Top-level `permissions: {}`; minimal per-job grants with explanatory
-  comments; `timeout-minutes` on every job. The build, test-report and
-  audit jobs take their timeout from an input
-  (`build_timeout_minutes` 45, `tests_timeout_minutes` 30,
-  `sbom_timeout_minutes` 30, `grype_timeout_minutes` 30) because their
+  comments; `timeout-minutes` on every job. The build and Grype jobs
+  take their timeout from an input (`build_timeout_minutes` 45,
+  `grype_timeout_minutes` 30), as do the test summary, SBOM and CBOM
+  steps inside the build job (`tests_timeout_minutes` 30,
+  `sbom_timeout_minutes` 30, `cbom_timeout_minutes` 30), because their
   duration scales with the project; the validation and metadata jobs do
   fixed work and keep literal values. The defaults assume a large
   multi-module reactor on a busy shared runner, where dependency
@@ -897,12 +931,11 @@ context that is neither available nor safe on a pull request.
   allow-list is pinned in the `harden_runner_allowlist` default.
   The build job additionally honours `build_permit_egress_traffic`
   (boolean, default `false`): when true it runs harden-runner in audit
-  for the build and SBOM jobs only — for dependency fetches from CDNs
-  impractical to enumerate in the allow-list — while every other job
-  stays governed by `harden_runner_egress`. The Maven SBOM job shares
-  the switch because it resolves the same dependency graph the build
-  does. This is a first, build-scoped hook; per-job egress control can
-  be generalised later if further lanes need it.
+  for the build job only, which includes the SBOM and CBOM steps — for
+  dependency fetches from CDNs impractical to enumerate in the
+  allow-list — while every other job stays governed by
+  `harden_runner_egress`. This is a first, build-scoped hook; per-job
+  egress control can be generalised later if further lanes need it.
 - Never interpolate `${{ }}` into `run:` blocks; env-mediate dynamic
   values (zizmor template-injection). `with:`-block interpolation is
   safe.
