@@ -9,10 +9,9 @@
 # running, so the workflows under test are always the ones this
 # branch defines.
 #
-# The self-test guards every pull request. The Maven lane builds the
-# dedicated lightweight fixture; the Gradle lane still builds a pinned
-# upstream project because no test-gradle-project fixture exists yet
-# (tracked in issue #50).
+# The self-test guards every pull request. Both lanes build dedicated
+# lightweight fixtures, lfreleng-actions/test-maven-project and
+# lfreleng-actions/test-gradle-project, under block egress.
 #
 # The planned merge and release lanes are not self-tested here: merge
 # requires a merged-commit context and release requires a signed semver
@@ -61,8 +60,8 @@ jobs:
       # the surefire reports and retype the SBOM's root component.
       # './pom.xml' is the root POM with a prefix the SBOM POM guard
       # strips, running its accept path live; maven-pom-test observes
-      # the build side of mvn_pom_file. The fixture has no submodules,
-      # so the wiring-check job covers those.
+      # the build side of mvn_pom_file. The fixture carries a
+      # submodule, which submodule-check proves this call checked out.
       checkout_submodules: true
       # yamllint disable-line rule:line-length
       mvn_opts: '-Dmaven.repo.local=/tmp/m2 -Djava.workflows.mvn.opts=forwarded -DincludeBomSerialNumber=false'
@@ -211,10 +210,10 @@ jobs:
 
   # Exercises what the fixtures cannot: the guard steps' rejection
   # paths, the Gerrit submodule initialisation, and the submodule
-  # wiring of every checkout in both lanes, which neither fixture
-  # (having no submodules) can tell apart from no wiring at all. The
-  # guard scripts run as extracted from the workflows on this branch,
-  # so a change to either shows up here.
+  # wiring of every checkout in both lanes. It is the structural guard;
+  # submodule-check below is the behavioural one, and needs a lane run.
+  # The guard scripts run as extracted from the workflows on this
+  # branch, so a change to either shows up here.
   wiring-check:
     name: 'Wiring Check'
     runs-on: ubuntu-latest
@@ -277,12 +276,12 @@ jobs:
             expect: >-
               com.fasterxml.jackson.core:jackson-databind
               com.fasterxml.jackson.core:jackson-core
-          # portal-ng-preferences: app declares the webflux starter,
-          # versioned by the Spring Boot BOM, which pulls in spring-core.
+          # test-gradle-project: core declares jackson-databind, versioned
+          # by the jackson-bom platform, which pulls in jackson-core.
           - lane: 'gradle'
             expect: >-
-              org.springframework.boot:spring-boot-starter-webflux
-              org.springframework:spring-core
+              com.fasterxml.jackson.core:jackson-databind
+              com.fasterxml.jackson.core:jackson-core
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -328,11 +327,68 @@ jobs:
           echo "Components: $(jq '.components | length' "${sbom}")"
           exit "${status}"
 
-  # Self-test of the Gradle verify lane. Audit egress because this
-  # builds a large upstream project whose full egress footprint exceeds
-  # the allow-listed toolchain set; a dedicated fixture with a known
-  # footprint can switch this to block mode.
-  # TODO: repoint to a test-gradle-project fixture once issue #50 lands.
+  # Proves checkout_submodules takes effect in each lane, which
+  # wiring-check cannot: it sees the wiring, not whether a checkout
+  # fetched anything. Each fixture carries a submodule, and its
+  # SubmoduleTest reads a file from it: passed when the checkout
+  # fetched it, failed on the wrong content, skipped when the
+  # directory is empty. A skip fails this check, so dropping the
+  # wiring or setting checkout_submodules false turns the run red.
+  # Runs whatever the lanes' verdicts, as sbom-check does; a lane with
+  # no reports still fails, at the download.
+  submodule-check:
+    name: 'Submodule Check (${{ matrix.lane }})'
+    needs: [maven-build-test, gradle-build-test]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ['maven', 'gradle']
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@beca7ffe87eac9212c70fe52d0d38d3bd61bf9d1'  # v0.16.2
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # For the check script only; the fixture is not checked out here.
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Download JUnit reports'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: ${{ matrix.lane }}-junit-reports
+          path: junit-reports
+
+      - name: 'Assert the submodule reached the build'
+        shell: bash
+        run: python3 .github/scripts/submodule-check.py junit-reports
+
+  # Self-test of the Gradle verify lane against the dedicated fixture:
+  # a multi-project build (core, app, and app:nested a level below)
+  # mixing the Groovy and Kotlin DSLs, depending only on JUnit, Jackson
+  # and Commons Lang from Maven Central. Its egress footprint is the
+  # allow-listed toolchain set, so block mode applies, as in the Maven
+  # lane. Its Failing*Test classes stay out of this build: the root
+  # script excludes them unless -PfailingTests is set.
   gradle-build-test:
     name: 'Gradle Build/Test'
     permissions:
@@ -340,18 +396,7 @@ jobs:
       pull-requests: read  # repository-metadata-action queries PR data
     uses: $/.github/workflows/gradle-build-test.yaml
     with:
-      repository: 'onap/portal-ng-preferences'
-      # Pin a known-good commit so the self-test is repeatable and an
-      # upstream change cannot make this workflow appear broken.
-      ref: '2796448b11c66b536ecf1bd0c8ae2271606e85a7'
-      # The project carries no submodules, so this proves the input is
-      # accepted and harmless; wiring-check proves each checkout uses
-      # it.
+      repository: 'lfreleng-actions/test-gradle-project'
+      # The fixture carries a submodule, which submodule-check proves
+      # this call checked out.
       checkout_submodules: true
-      harden_runner_egress: 'audit'
-      # Report Grype findings without failing on them. This job tests
-      # the workflow, not an upstream project's dependency hygiene, and
-      # a pinned upstream commit only accumulates advisories as they
-      # are published: the resolved-graph SBOM surfaces them all. The
-      # Maven fixture is ours, so its lane keeps the gate strict.
-      grype_permit_fail: true

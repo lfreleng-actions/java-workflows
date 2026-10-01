@@ -829,18 +829,22 @@ third-party code; that code could then poison caches later runs restore
 (CWE-349). Pull request runs write only to their own cache scope. This
 matches `python-workflows`.
 
-The Maven lane builds `lfreleng-actions/test-maven-project` under
-`block` egress: the fixture is a three-module reactor depending only on
-JUnit and Jackson from Maven Central, so its footprint is the
-allow-listed toolchain set. An `sbom-check` matrix job then asserts,
-for each lane, that the SBOM holds one dependency whose version comes
-from an imported BOM and one that arrives only transitively, both with
-real versions (`jackson-databind` and `jackson-core` for Maven; the
-webflux starter and `spring-core` for Gradle). A passing Grype scan
-proves nothing about completeness: the Maven fixture has no advisories
-to find, and a near-empty SBOM scans clean. Without that assertion
-both lanes would stay green whatever their SBOMs contained. The check
-runs whatever the lanes' verdicts, so a Grype failure cannot hide it.
+The Maven lane builds `lfreleng-actions/test-maven-project` and the
+Gradle lane `lfreleng-actions/test-gradle-project`, both under `block`
+egress. Each fixture depends only on JUnit, Jackson and (Gradle)
+Commons Lang from Maven Central, so its footprint is the allow-listed
+toolchain set, and each keeps Grype's gate strict: the fixtures are
+ours, so an advisory in them is ours to fix. The Gradle fixture is a
+multi-project build with a grandchild module and both DSL dialects. An
+`sbom-check` matrix job then asserts, for each lane, that the SBOM
+holds one dependency whose version comes from an imported BOM and one
+that arrives only transitively, both with real versions
+(`jackson-databind` and `jackson-core` in both fixtures). A passing
+Grype scan proves nothing about completeness: the fixtures have no
+advisories to find, and a near-empty SBOM scans clean. Without that
+assertion both lanes would stay green whatever their SBOMs contained.
+The check runs whatever the lanes' verdicts, so a Grype failure cannot
+hide it.
 
 Both lanes also set `checkout_submodules`, and the Maven lane sets
 `mvn_opts` and `env_vars`, to non-default values that leave the
@@ -866,8 +870,21 @@ The rejection itself runs in `wiring-check`: a job that calls a
 reusable workflow cannot set `continue-on-error`, so a live rejection
 would fail the run.
 
-The fixtures cannot show the rest: neither carries a submodule. A
-`wiring-check` job runs `.github/scripts/wiring-check.sh` over this
+Each fixture carries a git submodule pinning `test-maven-project`'s
+first commit, which holds a two-line README and no build. Its
+`SubmoduleTest` reads that README: it passes when the checkout fetched
+the submodule, fails on the wrong content, and skips when the
+directory is empty, so a consumer that checks out without submodules
+still builds. A `submodule-check` matrix job reads each lane's uploaded
+JUnit reports with `.github/scripts/submodule-check.py` and fails
+unless the test passed. A skip fails it too, so removing the wiring or
+setting `checkout_submodules: false` turns the run red. The Gradle
+fixture declares the submodule directory as an input of its `test`
+task, so Gradle cannot reuse a result recorded under another checkout.
+
+The Gerrit path needs more than the fixtures show. A `wiring-check`
+job, the structural guard beside that behavioural one, runs
+`.github/scripts/wiring-check.sh` over this
 branch's workflows. It extracts the POM, environment and
 metadata-location guards and runs their accept and reject paths,
 including a line break that must not start a workflow command and
@@ -877,18 +894,8 @@ initialisation step after every Gerrit checkout. It also rebuilds, in
 local repositories, the Gerrit path's sequence: the base checkout
 `actions/checkout` performs, then a switch to a change that adds a
 submodule. It asserts that the plain update leaves the submodule empty,
-then that the initialisation step fills it.
-
-The Gradle lane sets `grype_permit_fail`: its upstream project's
-resolved graph carries published advisories (Netty, Jackson, PostgreSQL
-and others, reached through Spring Boot), and a pinned upstream commit
-only accumulates more. The job tests the workflow, not that project's
-dependency hygiene, so it reports those findings without failing on
-them. The Maven fixture is ours, and its gate stays strict.
-The Gradle lane still builds a pinned upstream project under `audit`
-egress, because no `test-gradle-project` fixture exists yet (issue #50).
-A large upstream project reaches endpoints beyond the toolchain set; a
-dedicated fixture with a known footprint can switch it to block mode.
+then that the initialisation step fills it. The self-test cannot run
+that path live, since it needs a Gerrit change.
 
 Every building-block action is pinned to a published release, and the
 toolchain egress (Maven Central, Gradle distribution, Temurin, and the
@@ -955,12 +962,10 @@ context that is neither available nor safe on a pull request.
 
 ## Follow-ups
 
-1. Create a `test-gradle-project` fixture and point `testing.yaml` at it
-   (issue #50). The Maven fixture is already in use.
-2. Design and implement the merge/release lanes (signing, Nexus2 staging,
+1. Design and implement the merge/release lanes (signing, Nexus2 staging,
    Model B data bus).
-3. Wire the ONAP `cps` Gerrit verify/merge workflows onto these reusable
+2. Wire the ONAP `cps` Gerrit verify/merge workflows onto these reusable
    workflows.
-4. Have `checkout-gerrit-change-action` run `git submodule update
+3. Have `checkout-gerrit-change-action` run `git submodule update
    --init` after switching to the change, then drop the workflows'
    "Initialise Gerrit change submodules" steps.

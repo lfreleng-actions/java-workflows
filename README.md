@@ -202,12 +202,14 @@ exercises the Maven and Gradle verify workflows by self-repository path
 counterpart), which resolves this repository at the commit already
 running, so it validates the current branch. Both self-test jobs run on
 every pull request. The Maven lane builds the dedicated
-`test-maven-project` fixture under `block` egress; the Gradle lane
-still builds a pinned upstream project under `audit` egress because no
-`test-gradle-project` fixture exists yet (issue #50). A
+`test-maven-project` fixture and the Gradle lane the dedicated
+`test-gradle-project` fixture, both under `block` egress. A
 `pass-through-check` job proves the Maven lane's `mvn_opts` and
 `env_vars` reach both the build and the SBOM, and a `pom-check` job
-proves a second Maven call builds the `mvn_pom_file` it names. A
+proves a second Maven call builds the `mvn_pom_file` it names. Each
+fixture carries a git submodule and a test that reads it, and a
+`submodule-check` job fails unless that test passed in each lane, so
+`checkout_submodules` must actually fetch it. A
 `wiring-check` job runs `.github/scripts/wiring-check.sh` to test the
 guard steps and the submodule wiring the fixtures cannot exercise. See
 [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
