@@ -500,7 +500,7 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/gradle-build-action@1b4ea0f67a3632b0e2fb427fb2af52704ae57849  # v0.6.0
         with:
-          path: ${{ inputs.path_prefix }}
+          path_prefix: ${{ inputs.path_prefix }}
           # Caller override wins, else the detected version, else 21.
           # yamllint disable-line rule:line-length
           java-version: ${{ inputs.java_version != '' && inputs.java_version || steps.metadata.outputs.java_version || '21' }}
