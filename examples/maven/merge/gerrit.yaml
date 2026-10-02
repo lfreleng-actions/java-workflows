@@ -1,0 +1,286 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# EXAMPLE: Gerrit-wrapped caller for the reusable Maven merge workflow
+# =============================================================================
+# Use this form when Gerrit is the source of truth (SCM) for your project.
+# gerrit_to_platform dispatches this workflow (via the GitHub API) when a
+# change merges in Gerrit; it then comments on the change with the result. A
+# daily scheduled run rebuilds the default branch at 02:49 UTC, the slot
+# the retired Jenkins merge jobs used.
+#
+# DEPLOYMENT NOTES:
+#   * Copy into .github/workflows/ with a filename containing BOTH 'gerrit'
+#     AND 'merge' so gerrit_to_platform can discover it, e.g.
+#     gerrit-merge.yaml.
+#   * The workflow file must exist on EVERY active branch: dispatches
+#     target refs/heads/{GERRIT_BRANCH}.
+#   * The nine GERRIT_* inputs are populated automatically by the dispatcher.
+#   * Set the repository variables GERRIT_SERVER, GERRIT_SSH_USER and
+#     GERRIT_KNOWN_HOSTS, and the secret GERRIT_SSH_PRIVKEY.
+#   * The publish job loads the Nexus password from 1Password with
+#     credential-load-action. Pass OP_SERVICE_ACCOUNT_TOKEN and
+#     VAULT_MAPPING_JSON by name: `secrets: inherit` does not cross
+#     organisations. The CREDENTIAL_LOAD_GRANTS variable, where an
+#     administrator set it, gates which items the repository may load.
+# =============================================================================
+name: 'Gerrit Merge'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_dispatch:
+    inputs:
+      GERRIT_BRANCH:
+        description: 'Branch that change is against'
+        required: false
+        type: string
+        default: ''
+      GERRIT_CHANGE_ID:
+        description: 'The ID for the change'
+        required: false
+        type: string
+        default: ''
+      GERRIT_CHANGE_NUMBER:
+        description: 'The Gerrit number'
+        required: false
+        type: string
+        default: ''
+      GERRIT_CHANGE_URL:
+        description: 'URL to the change'
+        required: false
+        type: string
+        default: ''
+      GERRIT_EVENT_TYPE:
+        description: 'Type of Gerrit event'
+        required: false
+        type: string
+        default: ''
+      GERRIT_PATCHSET_NUMBER:
+        description: 'The patch number for the change'
+        required: false
+        type: string
+        default: ''
+      GERRIT_PATCHSET_REVISION:
+        description: 'The revision sha'
+        required: false
+        type: string
+        default: ''
+      GERRIT_PROJECT:
+        description: 'Project in Gerrit'
+        required: false
+        type: string
+        default: ''
+      GERRIT_REFSPEC:
+        description: 'Gerrit refspec of change'
+        required: false
+        type: string
+        default: ''
+  schedule:
+    - cron: '49 2 * * *'
+
+# Keyed on the repository, not the branch: every version of an artifact
+# shares one artifact-level maven-metadata.xml, so lanes for two branches
+# publishing at once would each drop the other's version. A running lane
+# is never cancelled, since one stopped between the metadata fetch and the
+# publish would leave the numbering behind, and queue: max keeps up to
+# 100 pending runs rather than letting a newer one cancel another
+# branch's publish and its report. GitHub does not guarantee the order
+# queued runs start in, so the lane builds the branch head when each run
+# starts, never the merged commit, and the order cannot make it publish
+# a branch's older commit after a newer one. That holds per branch
+# only: every branch merged here must carry its own SNAPSHOT version, or
+# whichever starts last becomes the newest build Nexus serves; bump the
+# default branch's version when cutting a stable one. A backlog beyond
+# 100 still loses runs; the daily rebuild republishes the default
+# branch alone.
+concurrency:
+  group: maven-merge-${{ github.repository }}
+  cancel-in-progress: false
+  queue: max
+
+permissions: {}
+
+jobs:
+  # Report that the build has started. The change has already merged,
+  # and Gerrit refuses to lower a vote on a closed change, so this posts
+  # a comment (STARTED and the run URL) without touching the labels.
+  clear-vote:
+    name: 'Clear Vote'
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          egress-policy: audit
+      - name: 'Clear votes'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/gerrit-review-action@1e3eae766b3de755a2e87aa216cedebbaf9c8292  # v1.1.3
+        with:
+          host: ${{ vars.GERRIT_SERVER }}
+          username: ${{ vars.GERRIT_SSH_USER }}
+          key: ${{ secrets.GERRIT_SSH_PRIVKEY }}
+          known_hosts: ${{ vars.GERRIT_KNOWN_HOSTS }}
+          gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
+          gerrit-patchset-number: ${{ inputs.GERRIT_PATCHSET_NUMBER }}
+          vote-type: clear
+          comment-only: 'true'
+
+  # Gerrit dispatches on merge, possibly before replication to the GitHub
+  # mirror lands. The lane builds the branch head, so without this wait it
+  # could publish the previous head's SNAPSHOT while reporting on this
+  # change. Poll until the merged commit is reachable from the mirrored
+  # branch rather than sleep a fixed time.
+  #
+  # The merged commit is not always GERRIT_PATCHSET_REVISION, the
+  # reviewed patch set: a project that submits with REBASE_IF_NECESSARY
+  # or CHERRY_PICK gets a new commit at submit time, recorded as the
+  # change's final patch set, and the reviewed one never reaches the
+  # branch. So ask Gerrit for the merged change's current revision.
+  wait-for-replication:
+    name: 'Wait for Replication'
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read  # the compare API reads the mirror
+    timeout-minutes: 10
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          egress-policy: audit
+      - name: 'Wait for the merged commit on the mirror'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          BRANCH: ${{ inputs.GERRIT_BRANCH }}
+          CHANGE_NUMBER: ${{ inputs.GERRIT_CHANGE_NUMBER }}
+          CHANGE_URL: ${{ inputs.GERRIT_CHANGE_URL }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${BRANCH}" =~ ^[A-Za-z0-9._/-]+$ ]]; then
+            echo '::error::GERRIT_BRANCH must be a plain branch name.'
+            exit 1
+          fi
+          if [[ ! "${CHANGE_NUMBER}" =~ ^[1-9][0-9]*$ ]]; then
+            echo '::error::GERRIT_CHANGE_NUMBER must be a change number.'
+            exit 1
+          fi
+          url_pattern='^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._~%+/-]*)?$'
+          if [[ ! "${CHANGE_URL}" =~ ${url_pattern} ]]; then
+            echo '::error::GERRIT_CHANGE_URL must be an https URL.'
+            exit 1
+          fi
+          # The REST base precedes /c/ in the change URL, or the number
+          # in its short form, whatever path prefix the server uses.
+          case "${CHANGE_URL}" in
+            */c/*) gerrit="${CHANGE_URL%%/c/*}" ;;
+            */"${CHANGE_NUMBER}") gerrit="${CHANGE_URL%/"${CHANGE_NUMBER}"}" ;;
+            *)
+              echo '::error::GERRIT_CHANGE_URL does not name the change.'
+              exit 1 ;;
+          esac
+          # Gerrit prefixes JSON responses with )]}' to block XSSI.
+          change="$(curl -sSf --max-time 30 \
+            "${gerrit}/changes/${CHANGE_NUMBER}?o=CURRENT_REVISION" \
+            | tail -c +5)"
+          status="$(jq -r '.status' <<< "${change}")"
+          revision="$(jq -r '.current_revision' <<< "${change}")"
+          if [ "${status}" != 'MERGED' ]; then
+            echo "::error::Change ${CHANGE_NUMBER} is ${status}, not MERGED."
+            exit 1
+          fi
+          if [[ ! "${revision}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::Gerrit returned no merged revision.'
+            exit 1
+          fi
+          # Comparing the revision with the branch reports the branch
+          # identical or ahead once the branch contains the revision.
+          # Five minutes covers a slow replication queue.
+          for _ in $(seq 1 30); do
+            status="$(gh api \
+              "repos/${REPOSITORY}/compare/${revision}...${BRANCH}" \
+              --jq '.status' 2> /dev/null || true)"
+            case "${status}" in
+              identical | ahead)
+                echo "${BRANCH} contains ${revision} ✅"
+                exit 0 ;;
+            esac
+            sleep 10
+          done
+          echo "::error::${BRANCH} on the mirror still lacks ${revision}."
+          exit 1
+
+  # Call the reusable merge workflow. On a Gerrit dispatch it builds the
+  # head of GERRIT_BRANCH; on the schedule GERRIT_BRANCH is empty, so it
+  # builds the default branch.
+  maven-merge:
+    needs: [clear-vote, wait-for-replication]
+    if: >-
+      always()
+      && (needs.clear-vote.result == 'success'
+          || needs.clear-vote.result == 'skipped')
+      && (needs.wait-for-replication.result == 'success'
+          || needs.wait-for-replication.result == 'skipped')
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    # REPLACE the pinned SHA below with a java-workflows release SHA
+    # (or your instantiated workflows repository's release SHA).
+    # The all-zero SHA is a non-functional placeholder, NOT a real commit.
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/java-workflows/.github/workflows/maven-merge.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    with:
+      gerrit_branch: ${{ inputs.GERRIT_BRANCH }}
+      nexus_server: 'https://nexus.example.org'  # REPLACE
+      repository_name: 'snapshots'               # the snapshot repository
+      # publish_environment: ''  # GitHub environment for the publish job
+    secrets:
+      OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+      VAULT_MAPPING_JSON: ${{ secrets.VAULT_MAPPING_JSON }}
+      # settings.xml can carry server credentials, so it is passed only
+      # as a masked secret. Synthesise it with maven-xml-settings-action
+      # and forward it when the build needs one.
+      # maven_global_settings: ${{ secrets.MAVEN_GLOBAL_SETTINGS }}
+
+  # Report the overall workflow conclusion back to Gerrit. A comment, as
+  # above: a merged change accepts no lowered vote, so a Verified -1 for a
+  # failed publish would be refused.
+  vote:
+    name: 'Vote'
+    if: ${{ always() && github.event_name != 'schedule' }}
+    needs: [clear-vote, wait-for-replication, maven-merge]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read  # workflow-conclusion lists the run's jobs
+    timeout-minutes: 5
+    steps:
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          egress-policy: audit
+      - name: 'Get conclusion'
+        # yamllint disable-line rule:line-length
+        uses: im-open/workflow-conclusion@8eac7f17381a6917bc04fec3e2c92e70ebc37526  # v3.0.0
+      - name: 'Set vote'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/gerrit-review-action@1e3eae766b3de755a2e87aa216cedebbaf9c8292  # v1.1.3
+        with:
+          host: ${{ vars.GERRIT_SERVER }}
+          username: ${{ vars.GERRIT_SSH_USER }}
+          key: ${{ secrets.GERRIT_SSH_PRIVKEY }}
+          known_hosts: ${{ vars.GERRIT_KNOWN_HOSTS }}
+          gerrit-change-number: ${{ inputs.GERRIT_CHANGE_NUMBER }}
+          gerrit-patchset-number: ${{ inputs.GERRIT_PATCHSET_NUMBER }}
+          vote-type: ${{ env.WORKFLOW_CONCLUSION }}
+          comment-only: 'true'
