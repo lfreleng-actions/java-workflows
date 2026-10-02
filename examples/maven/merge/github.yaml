@@ -1,0 +1,81 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# =============================================================================
+# EXAMPLE: Plain GitHub-native caller for the reusable Maven merge workflow
+# =============================================================================
+# Copy this file into your project's .github/workflows/ directory (for
+# example as maven-merge.yaml) and adjust the `uses:` ref, the Nexus
+# server and the optional `with:` overrides to suit your project.
+#
+# This is the GitHub-native form: it publishes SNAPSHOTs when a change
+# lands on a branch. For projects where Gerrit is the source of truth,
+# use the gerrit.yaml example in this directory instead.
+#
+# DEPLOYMENT NOTES:
+#   * The publish job loads the Nexus password from 1Password with
+#     credential-load-action. Pass OP_SERVICE_ACCOUNT_TOKEN and
+#     VAULT_MAPPING_JSON by name: `secrets: inherit` does not cross
+#     organisations.
+#   * The CREDENTIAL_LOAD_GRANTS variable, where an administrator set
+#     it, gates which credential items the repository may load.
+# =============================================================================
+name: 'Maven Merge'
+
+# yamllint disable-line rule:truthy
+on:
+  push:
+    branches:
+      - main
+      - master
+      - 'stable/**'
+
+# Keyed on the repository, not the branch: every version of an artifact
+# shares one artifact-level maven-metadata.xml, so lanes for two branches
+# publishing at once would each drop the other's version. A running lane
+# is never cancelled, and queue: max keeps up to 100 pending ones; a
+# backlog beyond that still loses runs. GitHub does not guarantee the
+# order queued runs start in, so the lane builds the branch head when
+# each run starts, never the triggering commit, and the order cannot
+# make it publish an older commit after a newer one.
+concurrency:
+  group: maven-merge-${{ github.repository }}
+  cancel-in-progress: false
+  queue: max
+
+permissions: {}
+
+jobs:
+  maven-merge:
+    name: 'Maven Merge'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    # REPLACE the pinned SHA below with a java-workflows release SHA
+    # (or your instantiated workflows repository's release SHA).
+    # The all-zero SHA is a non-functional placeholder, NOT a real commit.
+    # yamllint disable-line rule:line-length
+    uses: lfreleng-actions/java-workflows/.github/workflows/maven-merge.yaml@0000000000000000000000000000000000000000  # REPLACE: vX.Y.Z
+    with:
+      nexus_server: 'https://nexus.example.org'  # REPLACE
+      repository_name: 'snapshots'               # the snapshot repository
+      # Everything below is optional and falls back to the defaults.
+      # nexus_username: ''            # empty: the repository name
+      # publish_environment: ''       # GitHub environment for publish
+      # path_prefix: '.'              # project root (monorepo subdir, etc.)
+      # java_version: '21'            # override auto-detected JDK version
+      # mvn_version: '3.9.11'         # pin the Maven version
+      # mvn_profiles: ''              # comma-separated Maven profiles
+      # mvn_params: ''                # extra mvn parameters
+      # sbom_enabled: true            # false skips SBOM generation
+      # grype_enabled: true           # false skips the Grype scan
+      # harden_runner_egress: 'block' # 'block' (default) or 'audit'
+      # build_timeout_minutes: 45     # raise for large reactors
+      # publish_timeout_minutes: 30   # raise for very large m2repos
+    secrets:
+      OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+      VAULT_MAPPING_JSON: ${{ secrets.VAULT_MAPPING_JSON }}
+      # settings.xml can carry server credentials, so it is passed only
+      # as a masked secret. Forward it when the build needs one.
+      # maven_global_settings: ${{ secrets.MAVEN_GLOBAL_SETTINGS }}

@@ -13,9 +13,10 @@ SPDX-FileCopyrightText: 2026 The Linux Foundation
 Reusable GitHub Actions workflows that build, test and scan JVM projects
 for the Linux Foundation. This repository covers both Maven and Gradle
 projects, porting the Jenkins + global-jjb pipeline onto GitHub Actions.
-This initial release provides the verify lane (build, test, SBOM and
-Grype scan); [`docs/BRIEF.md`](docs/BRIEF.md) tracks the merge and release
-lanes that follow later. The workflows keep the harden-runner
+This repository provides the verify lane (build, test, SBOM and Grype
+scan) and the Maven merge lane (SNAPSHOT publish);
+[`docs/BRIEF.md`](docs/BRIEF.md) tracks the release lane that follows
+later. The workflows keep the harden-runner
 block posture, pinned action SHAs and dual Gerrit/GitHub trigger model of
 `workflows-template`.
 
@@ -31,12 +32,14 @@ subfolder:
 | -------------------------------------------------- | --------- | -------------------------------------- | -------------------- |
 | `.github/workflows/maven-build-test.yaml`          | Maven     | Build, test, SBOM/Grype scan and CBOM  | Pull request         |
 | `.github/workflows/gradle-build-test.yaml`         | Gradle    | Build, test, SBOM/Grype scan and CBOM  | Pull request         |
+| `.github/workflows/maven-merge.yaml`               | Maven     | Publish SNAPSHOTs to Nexus             | Merge                |
 
 <!-- markdownlint-enable MD013 -->
 
 These are `workflow_call` reusable workflows; they carry no trigger of
 their own. "Caller trigger" is the event on which the shipped
-`examples/` callers invoke them (pull request for the verify lane).
+`examples/` callers invoke them: a pull request for the verify lane, and
+a merged change or a daily schedule for the merge lane.
 
 ## Verify lane
 
@@ -163,6 +166,119 @@ Fixing it needs explicit metadata inputs on `cbom-action`.
 
 <!-- markdownlint-enable MD013 -->
 
+## Maven merge lane
+
+`maven-merge.yaml` publishes Maven SNAPSHOTs to a Nexus 2 snapshot
+repository when a change merges. The job that runs the project's code
+never holds the write credential, and the job holding it never runs
+that code. A first job checks the Nexus inputs before anything builds
+(`->` denotes sequence, `{ }` parallel jobs):
+
+```text
+input check -> { repository-metadata | build -> { publish | grype } }
+```
+
+The `build` job checks out the branch head as it stands when the run
+starts, sets up the JDK and Maven the deploy uses, then:
+
+1. seeds the published `maven-metadata.xml` of every reactor module
+   into the `m2repo` with `maven-snapshot-metadata-action` (`fetch`),
+   for the deploy to carry on from the published `buildNumber`;
+2. runs the `deploy` phase with `maven-build-action`, which deploys into
+   its fixed `m2repo` and refuses any argument that would redirect the
+   deploy. It skips `clean`: the checkout starts fresh and the job
+   refuses an existing `m2repo`, so `clean` has nothing to remove, and
+   a `maven-clean-plugin` fileset could delete the seeded metadata;
+3. removes the metadata the deploy left unchanged (`prune`), which
+   would otherwise overwrite a sibling build's newer copy;
+4. fails when the `m2repo` holds no deployed artefact, the trace of a
+   POM that redirects the deploy itself, holds a file outside the
+   reactor's group paths, holds a release version, or holds a symbolic
+   link, which the upload would follow past these checks;
+5. uploads the `m2repo` as the `maven-merge-m2repo` artefact, kept
+   three days;
+6. generates the SBOM, whose failure never stops the publish.
+
+The `publish` job downloads the artefact, loads the Nexus password with
+`credential-load-action`, and uploads the whole `m2repo` in one
+`nexus-publish-action` run, covering every `groupId` the reactor
+deploys. That run sends each `maven-metadata.xml` after the files it
+describes, and holds them back when any of those uploads fails, so an
+artefact missing from one group leaves no group's metadata advertising
+it. A failure among the metadata uploads holds back the rest, but
+cannot recall metadata already sent.
+A live run fails when `OP_SERVICE_ACCOUNT_TOKEN` or `VAULT_MAPPING_JSON`
+is missing, where the node lane warns and skips: a merge lane that
+skipped its publish would leave the SNAPSHOT behind the branch with
+every check green. The step summary records the commit built, the group
+paths, the metadata seeded and pruned, and the files published and
+failed. The `grype` job audits the SBOM for information and never fails
+the run. The build and publish jobs add the `nexus_server` host to their
+egress allow-lists.
+
+The caller owns the triggers, the Gerrit votes, the wait for
+replication, and a concurrency group keyed on the repository; the
+[`examples/maven/merge/`](examples/maven/merge/) callers show each, and
+[`docs/BRIEF.md`](docs/BRIEF.md) explains why. GitHub does not promise
+the order in which queued runs start, so the lane never builds the
+triggering commit: each run checks out the branch head when it starts,
+and whichever run starts last publishes the newest head.
+
+Inputs of the merge lane's own:
+
+<!-- markdownlint-disable MD013 -->
+
+| Name                      | Type    | Default     | Description                                                                |
+| ------------------------- | ------- | ----------- | -------------------------------------------------------------------------- |
+| `nexus_server`            | string  | `''`        | Nexus 2 server URL (`https://`); the lane fails without it                 |
+| `repository_name`         | string  | `snapshots` | Snapshot repository to publish to                                          |
+| `nexus_username`          | string  | `''`        | Nexus username and 1Password item; empty takes the built repository's name |
+| `publish_environment`     | string  | `''`        | GitHub environment for the publish job alone; empty means none             |
+| `dry_run`                 | boolean | `false`     | Publish nothing and log each upload URL, with no credential (self-tests)   |
+| `gerrit_branch`           | string  | `''`        | Branch a Gerrit change merged into; the lane builds its head               |
+| `publish_timeout_minutes` | number  | `30`        | Timeout for the publish job                                                |
+
+<!-- markdownlint-enable MD013 -->
+
+The lane shares `repository`, `ref`, `checkout_submodules`,
+`path_prefix`, `java_version`, `mvn_version`, `mvn_profiles`,
+`mvn_params`, `mvn_opts`, `mvn_pom_file`, `env_vars`, `sbom_enabled`,
+`grype_enabled`, the harden-runner inputs and the build, SBOM and Grype
+timeouts with the verify lane, where the `Verify lane` section
+describes them. Here `ref` names a branch, as a name or a `refs/heads/`
+ref; left empty, the lane builds the triggering branch, and fails when
+the trigger is a tag or a pull request rather than a branch. The
+metadata fetch reads the reactor with the deploy's profiles, options,
+parameters and global settings, and expands the workspace placeholders
+in the options and parameters (`${GITHUB_WORKSPACE}` and others) as
+`maven-build-action` does, so `mvn_params` must stay within the
+reactor-shaping options `maven-snapshot-metadata-action` accepts, and
+`env_vars` takes effect before the fetch.
+
+<!-- markdownlint-disable MD013 -->
+
+| Secret                     | Description                                                             |
+| -------------------------- | ----------------------------------------------------------------------- |
+| `OP_SERVICE_ACCOUNT_TOKEN` | 1Password service-account token for the Nexus password; unless dry run  |
+| `VAULT_MAPPING_JSON`       | Base64 JSON mapping organisation to 1Password vault; unless dry run     |
+| `maven_global_settings`    | Maven global `settings.xml` for the build job; not the publish password |
+
+<!-- markdownlint-enable MD013 -->
+
+| Output              | Description                                     |
+| ------------------- | ----------------------------------------------- |
+| `publication_count` | Files the publish job uploaded                  |
+| `failed_count`      | Files that failed to upload                     |
+| `dry_run_count`     | Files a dry run would upload (`0` otherwise)    |
+
+<!-- markdownlint-enable MD013 -->
+
+The `testing.yaml` self-test runs the lane over `test-maven-project`
+with `dry_run`, reading metadata from ONAP's Nexus, where the fixture's
+group has never published. A `merge-check` job then asserts each
+module's timestamped SNAPSHOT at `buildNumber` 1 with its metadata, and
+a dry run covering every file in the `m2repo`.
+
 ## Usage
 
 Copy a caller from [`examples/`](examples/) into your project's
@@ -179,6 +295,7 @@ with a pinned release. Each caller ships in two forms:
 examples/
   maven/
     build-test/          { github.yaml, gerrit.yaml }
+    merge/               { github.yaml, gerrit.yaml }
   gradle/
     build-test/          { github.yaml, gerrit.yaml }
 ```
@@ -188,11 +305,15 @@ Inputs are optional and default to the canonical behaviour; read the
 
 ## Gerrit support
 
-The reusable workflows are Gerrit-aware: a caller that sets the
+The reusable workflows are Gerrit-aware. A verify caller that sets the
 `gerrit_refspec` input checks out the change with
-`checkout-gerrit-change-action` in place of `actions/checkout`. Vote and
-comment casting live in the `gerrit.yaml` caller examples (clear vote →
-run → report vote for verify), never inside the reusable workflows.
+`checkout-gerrit-change-action` in place of `actions/checkout`. The
+merge workflow has no `gerrit_refspec`: a merged change lives on its
+branch, so the merge caller waits for the merged revision to reach the
+GitHub mirror, then passes `gerrit_branch`, and the lane builds the
+head of that mirrored branch. Vote and comment casting live in the
+`gerrit.yaml` caller examples (clear vote → run → report vote), never
+inside the reusable workflows.
 
 ## Testing
 
@@ -211,14 +332,17 @@ fixture carries a git submodule and a test that reads it, and a
 `submodule-check` job fails unless that test passed in each lane, so
 `checkout_submodules` must actually fetch it. A
 `wiring-check` job runs `.github/scripts/wiring-check.sh` to test the
-guard steps and the submodule wiring the fixtures cannot exercise. See
+guard steps, the merge lane's input checks and its copy of
+`maven-build-action`'s placeholder expansion, and the submodule wiring
+the fixtures cannot exercise. See
 [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
 
 ## Design
 
 Read [`docs/BRIEF.md`](docs/BRIEF.md) for the design decisions: the
 Maven/Gradle split, the verify-lane wiring, the removed audit job, the
-planned merge/release lanes, and the action-pinning policy.
+Maven merge lane, the planned release lane, and the action-pinning
+policy.
 
 [pre-commit.ci results page]: https://results.pre-commit.ci/latest/github/lfreleng-actions/java-workflows/main
 [pre-commit.ci status badge]: https://results.pre-commit.ci/badge/github/lfreleng-actions/java-workflows/main.svg
