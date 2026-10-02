@@ -22,3 +22,13 @@ paths:
       - 'reusable workflow call "\$/\.github/workflows/maven\-build\-test\.yaml" at "uses" is not following the format'
       # yamllint disable-line rule:line-length
       - 'reusable workflow call "\$/\.github/workflows/gradle\-build\-test\.yaml" at "uses" is not following the format'
+      # yamllint disable-line rule:line-length
+      - 'reusable workflow call "\$/\.github/workflows/maven\-merge\.yaml" at "uses" is not following the format'
+  # GitHub's concurrency 'queue' key keeps up to 100 pending runs rather
+  # than one, which the merge lane's repository-wide group needs; it
+  # does not promise their start order (docs/BRIEF.md).
+  # actionlint does not know the key yet; the schemastore validator in
+  # the hooks accepts it. Remove this once actionlint learns it.
+  examples/maven/merge/*.yaml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'
