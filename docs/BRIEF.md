@@ -953,12 +953,14 @@ context that is neither available nor safe on a pull request.
   lanes: a submodule can carry modules, so the build, SBOM and CBOM
   must see the same tree. The legacy lane cloned submodules
   unconditionally; here it is opt-in. `checkout-gerrit-change-action`
-  v1.1.0 initialises submodules on the base branch, then runs a plain
-  `git submodule update` after switching to the change, which leaves a
-  submodule the change adds or moves uninitialised. An
+  v1.1.0 initialised submodules on the base branch, then ran a plain
+  `git submodule update` after switching to the change, which left a
+  submodule the change adds or moves uninitialised; v1.1.1 fixed this
+  and v1.1.2 also removes submodules the change drops. An
   "Initialise Gerrit change submodules" step after every Gerrit
-  checkout runs `git submodule sync` and `git submodule update --init`
-  until the action does so itself.
+  checkout still runs `git submodule sync` and
+  `git submodule update --init`. Both are idempotent, so the step is
+  harmless on a fixed pin and guards against a pin regression.
 
 ## Follow-ups
 
@@ -966,6 +968,7 @@ context that is neither available nor safe on a pull request.
    Model B data bus).
 2. Wire the ONAP `cps` Gerrit verify/merge workflows onto these reusable
    workflows.
-3. Have `checkout-gerrit-change-action` run `git submodule update
-   --init` after switching to the change, then drop the workflows'
-   "Initialise Gerrit change submodules" steps.
+3. Drop the workflows' "Initialise Gerrit change submodules" steps
+   and their `wiring-check.sh` rule, now that
+   `checkout-gerrit-change-action` v1.1.1 initialises the submodules a
+   change adds.

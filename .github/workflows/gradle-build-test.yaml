@@ -192,7 +192,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@beca7ffe87eac9212c70fe52d0d38d3bd61bf9d1'  # v0.16.2
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@538904e241556d101fb908b50e2a2965fa0346cf'  # v0.16.6
 
       # --- Timeouts (minutes) ---
       # The test summary, SBOM and CBOM run as steps inside the build
@@ -354,7 +354,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -364,10 +364,10 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           ref: refs/heads/${{ inputs.gerrit_branch }}
           submodules: ${{ inputs.checkout_submodules }}
-      # checkout-gerrit-change-action v1.1.0 initialises submodules on
-      # the base branch, then runs a plain git submodule update after
-      # switching to the change, which skips any submodule the change
-      # adds or moves. Initialise them here; see docs/BRIEF.md.
+      # checkout-gerrit-change-action v1.1.1 and later initialise the
+      # submodules a change adds or moves; v1.1.0 skipped them. Kept as
+      # an idempotent guard that wiring-check.sh enforces, so a pin
+      # regression cannot reintroduce the gap; see docs/BRIEF.md.
       - name: 'Initialise Gerrit change submodules'
         if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
         shell: bash
@@ -389,7 +389,7 @@ jobs:
       - name: 'Gather repository metadata'
         id: repo-metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/repository-metadata-action@847400e0d0b34cc88a572fa9575accd80401b796  # v0.3.1
+        uses: lfreleng-actions/repository-metadata-action@b2078d32ca207a0e110b2157a95271a35688c8e7  # v0.3.2
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           github_summary: 'true'
@@ -451,7 +451,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@298f53bbbc1d5f9e54df9feb484d110dc2b33197  # v1.1.0
+        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -461,10 +461,10 @@ jobs:
           repository: ${{ inputs.repository || github.repository }}
           ref: refs/heads/${{ inputs.gerrit_branch }}
           submodules: ${{ inputs.checkout_submodules }}
-      # checkout-gerrit-change-action v1.1.0 initialises submodules on
-      # the base branch, then runs a plain git submodule update after
-      # switching to the change, which skips any submodule the change
-      # adds or moves. Initialise them here; see docs/BRIEF.md.
+      # checkout-gerrit-change-action v1.1.1 and later initialise the
+      # submodules a change adds or moves; v1.1.0 skipped them. Kept as
+      # an idempotent guard that wiring-check.sh enforces, so a pin
+      # regression cannot reintroduce the gap; see docs/BRIEF.md.
       - name: 'Initialise Gerrit change submodules'
         if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
         shell: bash
@@ -491,14 +491,14 @@ jobs:
       - name: 'Detect build metadata'
         id: metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/build-metadata-action@37764159ab25aac45d0a04edf78935877c0283f5  # v0.8.2
+        uses: lfreleng-actions/build-metadata-action@a42f21be0f09b3f463da8d349a6ac5d19ac67d3b  # v0.9.0
         with:
           path_prefix: ${{ inputs.path_prefix }}
 
       - name: 'Build with Gradle'
         id: build
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/gradle-build-action@1b4ea0f67a3632b0e2fb427fb2af52704ae57849  # v0.6.0
+        uses: lfreleng-actions/gradle-build-action@62e164ecb3db615191f718067a09efca6f2b3057  # v0.7.0
         with:
           path_prefix: ${{ inputs.path_prefix }}
           # Caller override wins, else the detected version, else 21.
@@ -939,7 +939,7 @@ jobs:
       - name: 'Grype audit SBOM'
         id: grype-audit
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/grype-scan-action@ee8d637c2324bbb84ae583abc95b56c9c4d078ee  # v0.1.0
+        uses: lfreleng-actions/grype-scan-action@9a85f35a26a71dafb2fa23a6f83a640d526ee559  # v0.2.0
         with:
           sbom: 'sbom-cyclonedx.json'
           fail-on: ${{ inputs.grype_fail_on }}

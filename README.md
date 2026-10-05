@@ -85,7 +85,12 @@ whole job.
 
 The Maven `build` job passes `mvn_opts`, `mvn_pom_file` and `env_vars`
 through to `maven-build-action`; each empty value keeps the action's
-default. Java detection reads the selected POM's directory, and a POM
+default. The action deploys into the workspace `m2repo` and, from
+v0.5.1, refuses `altDeploymentRepository`,
+`altReleaseDeploymentRepository` and `altSnapshotDeploymentRepository`
+in `mvn_opts`, `mvn_params`, `mvn_profiles` or a `MAVEN_ARGS` exported
+through `env_vars`, so remove them from shared build arguments.
+Java detection reads the selected POM's directory, and a POM
 not named `pom.xml` requires `java_version`. The SBOM step resolves the
 graph the build resolves, so it receives `mvn_opts` alongside
 `mvn_profiles` and `mvn_params`, and inherits the build's `env_vars`
