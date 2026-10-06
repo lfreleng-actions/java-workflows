@@ -77,7 +77,7 @@ One job owns the built tree: every step that reads it runs inside
    action's `mvn-opts`, `mvn-pom-file` and `env-vars`. A composite
    action applies a default only when an input is absent, never when it
    arrives empty, so each empty value falls back to the action's own
-   default: the workflow restates v0.4.3's `mvn-opts` default (the
+   default: the workflow restates v0.5.2's `mvn-opts` default (the
    `/tmp/r` local repository and quiet transfer logging), `pom.xml`,
    and `{}`. A non-empty `mvn_opts` replaces that default rather than
    adding to it, as it does on the action. `env_vars` takes a JSON
@@ -248,7 +248,7 @@ rule closes a bypass: the action upper-cases with JavaScript's
 `toUpperCase()`, which maps some non-ASCII letters onto ASCII ones
 (`maven_arg` followed by U+017F exports as `MAVEN_ARGS`), while the
 guard's `ascii_upcase` leaves them. The name lists follow `sbom-action`
-v0.2.0 and `maven-build-action` v0.4.3 and move with their pins.
+v0.2.0 and `maven-build-action` v0.5.2 and move with their pins.
 
 `sbom-action` resolves `path_prefix/pom.xml` and rejects `-f`/`--file`
 in `maven_args`, because an alternate POM would escape the directory it
