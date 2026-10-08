@@ -544,7 +544,7 @@ jobs:
       #
       # Parity: maven-build-action's build step (v0.4.3's list, which
       # v0.5.3 keeps), MAVEN_ARGS, and the SNAPSHOT_METADATA_* inputs
-      # maven-snapshot-metadata-action v0.0.1 removes from the fetch's
+      # maven-snapshot-metadata-action v0.1.0 removes from the fetch's
       # environment, which the deploy would still see. SBOM: sbom-action
       # v0.2.0. Recheck the lists when any of those pins moves.
       - name: 'Require one environment for fetch, deploy and SBOM'
@@ -583,6 +583,7 @@ jobs:
           parity+=' PATH_PREFIX GLOBAL_SETTINGS MVN_PHASES MVN_POM_FILE'
           parity+=' MVN_PROFILES MVN_OPTS MVN_PARAMS JACOCO_ARGS'
           parity+=' SNAPSHOT_METADATA_BASELINE_PATH'
+          parity+=' SNAPSHOT_METADATA_CHECK_COORDINATES'
           parity+=' SNAPSHOT_METADATA_FETCH_ATTEMPTS'
           parity+=' SNAPSHOT_METADATA_HELP_PLUGIN_VERSION'
           parity+=' SNAPSHOT_METADATA_M2REPO_PATH'
@@ -863,7 +864,7 @@ jobs:
       - name: 'Fetch published SNAPSHOT metadata'
         id: fetch
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-snapshot-metadata-action@5311c16aa8b79648258bf032d1e4ed6e33c145c0  # v0.0.1
+        uses: lfreleng-actions/maven-snapshot-metadata-action@44ed26f32ea50d56e6361305fe5896532a560529  # v0.1.0
         with:
           mode: 'fetch'
           nexus_server: ${{ inputs.nexus_server }}
@@ -913,14 +914,22 @@ jobs:
 
       # Removes the metadata the deploy left unchanged, which would
       # otherwise overwrite newer copies a sibling build published
-      # meanwhile.
+      # meanwhile. First it refuses, removing nothing, any SNAPSHOT
+      # version or metadata that no module fetch read owns: a
+      # coordinate a POM-bound deploy-file writes inside the reactor's
+      # own group, say. fetch seeded none of its metadata, so it would
+      # publish from buildNumber 1 over the published copy, and the
+      # group-path check below cannot see it. check_coordinates is on
+      # by default; set here so a change of default cannot turn it
+      # off, and wiring-check.sh holds it on.
       - name: 'Prune unchanged SNAPSHOT metadata'
         id: prune
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-snapshot-metadata-action@5311c16aa8b79648258bf032d1e4ed6e33c145c0  # v0.0.1
+        uses: lfreleng-actions/maven-snapshot-metadata-action@44ed26f32ea50d56e6361305fe5896532a560529  # v0.1.0
         with:
           mode: 'prune'
           m2repo_path: ${{ steps.build.outputs.m2repo_path }}
+          check_coordinates: 'true'
 
       # maven-build-action stops callers redirecting the deploy, but a
       # POM that sets altSnapshotDeploymentRepository in the deploy
@@ -930,10 +939,13 @@ jobs:
       # checksums remains. Not every module has to appear, since a
       # project may set maven.deploy.skip on some.
       #
-      # Also fail on a file outside the reactor's group paths: fetch
-      # seeded none of its metadata, so it would publish from
-      # buildNumber 1 over the published copy. The publish job uploads
-      # the whole m2repo, which this check confines to those paths.
+      # Also fail on a file outside the reactor's group paths. prune
+      # has already refused every SNAPSHOT coordinate fetch did not
+      # record, and metadata no recorded module owns, inside a known
+      # group or out of one. It leaves release versions alone, which
+      # the check after this one refuses. This catches any other stray
+      # file, and confines to those paths the whole m2repo that the
+      # publish job uploads.
       #
       # And fail on an artefact outside a -SNAPSHOT version directory:
       # a reactor mixing in a release version would deploy it here, and

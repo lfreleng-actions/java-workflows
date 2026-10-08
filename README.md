@@ -189,14 +189,19 @@ starts, sets up the JDK and Maven the deploy uses, then:
 
 1. seeds the published `maven-metadata.xml` of every reactor module
    into the `m2repo` with `maven-snapshot-metadata-action` (`fetch`),
-   for the deploy to carry on from the published `buildNumber`;
+   for the deploy to carry on from the published `buildNumber`, and
+   records which modules it read;
 2. runs the `deploy` phase with `maven-build-action`, which deploys into
    its fixed `m2repo` and refuses any argument that would redirect the
    deploy. It skips `clean`: the checkout starts fresh and the job
    refuses an existing `m2repo`, so `clean` has nothing to remove, and
    a `maven-clean-plugin` fileset could delete the seeded metadata;
-3. removes the metadata the deploy left unchanged (`prune`), which
-   would otherwise overwrite a sibling build's newer copy;
+3. refuses any SNAPSHOT coordinate, or metadata, that no module
+   `fetch` read owns, such as a coordinate a POM-bound `deploy-file`
+   writes inside the reactor's own group, whose `buildNumber` would
+   restart at 1; then removes the metadata the deploy left unchanged
+   (`prune`), which would otherwise overwrite a sibling build's newer
+   copy. Release versions are the next check's to refuse;
 4. fails when the `m2repo` holds no deployed artefact, the trace of a
    POM that redirects the deploy itself, holds a file outside the
    reactor's group paths, holds a release version, or holds a symbolic
@@ -296,7 +301,10 @@ The `testing.yaml` self-test runs the lane over `test-maven-project`
 with `dry_run`, reading metadata from ONAP's Nexus, where the fixture's
 group has never published. A `merge-check` job then asserts each
 module's timestamped SNAPSHOT at `buildNumber` 1 with its metadata, and
-a dry run covering every file in the `m2repo`.
+a dry run covering every file in the `m2repo`. A `merge-prune-check`
+job runs the lane's `prune`, at the lane's pin, over the fixture's
+reactor plus an extra coordinate inside its group, and asserts that
+`prune` refuses it.
 
 ## Usage
 
@@ -353,9 +361,9 @@ fixture carries a git submodule and a test that reads it, and a
 `submodule-check` job fails unless that test passed in each lane, so
 `checkout_submodules` must actually fetch it. A
 `wiring-check` job runs `.github/scripts/wiring-check.sh` to test the
-guard steps, the merge lane's input checks and its copy of
-`maven-build-action`'s placeholder expansion, and the submodule wiring
-the fixtures cannot exercise. See
+guard steps, the merge lane's input checks, its coordinate check and
+its copy of `maven-build-action`'s placeholder expansion, and the
+submodule wiring the fixtures cannot exercise. See
 [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
 
 ## Design
