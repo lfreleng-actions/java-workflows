@@ -330,6 +330,18 @@ examples/
 Inputs are optional and default to the canonical behaviour; read the
 `inputs:` block at the top of each workflow file for the documented list.
 
+To call a Maven lane more than once in one run, as a matrix of Java or
+Maven versions does, give each call its own `artifact_suffix`, for
+example `-java-${{ matrix.java }}`. Every artefact name the lane
+chooses, for what it uploads or reads back, ends with it, so the calls
+cannot read each other's reports, SBOM or `m2repo`. Matrix calls run
+as separate jobs, and while `upload-artifact` refuses a name already
+used within one job, uploads from separate jobs coexist under one
+name, and `download-artifact` takes the newest without an error.
+`repository-metadata-action` gives its own upload a unique name
+already. A single call leaves the suffix empty and keeps the names
+given in this document.
+
 ## Gerrit support
 
 The reusable workflows are Gerrit-aware. A verify caller that sets the
