@@ -543,7 +543,7 @@ jobs:
       # names are refused always; the SBOM's own only when it runs.
       #
       # Parity: maven-build-action's build step (v0.4.3's list, which
-      # v0.5.2 keeps), MAVEN_ARGS, and the SNAPSHOT_METADATA_* inputs
+      # v0.5.3 keeps), MAVEN_ARGS, and the SNAPSHOT_METADATA_* inputs
       # maven-snapshot-metadata-action v0.0.1 removes from the fetch's
       # environment, which the deploy would still see. SBOM: sbom-action
       # v0.2.0. Recheck the lists when any of those pins moves.
@@ -689,7 +689,7 @@ jobs:
 
       # The metadata fetch runs Maven before maven-build-action
       # provisions its toolchain, so set up the same JDK and Maven
-      # first, with the installers and pins maven-build-action v0.5.2
+      # first, with the installers and pins maven-build-action v0.5.3
       # uses. The runner's defaults could otherwise fail
       # help:active-profiles, or read the reactor differently from the
       # deploy. maven-build-action installs the same versions again, so
@@ -706,7 +706,7 @@ jobs:
           # yamllint disable-line rule:line-length
           java-version: ${{ inputs.java_version != '' && inputs.java_version || steps.metadata.outputs.java_version || '21' }}
           distribution: 'temurin'
-      # As maven-build-action v0.5.2 does: download Maven only when the
+      # As maven-build-action v0.5.3 does: download Maven only when the
       # version on PATH differs from the one requested, so a runner that
       # already has it neither downloads it again nor fails offline.
       - name: 'Check installed Maven'
@@ -878,18 +878,19 @@ jobs:
           maven_args: ${{ format('{0} {1} {2} {3}', inputs.mvn_profiles != '' && format('-P{0}', inputs.mvn_profiles) || '', steps.settings.outputs.arg, steps.expand.outputs.mvn_opts, steps.expand.outputs.mvn_params) }}
 
       # Deploys into maven-build-action's fixed m2repo, leaving the
-      # seeded metadata in place. v0.5.2 sets the deploy repository
-      # after every caller argument and refuses a caller's own, so no
-      # input can redirect it. Coverage belongs to the verify lane, and
-      # this workflow uploads the m2repo itself. No clean phase: the
-      # checkout is fresh (actions/checkout removes untracked build
-      # output from a reused workspace) and the m2repo check above
-      # refuses a tracked one, so clean has nothing to remove, while a
-      # maven-clean-plugin fileset could delete the seeded metadata.
+      # seeded metadata in place. v0.5.3 sets the deploy repository
+      # after every caller argument and refuses a caller's own naming
+      # anywhere else, so no input can redirect it. Coverage belongs to
+      # the verify lane, and this workflow uploads the m2repo itself. No
+      # clean phase: the checkout is fresh (actions/checkout removes
+      # untracked build output from a reused workspace) and the m2repo
+      # check above refuses a tracked one, so clean has nothing to
+      # remove, while a maven-clean-plugin fileset could delete the
+      # seeded metadata.
       - name: 'Build and deploy to the m2repo'
         id: build
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-build-action@01a3700e14ee592694d1030c2305d0579e9df571  # v0.5.2
+        uses: lfreleng-actions/maven-build-action@0f09f8024307dbdba2f89286479e0e870f7065ff  # v0.5.3
         with:
           path_prefix: ${{ inputs.path_prefix }}
           # yamllint disable-line rule:line-length
@@ -900,7 +901,7 @@ jobs:
           mvn-params: ${{ inputs.mvn_params }}
           # A composite action applies an input default only when the
           # input is absent, never when it arrives empty, so restate
-          # v0.5.2's default, which the fetch above uses too.
+          # v0.5.3's default, which the fetch above uses too.
           # yamllint disable-line rule:line-length
           mvn-opts: ${{ inputs.mvn_opts != '' && inputs.mvn_opts || '-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn -Dmaven.repo.local=/tmp/r -Dorg.ops4j.pax.url.mvn.localRepository=/tmp/r' }}
           # yamllint disable-line rule:line-length

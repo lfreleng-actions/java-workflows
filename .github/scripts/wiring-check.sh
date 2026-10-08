@@ -342,7 +342,7 @@ fi
 # copy is that action's script at the SHA below, and moving the pin
 # without refreshing the copy fails here.
 echo 'Merge lane: placeholder expansion matches maven-build-action'
-expand_pin='01a3700e14ee592694d1030c2305d0579e9df571'
+expand_pin='0f09f8024307dbdba2f89286479e0e870f7065ff'
 expand_vendored='.github/scripts/vendor/maven-build-action/expand-workspace-vars.sh'
 pins="$(grep -o 'lfreleng-actions/maven-build-action@[0-9a-f]*' "${merge}" \
   | sort -u)"
