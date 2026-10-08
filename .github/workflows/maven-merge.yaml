@@ -1,0 +1,1372 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Reusable Maven merge (SNAPSHOT publish) pipeline.
+#
+# Builds the branch head once, deploying the SNAPSHOTs into a local
+# file repository (the m2repo), and publishes that tree to Nexus from a
+# separate job. The job that runs the project's code never holds the
+# write credential, and the job that holds it never runs the code
+# (-> denotes sequence, { } parallel jobs):
+#   validate -> { repository-metadata | build -> { publish | grype } }
+#
+# The build job seeds the published maven-metadata.xml into the m2repo
+# before the deploy, so maven-deploy-plugin carries on from the
+# published buildNumber, then prunes whatever metadata the deploy left
+# unchanged, so a sibling build's newer copy is never overwritten. The
+# SBOM is generated at the end of the build job, and Grype audits it;
+# both are informational and never gate the publish.
+#
+# The caller owns triggers, Gerrit votes, replication waits and the
+# concurrency group, which must key on the repository; see
+# examples/maven/merge/ and docs/BRIEF.md.
+name: '[R] Maven Merge'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    inputs:
+      # --- Checkout target (defaults to the calling repository) ---
+      repository:
+        description: 'Repository to check out (owner/name)'
+        required: false
+        type: string
+        default: ''
+      ref:
+        description: >-
+          Branch to build, as a name or refs/heads/ ref. Empty builds the
+          triggering branch, or the default branch of another
+          repository; a run whose trigger is not a branch then fails.
+          gerrit_branch, when set, takes precedence.
+        required: false
+        type: string
+        default: ''
+      checkout_submodules:
+        description: >-
+          Check out git submodules, so the build and SBOM see modules a
+          submodule carries.
+        required: false
+        type: boolean
+        default: false
+
+      # --- Project layout ---
+      path_prefix:
+        description: 'Path to the project root directory'
+        required: false
+        type: string
+        default: '.'
+
+      # --- Java / Maven toolchain ---
+      java_version:
+        description: >-
+          OpenJDK version for the build. Empty auto-detects from the
+          project (build-metadata-action) and falls back to 21.
+        required: false
+        type: string
+        default: ''
+      mvn_version:
+        description: 'Maven version to provision (3.9 or newer)'
+        required: false
+        type: string
+        default: '3.9.11'
+      mvn_profiles:
+        description: 'Comma-delimited list of Maven profiles to activate'
+        required: false
+        type: string
+        default: ''
+      mvn_params:
+        description: >-
+          Extra parameters appended to the mvn command. The metadata
+          fetch reads the reactor with them too, so they must stay
+          within the reactor-shaping options
+          maven-snapshot-metadata-action accepts (-D, -P, -B, -ntp,
+          -T and the like); goals, -f, -pl and -N fail the fetch.
+        required: false
+        type: string
+        default: ''
+      mvn_opts:
+        description: >-
+          Maven options for the deploy (maven-build-action mvn-opts),
+          placed on the mvn command line ahead of mvn_params.
+          Non-empty replaces the action's default options, which set
+          maven.repo.local and the Pax URL local repository to /tmp/r
+          and quiet transfer logging; empty keeps them. The metadata
+          fetch and the SBOM step receive the value too. Options that
+          redirect the deploy are refused.
+        required: false
+        type: string
+        default: ''
+      mvn_pom_file:
+        description: >-
+          POM to build, relative to path_prefix (maven-build-action
+          mvn-pom-file). Empty means pom.xml. Java detection reads the
+          selected POM's directory; a POM not named pom.xml requires
+          java_version. The SBOM step resolves path_prefix/pom.xml, so
+          the build job fails when this names another POM and
+          sbom_enabled is set.
+        required: false
+        type: string
+        default: ''
+      env_vars:
+        description: >-
+          JSON object of named variables exported to the environment of
+          the build job before the metadata fetch, so the fetch, the
+          deploy and the SBOM all see them, for example
+          '{"MY_FLAG": "1"}'. Names are upper-cased. A name whose
+          variable already holds a non-empty value is skipped. The
+          build job fails on a name that is not an ASCII identifier,
+          and on one the fetch or the deploy sets for itself, such as
+          MAVEN_ARGS, MVN_PARAMS or SNAPSHOT_METADATA_*, since the two
+          would then read different reactors. With sbom_enabled set it
+          also fails on a name the SBOM step sets itself. Inputs are
+          not masked, so never pass secrets.
+        required: false
+        type: string
+        default: '{}'
+
+      # --- Nexus ---
+      nexus_server:
+        description: >-
+          Nexus 2 server URL (https), for example
+          'https://nexus.opendaylight.org'. Required: the validate job
+          fails without it.
+        required: false
+        type: string
+        default: ''
+      repository_name:
+        description: 'Nexus snapshot repository the SNAPSHOTs publish to'
+        required: false
+        type: string
+        default: 'snapshots'
+      nexus_username:
+        description: >-
+          Nexus username. Empty derives it from the name of the
+          repository built (the 1Password credential naming contract).
+        required: false
+        type: string
+        default: ''
+      publish_environment:
+        description: >-
+          GitHub environment for the publish job, and that job alone,
+          for credentials kept behind environment protection rules.
+          Empty runs the job without an environment.
+        required: false
+        type: string
+        default: ''
+      dry_run:
+        description: >-
+          Run the whole lane but publish nothing: the publish job skips
+          loading the credential and runs nexus-publish-action as a dry
+          run, logging each upload URL. For self-tests.
+        required: false
+        type: boolean
+        default: false
+
+      # --- SBOM and Grype (informational) ---
+      sbom_enabled:
+        description: >-
+          Generate an SBOM (set false to skip). Informational: a failed
+          SBOM step never stops the publish. The Grype scan reads the
+          SBOM, so skipping it also skips the scan.
+        required: false
+        type: boolean
+        default: true
+      grype_enabled:
+        description: >-
+          Run the Grype vulnerability scan over the SBOM (set false to
+          skip). Informational: it never fails the run.
+        required: false
+        type: boolean
+        default: true
+
+      # --- Runner hardening ---
+      harden_runner_egress:
+        description: "Harden-runner egress policy: 'block' or 'audit'"
+        required: false
+        type: string
+        default: 'block'
+      build_permit_egress_traffic:
+        description: >
+          Run harden-runner in audit mode for the build job only,
+          permitting unrestricted egress. Use when the build fetches
+          dependencies from CDNs that are impractical to enumerate in
+          the allow-list. Other jobs stay governed by
+          harden_runner_egress.
+        required: false
+        type: boolean
+        default: false
+      harden_runner_allowlist:
+        description: >-
+          Out-of-band harden-runner allow-list configuration. The build
+          and publish jobs add the nexus_server endpoint to it.
+        required: false
+        type: string
+        # yamllint disable-line rule:line-length
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
+
+      # --- Timeouts (minutes) ---
+      # The SBOM runs as a step inside the build job, bounded by its own
+      # step timeout and, with the build, by build_timeout_minutes. The
+      # validation and metadata jobs do fixed work and are not
+      # configurable. Defaults suit a large multi-module reactor on a
+      # busy shared runner; they bound a hung job or step, so erring
+      # high costs nothing.
+      build_timeout_minutes:
+        description: 'Timeout for the build job, including the SBOM step'
+        required: false
+        type: number
+        default: 45
+      sbom_timeout_minutes:
+        description: >-
+          Timeout for the SBOM generation step, clamped to what remains
+          of build_timeout_minutes so a slow SBOM cannot time out the
+          job and skip the publish; skipped when nothing remains
+        required: false
+        type: number
+        default: 30
+      publish_timeout_minutes:
+        description: >-
+          Timeout for the publish job, which uploads every file in the
+          m2repo with retries
+        required: false
+        type: number
+        default: 30
+      grype_timeout_minutes:
+        description: 'Timeout for the Grype scan job'
+        required: false
+        type: number
+        default: 30
+
+      # --- Gerrit ---
+      gerrit_branch:
+        description: >-
+          Gerrit branch the change merged into. When set, the lane
+          builds the head of that branch on the mirror, as the legacy
+          lane does; the caller waits for replication first.
+        required: false
+        type: string
+        default: ''
+
+    secrets:
+      # settings.xml commonly carries server credentials, so it is
+      # accepted only as a secret, never a plain input. It reaches the
+      # build job's Maven runs; it is not the publish credential.
+      maven_global_settings:
+        description: 'Maven global settings.xml content (masked secret)'
+        required: false
+      OP_SERVICE_ACCOUNT_TOKEN:
+        description: >-
+          1Password service-account token credential-load-action uses
+          to load the Nexus password. Required unless dry_run is set.
+        required: false
+      VAULT_MAPPING_JSON:
+        description: >-
+          Base64-encoded JSON mapping of organisation name to 1Password
+          vault ID, for credential-load-action. Required unless dry_run
+          is set.
+        required: false
+
+    outputs:
+      publication_count:
+        description: 'Number of files the publish job uploaded'
+        value: ${{ jobs.publish.outputs.publication_count }}
+      failed_count:
+        description: 'Number of files that failed to upload'
+        value: ${{ jobs.publish.outputs.failed_count }}
+      dry_run_count:
+        description: 'Number of files a dry run would upload (0 otherwise)'
+        value: ${{ jobs.publish.outputs.dry_run_count }}
+
+permissions: {}
+
+jobs:
+  validate:
+    name: 'Validate Inputs'
+    # Fails fast on inputs the later jobs cannot use, before anything
+    # builds, and derives the values they share: the Nexus endpoint the
+    # build and publish jobs add to their egress allow-lists, the Nexus
+    # username, and the branch the checkouts build.
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 5
+    outputs:
+      nexus_endpoint: ${{ steps.validate.outputs.nexus_endpoint }}
+      nexus_username: ${{ steps.validate.outputs.nexus_username }}
+      checkout_ref: ${{ steps.validate.outputs.checkout_ref }}
+    steps:
+      - name: 'Validate inputs'
+        id: validate
+        shell: bash
+        env:
+          NEXUS_SERVER: ${{ inputs.nexus_server }}
+          REPOSITORY_NAME: ${{ inputs.repository_name }}
+          NEXUS_USERNAME: ${{ inputs.nexus_username }}
+          # The repository built, which can differ from the caller for
+          # a cross-repository call.
+          TARGET_REPOSITORY: ${{ inputs.repository || github.repository }}
+          CALLER_REPOSITORY: ${{ github.repository }}
+          GERRIT_BRANCH: ${{ inputs.gerrit_branch }}
+          BRANCH_INPUT: ${{ inputs.ref }}
+          TRIGGER_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          # The values are not echoed: an annotation could otherwise
+          # carry a line break that starts another workflow command.
+          url='^https://([A-Za-z0-9.-]+)(:[0-9]{1,5})?(/[A-Za-z0-9._~/-]*)?$'
+          if [[ ! "${NEXUS_SERVER}" =~ ${url} ]]; then
+            echo '::error::nexus_server must be an https:// URL naming' \
+              'a host, optionally a port and a path, and nothing else.'
+            exit 1
+          fi
+          # Both actions strip a single trailing slash, but the metadata
+          # fetch strips every one and the publisher one, so a doubled
+          # slash would read and write different paths.
+          if [[ "${BASH_REMATCH[3]}" == *//* ]]; then
+            echo '::error::The nexus_server path must not contain //.'
+            exit 1
+          fi
+          endpoint="${BASH_REMATCH[1]}${BASH_REMATCH[2]:-:443}"
+          port="${endpoint##*:}"
+          # 10# reads a zero-padded port as decimal.
+          if (( 10#${port} < 1 || 10#${port} > 65535 )); then
+            echo '::error::The nexus_server port must lie in 1-65535.'
+            exit 1
+          fi
+          endpoint="${BASH_REMATCH[1]}:$((10#${port}))"
+          safe='^[A-Za-z0-9._-]+$'
+          if [[ ! "${REPOSITORY_NAME}" =~ ${safe} ]]; then
+            echo '::error::repository_name must be a Nexus repository' \
+              'ID ([A-Za-z0-9._-]).'
+            exit 1
+          fi
+          # 1Password credential naming contract: the credential, and
+          # so the username, take the name of the repository published.
+          username="${NEXUS_USERNAME:-${TARGET_REPOSITORY##*/}}"
+          if [[ ! "${username}" =~ ${safe} ]]; then
+            echo '::error::The Nexus username must match [A-Za-z0-9._-].'
+            exit 1
+          fi
+          # The checkouts name a branch, never a commit, so each run
+          # builds the branch head as it stands when the run starts (D-2
+          # in docs/BRIEF.md). Queued runs need not start in the order
+          # their triggers fired, and building the triggering commit
+          # could then publish an older one after a newer one.
+          if [ -n "${GERRIT_BRANCH}" ]; then
+            branch="refs/heads/${GERRIT_BRANCH}"
+          elif [ -n "${BRANCH_INPUT}" ]; then
+            case "${BRANCH_INPUT}" in
+              refs/heads/*) branch="${BRANCH_INPUT}" ;;
+              refs/*)
+                echo '::error::ref must name a branch, not a tag or' \
+                  'another kind of ref.'
+                exit 1 ;;
+              *) branch="refs/heads/${BRANCH_INPUT}" ;;
+            esac
+          elif [ "${TARGET_REPOSITORY,,}" = "${CALLER_REPOSITORY,,}" ]; then
+            if [[ "${TRIGGER_REF}" != refs/heads/* ]]; then
+              echo '::error::The triggering ref is not a branch (a tag,' \
+                'a pull request or a dispatch on a tag); set ref or' \
+                'gerrit_branch to the branch to build.'
+              exit 1
+            fi
+            branch="${TRIGGER_REF}"
+          else
+            # actions/checkout resolves another repository's default
+            # branch when the run reaches it.
+            branch=''
+          fi
+          if [[ "${branch}" =~ ^refs/heads/[0-9a-fA-F]{40}$ ]]; then
+            echo '::error::The lane builds a branch head; name the' \
+              'branch, not a commit.'
+            exit 1
+          fi
+          if [ -n "${branch}" ] && ! git check-ref-format "${branch}"; then
+            echo '::error::The branch to build is not a valid branch name.'
+            exit 1
+          fi
+          {
+            echo "nexus_endpoint=${endpoint}"
+            echo "nexus_username=${username}"
+            echo "checkout_ref=${branch}"
+          } >> "${GITHUB_OUTPUT}"
+          echo "Inputs validated ✅"
+
+  repository-metadata:
+    name: 'Repository Metadata'
+    needs: validate
+    runs-on: ubuntu-latest
+    # Informational: a failure here never fails the run, so it cannot
+    # turn a published SNAPSHOT into a negative Gerrit vote.
+    continue-on-error: true
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    timeout-minutes: 10
+    steps:
+      # One harden-runner step with the policy computed, rather than
+      # two selected by condition: harden-runner declares a 'pre'
+      # entry point and no 'pre-if', so its pre-phase runs whatever
+      # a step-level 'if:' says. Both would engage the agent, the
+      # first would win, and audit mode would be unreachable.
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ needs.validate.outputs.checkout_ref }}
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
+
+      - name: 'Gather repository metadata'
+        id: repo-metadata
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/repository-metadata-action@b2078d32ca207a0e110b2157a95271a35688c8e7  # v0.3.2
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_summary: 'true'
+          gerrit_summary: ${{ inputs.gerrit_branch != '' }}
+          artifact_upload: 'true'
+          artifact_formats: 'json'
+
+  build:
+    name: 'Build'
+    needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      commit: ${{ steps.checkout-state.outputs.commit }}
+      branch: ${{ steps.checkout-state.outputs.branch }}
+      group_paths: ${{ steps.fetch.outputs.group_paths }}
+      module_count: ${{ steps.fetch.outputs.module_count }}
+      metadata_count: ${{ steps.fetch.outputs.metadata_count }}
+      removed_count: ${{ steps.prune.outputs.removed_count }}
+      kept_count: ${{ steps.prune.outputs.kept_count }}
+      file_count: ${{ steps.landed.outputs.file_count }}
+      # The attempt that built the m2repo hand-off; publish refuses an
+      # older one.
+      attempt: ${{ github.run_attempt }}
+      # Read by the Grype job.
+      sbom_uploaded: ${{ steps.upload-sbom.outcome == 'success' }}
+    permissions:
+      contents: read
+    timeout-minutes: ${{ inputs.build_timeout_minutes }}
+    steps:
+      # The build job can opt into audit egress independently of the
+      # other jobs via build_permit_egress_traffic. The Nexus endpoint
+      # joins the allow-list because the metadata fetch reads from it.
+      #
+      # One harden-runner step with the policy computed, rather than
+      # two selected by condition: harden-runner declares a 'pre'
+      # entry point and no 'pre-if', so its pre-phase runs whatever
+      # a step-level 'if:' says. Both would engage the agent, the
+      # first would win, and audit mode would be unreachable.
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ (inputs.build_permit_egress_traffic || inputs.harden_runner_egress == 'audit') && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+            ${{ needs.validate.outputs.nexus_endpoint }}
+
+      # The SBOM step's timeout is clamped to what remains of the job's,
+      # measured from here; see 'Budget the SBOM step'.
+      - name: 'Record job start'
+        id: job-start
+        shell: bash
+        run: echo "epoch=$(date +%s)" >> "${GITHUB_OUTPUT}"
+
+      # The POM guard and the POM locator below are the verify lane's
+      # steps verbatim; .github/scripts/wiring-check.sh tests them there
+      # and fails when these copies drift. The environment guard extends
+      # the verify lane's and is tested on its own.
+      #
+      # sbom-action resolves path_prefix/pom.xml and rejects -f/--file,
+      # so a build of any other POM would leave the SBOM describing a
+      # different project from the one deployed. Fail rather than
+      # upload it. Skipped with the SBOM.
+      - name: 'Require the POM the SBOM resolves'
+        id: pom-guard
+        if: inputs.sbom_enabled
+        shell: bash
+        env:
+          MVN_POM_FILE: ${{ inputs.mvn_pom_file }}
+        run: |
+          set -euo pipefail
+          pom="${MVN_POM_FILE}"
+          while [ "${pom#./}" != "${pom}" ]; do
+            pom="${pom#./}"
+          done
+          case "${pom}" in
+            '' | 'pom.xml') exit 0 ;;
+          esac
+          # Escape the workflow-command metacharacters, % first, so the
+          # value cannot end the annotation and start another command.
+          shown="${MVN_POM_FILE//'%'/'%25'}"
+          shown="${shown//$'\r'/'%0D'}"
+          shown="${shown//$'\n'/'%0A'}"
+          echo "::error::mvn_pom_file selects '${shown}', but the" \
+            "SBOM step resolves path_prefix/pom.xml, so the SBOM would" \
+            "not describe the build. Set path_prefix to the directory" \
+            "holding the POM, or set sbom_enabled: false."
+          exit 1
+
+      # A name that a Maven step sets itself would hold one value there
+      # and the exported value in the other, since a step's own env:
+      # wins over GITHUB_ENV. That splits more than the SBOM from the
+      # build: the metadata fetch inherits the job's environment, the
+      # deploy step overrides its own names, and a profile activated on
+      # one of them would then select different reactors for the two, so
+      # some deployed module would get no seeded metadata. The parity
+      # names are refused always; the SBOM's own only when it runs.
+      #
+      # Parity: maven-build-action's build step (v0.4.3's list, which
+      # v0.5.2 keeps), MAVEN_ARGS, and the SNAPSHOT_METADATA_* inputs
+      # maven-snapshot-metadata-action v0.0.1 removes from the fetch's
+      # environment, which the deploy would still see. SBOM: sbom-action
+      # v0.2.0. Recheck the lists when any of those pins moves.
+      - name: 'Require one environment for fetch, deploy and SBOM'
+        id: env-guard
+        shell: bash
+        env:
+          ENV_VARS: ${{ inputs.env_vars }}
+          SBOM_ENABLED: ${{ inputs.sbom_enabled }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ENV_VARS}" ]; then
+            exit 0
+          fi
+          if ! jq -e 'type == "object"' <<< "${ENV_VARS}" > /dev/null; then
+            echo '::error::env_vars must be a JSON object of named' \
+              'variables.'
+            exit 1
+          fi
+          # vars-to-env-action upper-cases each name with JavaScript's
+          # toUpperCase(), which maps some non-ASCII letters onto ASCII
+          # ones: 'maven_arg\u017f' exports as MAVEN_ARGS. jq's
+          # ascii_upcase leaves them, so such a name would pass the
+          # comparison below. Reject every name that is not an ASCII
+          # identifier, since both upper-case those alike. The count
+          # keeps the names themselves out of the annotation.
+          invalid="$(jq -r '[keys[]
+            | select(test("\\A[A-Za-z_][A-Za-z0-9_]*\\z") | not)]
+            | length' <<< "${ENV_VARS}")"
+          if [ "${invalid}" != '0' ]; then
+            echo "::error::env_vars holds ${invalid} name(s) that are" \
+              'not ASCII identifiers ([A-Za-z_][A-Za-z0-9_]*).'
+            exit 1
+          fi
+          # Names the fetch and the deploy would resolve differently.
+          parity=' MAVEN_ARGS'
+          parity+=' PATH_PREFIX GLOBAL_SETTINGS MVN_PHASES MVN_POM_FILE'
+          parity+=' MVN_PROFILES MVN_OPTS MVN_PARAMS JACOCO_ARGS'
+          parity+=' SNAPSHOT_METADATA_BASELINE_PATH'
+          parity+=' SNAPSHOT_METADATA_FETCH_ATTEMPTS'
+          parity+=' SNAPSHOT_METADATA_HELP_PLUGIN_VERSION'
+          parity+=' SNAPSHOT_METADATA_M2REPO_PATH'
+          parity+=' SNAPSHOT_METADATA_MAVEN_ARGS SNAPSHOT_METADATA_MODE'
+          parity+=' SNAPSHOT_METADATA_NEXUS_PASSWORD'
+          parity+=' SNAPSHOT_METADATA_NEXUS_SERVER'
+          parity+=' SNAPSHOT_METADATA_NEXUS_USERNAME'
+          parity+=' SNAPSHOT_METADATA_NEXUS_VERSION'
+          parity+=' SNAPSHOT_METADATA_PATH_PREFIX'
+          parity+=' SNAPSHOT_METADATA_POM_FILE'
+          parity+=' SNAPSHOT_METADATA_REPOSITORY_NAME'
+          parity+=' SNAPSHOT_METADATA_RETRY_DELAY '
+          # Names the SBOM step sets itself, relevant only when it runs.
+          sbom=' BACKEND DEPENDENCY_MANAGER SKIPPED'
+          sbom+=' SKIP_REASON SYFT_CMD PROJECT_DIR SBOM_FORMAT'
+          sbom+=' SPEC_VERSION FILENAME_PREFIX OUTPUT_DIRECTORY'
+          sbom+=' INCLUDE_DEV FAIL_ON_ERROR MAVEN_PLUGIN_VERSION'
+          sbom+=' INPUT_MAVEN_ARGS GRADLE_PLUGIN_VERSION'
+          sbom+=' GRADLE_VERSION GRADLE_MINIMUM JAVA_VERSION'
+          sbom+=' INPUT_GRADLE_ARGS'
+          sbom+=' SYFT_JAVASCRIPT_INCLUDE_DEV_DEPENDENCIES '
+          status=0
+          while IFS= read -r name; do
+            case "${parity}" in
+              *" ${name} "*)
+                echo "::error::env_vars sets ${name}, which the metadata" \
+                  "fetch and the deploy would resolve with different" \
+                  "values, so they could read different reactors."
+                status=1
+                continue ;;
+            esac
+            if [ "${SBOM_ENABLED}" = 'true' ]; then
+              case "${sbom}" in
+                *" ${name} "*)
+                  echo "::error::env_vars sets ${name}, which the SBOM" \
+                    "step sets itself, so the build and SBOM would" \
+                    "resolve with different values."
+                  status=1 ;;
+              esac
+            fi
+          done < <(jq -r 'keys[] | ascii_upcase' <<< "${ENV_VARS}")
+          exit "${status}"
+
+      # The branch head (D-2 in docs/BRIEF.md), as the validate job
+      # resolved it: gerrit_branch, ref, or the triggering branch.
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ needs.validate.outputs.checkout_ref }}
+          persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
+
+      # For the publish job's summary: the branch head may have moved
+      # past the merge that triggered the run, so record what was built.
+      - name: 'Record the commit built'
+        id: checkout-state
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "commit=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+          branch="$(git symbolic-ref --short -q HEAD || echo '(detached)')"
+          echo "branch=${branch}" >> "${GITHUB_OUTPUT}"
+
+      # build-metadata-action reads the pom.xml in the directory it is
+      # given, so point it at the directory of the POM the build runs.
+      - name: 'Locate the POM for metadata'
+        id: pom
+        shell: bash
+        env:
+          PATH_PREFIX: ${{ inputs.path_prefix }}
+          MVN_POM_FILE: ${{ inputs.mvn_pom_file }}
+          JAVA_VERSION: ${{ inputs.java_version }}
+        run: |
+          set -euo pipefail
+          case "${PATH_PREFIX}${MVN_POM_FILE}" in
+            *$'\n'* | *$'\r'*)
+              echo '::error::path_prefix and mvn_pom_file may not hold' \
+                'a line break.'
+              exit 1 ;;
+          esac
+          pom="${MVN_POM_FILE:-pom.xml}"
+          dir="$(dirname -- "${pom}")"
+          metadata_path="${PATH_PREFIX}"
+          if [ "$(basename -- "${pom}")" != 'pom.xml' ]; then
+            if [ -z "${JAVA_VERSION}" ]; then
+              echo "::error::mvn_pom_file names a POM build-metadata-action" \
+                "cannot read, so the Java version cannot come from it." \
+                "Set java_version."
+              exit 1
+            fi
+          elif [ "${dir}" != '.' ]; then
+            metadata_path="${PATH_PREFIX}/${dir}"
+          fi
+          printf 'metadata_path=%s\n' "${metadata_path}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Detect build metadata'
+        id: metadata
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/build-metadata-action@a42f21be0f09b3f463da8d349a6ac5d19ac67d3b  # v0.9.0
+        with:
+          path_prefix: ${{ steps.pom.outputs.metadata_path }}
+
+      # The metadata fetch runs Maven before maven-build-action
+      # provisions its toolchain, so set up the same JDK and Maven
+      # first, with the installers and pins maven-build-action v0.5.2
+      # uses. The runner's defaults could otherwise fail
+      # help:active-profiles, or read the reactor differently from the
+      # deploy. maven-build-action installs the same versions again, so
+      # the toolchain does not change between the two.
+      #
+      # Java comes from actions/setup-java alone. s4u/setup-maven-action,
+      # which maven-build-action used before v0.5.2, runs a second
+      # setup-java defaulting to Zulu, so the fetch ran on Zulu while
+      # the deploy, from v0.5.2, builds on the Temurin requested here.
+      - name: 'Set up Java'
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6  # v6.0.1
+        with:
+          # yamllint disable-line rule:line-length
+          java-version: ${{ inputs.java_version != '' && inputs.java_version || steps.metadata.outputs.java_version || '21' }}
+          distribution: 'temurin'
+      # As maven-build-action v0.5.2 does: download Maven only when the
+      # version on PATH differs from the one requested, so a runner that
+      # already has it neither downloads it again nor fails offline.
+      - name: 'Check installed Maven'
+        id: maven-installed
+        shell: bash
+        run: |
+          # Report the Maven version on PATH, empty when there is none.
+          # pipefail, declared rather than left to the runner's shell
+          # template: without it a failing mvn that prints the version
+          # would pass for a usable one, and the setup step below would
+          # be skipped.
+          set -euo pipefail
+          version=""
+          if command -v mvn >/dev/null 2>&1; then
+            # One bare version line, as 'mvn -q -v' prints; anything
+            # else cannot match the input, and the download goes ahead.
+            version=$(mvn -q -v 2>/dev/null | tr -d '\r\n') || version=""
+          fi
+          echo "Installed Maven: ${version:-none}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+      - name: 'Set up Maven'
+        if: steps.maven-installed.outputs.version != inputs.mvn_version
+        # yamllint disable-line rule:line-length
+        uses: stCarolas/setup-maven@12eb41b233df95d49b0c11fc1b5bc8312e5d4ce0  # v5.1
+        with:
+          maven-version: ${{ inputs.mvn_version }}
+
+      # env_vars can shape the reactor (a profile activating on an env.*
+      # property, MAVEN_OPTS), so export it before the fetch reads the
+      # reactor, with the action and pin maven-build-action exports it
+      # with. Its own export later skips every name already set here.
+      - name: 'Export env_vars'
+        if: inputs.env_vars != '' && inputs.env_vars != '{}'
+        # yamllint disable-line rule:line-length
+        uses: infovista-opensource/vars-to-env-action@3d3e7c8ae1e9e5fcd9ce83e56ab85a6a135d2ffa  # 2.0.0
+        with:
+          secrets: ${{ inputs.env_vars }}
+
+      # The fetch and the SBOM step need the global settings the deploy
+      # uses, since they can define the mirrors and repositories the
+      # reactor resolves through. maven-build-action writes and removes
+      # its own copy, so this writes another, to a private file under
+      # RUNNER_TEMP only when the secret is set, and removes it below
+      # whatever happens.
+      - name: 'Install Maven global settings'
+        id: settings
+        shell: bash
+        env:
+          GLOBAL_SETTINGS: ${{ secrets.maven_global_settings }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GLOBAL_SETTINGS}" ]; then
+            echo 'arg=' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          umask 077
+          file="$(mktemp "${RUNNER_TEMP}/merge-global-settings.XXXXXXXXXX")"
+          printf '%s' "${GLOBAL_SETTINGS}" > "${file}"
+          echo "arg=--global-settings ${file}" >> "${GITHUB_OUTPUT}"
+          echo "path=${file}" >> "${GITHUB_OUTPUT}"
+
+      # fetch refuses an m2repo already holding metadata, but not one
+      # holding artefacts, and the deploy adds to whatever is there. A
+      # checkout that tracks an m2repo would then carry files this
+      # build never deployed into the publish, and could satisfy the
+      # landed check below on its own. Require the path to be absent.
+      - name: 'Require a clean m2repo'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -e "${GITHUB_WORKSPACE}/m2repo" ]; then
+            echo '::error::The checkout already holds an m2repo, the' \
+              'path maven-build-action deploys into; remove it from the' \
+              'repository.'
+            exit 1
+          fi
+
+      # maven-build-action expands a fixed set of workspace placeholders
+      # (${GITHUB_WORKSPACE} and others) in mvn-opts and mvn-params
+      # before Maven sees them, so the fetch and the SBOM expand the
+      # same ones, or they could read a different reactor than the
+      # deploy builds. The function is the pinned action's own,
+      # copied verbatim; wiring-check.sh compares it with the copy
+      # under .github/scripts/vendor/. Runs after the env_vars export,
+      # as the action's expansion does.
+      - name: 'Expand workspace placeholders'
+        id: expand
+        shell: bash
+        env:
+          # The deploy's mvn-opts, fallback included.
+          # yamllint disable-line rule:line-length
+          MVN_OPTS: ${{ inputs.mvn_opts != '' && inputs.mvn_opts || '-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn -Dmaven.repo.local=/tmp/r -Dorg.ops4j.pax.url.mvn.localRepository=/tmp/r' }}
+          MVN_PARAMS: ${{ inputs.mvn_params }}
+        run: |
+          set -euo pipefail
+          expand_workspace_vars() {
+            local text="$1" out='' head rest raw name value
+            local allow=' GITHUB_WORKSPACE GITHUB_REPOSITORY GITHUB_REF_NAME'
+            allow="$allow GITHUB_SHA GITHUB_RUN_ID RUNNER_TEMP RUNNER_OS "
+            while [ "${text#*'$'}" != "$text" ]; do
+              head="${text%%'$'*}"
+              rest="${text:${#head}+1}"
+              if [[ "$rest" =~ ^\{[A-Za-z_][A-Za-z0-9_]*\} ]]; then
+                raw="${BASH_REMATCH[0]}"
+                name="${raw:1:${#raw}-2}"
+              elif [[ "$rest" =~ ^[A-Za-z_][A-Za-z0-9_]* ]]; then
+                raw="${BASH_REMATCH[0]}"
+                name="$raw"
+              else
+                # A '$' introducing anything else -- '(', a backtick, a
+                # digit -- keeps its literal text and its meaning here,
+                # which is none.
+                out="$out$head\$"
+                text="$rest"
+                continue
+              fi
+              if [ "${allow#* "$name" }" != "$allow" ]; then
+                value="${!name-}"
+              else
+                value="\$$raw"
+              fi
+              out="$out$head$value"
+              text="${rest:${#raw}}"
+            done
+            printf '%s' "$out$text"
+          }
+          # A line break in either value must not end the output early.
+          delimiter="EOF_$(openssl rand -hex 16)"
+          {
+            echo "mvn_opts<<${delimiter}"
+            expand_workspace_vars "${MVN_OPTS}"
+            printf '\n%s\n' "${delimiter}"
+            echo "mvn_params<<${delimiter}"
+            expand_workspace_vars "${MVN_PARAMS}"
+            printf '\n%s\n' "${delimiter}"
+          } >> "${GITHUB_OUTPUT}"
+
+      # Seeds the published maven-metadata.xml of every reactor module
+      # into the m2repo, so maven-deploy-plugin carries on from the
+      # published buildNumber. It reads the reactor with the deploy's
+      # profiles, settings, options and parameters, since each can
+      # change the modules or versions. It takes no credential: the
+      # snapshot repositories this lane targets serve metadata
+      # anonymously, and a credential here would be exposed to the
+      # build that follows. The m2repo default is maven-build-action's
+      # fixed deploy path; prune refuses a baseline seeded elsewhere.
+      #
+      # Run from the workspace root with the deploy's own -f path, as
+      # maven-build-action invokes Maven, not from path_prefix. Maven
+      # finds .mvn from the POM's directory either way, but resolves
+      # relative paths in .mvn/maven.config (a -s .mvn/settings.xml,
+      # say) against the directory it runs from, so a fetch run from
+      # path_prefix could read a configuration the deploy can't.
+      - name: 'Fetch published SNAPSHOT metadata'
+        id: fetch
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/maven-snapshot-metadata-action@5311c16aa8b79648258bf032d1e4ed6e33c145c0  # v0.0.1
+        with:
+          mode: 'fetch'
+          nexus_server: ${{ inputs.nexus_server }}
+          repository_name: ${{ inputs.repository_name }}
+          path_prefix: '.'
+          # yamllint disable-line rule:line-length
+          pom_file: ${{ format('{0}/{1}', inputs.path_prefix, inputs.mvn_pom_file != '' && inputs.mvn_pom_file || 'pom.xml') }}
+          # The options and parameters maven-build-action passes Maven
+          # below, placeholders expanded, so both runs use the same
+          # local repository and see the same reactor.
+          # yamllint disable-line rule:line-length
+          maven_args: ${{ format('{0} {1} {2} {3}', inputs.mvn_profiles != '' && format('-P{0}', inputs.mvn_profiles) || '', steps.settings.outputs.arg, steps.expand.outputs.mvn_opts, steps.expand.outputs.mvn_params) }}
+
+      # Deploys into maven-build-action's fixed m2repo, leaving the
+      # seeded metadata in place. v0.5.2 sets the deploy repository
+      # after every caller argument and refuses a caller's own, so no
+      # input can redirect it. Coverage belongs to the verify lane, and
+      # this workflow uploads the m2repo itself. No clean phase: the
+      # checkout is fresh (actions/checkout removes untracked build
+      # output from a reused workspace) and the m2repo check above
+      # refuses a tracked one, so clean has nothing to remove, while a
+      # maven-clean-plugin fileset could delete the seeded metadata.
+      - name: 'Build and deploy to the m2repo'
+        id: build
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/maven-build-action@01a3700e14ee592694d1030c2305d0579e9df571  # v0.5.2
+        with:
+          path_prefix: ${{ inputs.path_prefix }}
+          # yamllint disable-line rule:line-length
+          java-version: ${{ inputs.java_version != '' && inputs.java_version || steps.metadata.outputs.java_version || '21' }}
+          mvn-version: ${{ inputs.mvn_version }}
+          mvn-phases: 'deploy'
+          mvn-profiles: ${{ inputs.mvn_profiles }}
+          mvn-params: ${{ inputs.mvn_params }}
+          # A composite action applies an input default only when the
+          # input is absent, never when it arrives empty, so restate
+          # v0.5.2's default, which the fetch above uses too.
+          # yamllint disable-line rule:line-length
+          mvn-opts: ${{ inputs.mvn_opts != '' && inputs.mvn_opts || '-Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn -Dmaven.repo.local=/tmp/r -Dorg.ops4j.pax.url.mvn.localRepository=/tmp/r' }}
+          # yamllint disable-line rule:line-length
+          mvn-pom-file: ${{ inputs.mvn_pom_file != '' && inputs.mvn_pom_file || 'pom.xml' }}
+          env-vars: ${{ inputs.env_vars != '' && inputs.env_vars || '{}' }}
+          global-settings: ${{ secrets.maven_global_settings }}
+          run-jacoco: 'false'
+          artifact-upload: 'false'
+
+      # Removes the metadata the deploy left unchanged, which would
+      # otherwise overwrite newer copies a sibling build published
+      # meanwhile.
+      - name: 'Prune unchanged SNAPSHOT metadata'
+        id: prune
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/maven-snapshot-metadata-action@5311c16aa8b79648258bf032d1e4ed6e33c145c0  # v0.0.1
+        with:
+          mode: 'prune'
+          m2repo_path: ${{ steps.build.outputs.m2repo_path }}
+
+      # maven-build-action stops callers redirecting the deploy, but a
+      # POM that sets altSnapshotDeploymentRepository in the deploy
+      # plugin's <configuration> still wins over the command line. The
+      # deploy then leaves the m2repo holding seeded metadata alone,
+      # which prune removes. Fail when nothing but metadata and
+      # checksums remains. Not every module has to appear, since a
+      # project may set maven.deploy.skip on some.
+      #
+      # Also fail on a file outside the reactor's group paths: fetch
+      # seeded none of its metadata, so it would publish from
+      # buildNumber 1 over the published copy. The publish job uploads
+      # the whole m2repo, which this check confines to those paths.
+      #
+      # And fail on an artefact outside a -SNAPSHOT version directory:
+      # a reactor mixing in a release version would deploy it here, and
+      # this lane must never push a release to the snapshot repository.
+      # Files are judged by where they sit, not by a name pattern a
+      # deployable file could also match.
+      - name: 'Check the deploy landed in the m2repo'
+        id: landed
+        shell: bash
+        env:
+          M2REPO_PATH: ${{ steps.build.outputs.m2repo_path }}
+          GROUP_PATHS: ${{ steps.fetch.outputs.group_paths }}
+        run: |
+          set -euo pipefail
+          read -r -a groups <<< "${GROUP_PATHS}"
+          if [ "${#groups[@]}" -eq 0 ]; then
+            echo '::error::The metadata fetch reported no group paths.'
+            exit 1
+          fi
+          if [ ! -d "${M2REPO_PATH}" ]; then
+            echo '::error::The deploy produced no m2repo.'
+            exit 1
+          fi
+          # The checks below read regular files alone, while the upload
+          # follows symbolic links: a link would carry whatever it names
+          # past them into the publish. A deploy writes regular files
+          # and directories, so refuse anything else, the root included.
+          odd="$(find "${M2REPO_PATH}" ! -type f ! -type d -print | wc -l)"
+          if [ "${odd}" -ne 0 ]; then
+            echo "::error::${odd} entr(ies) in the m2repo are neither" \
+              'regular files nor directories (symbolic links, say);' \
+              'the hand-off would follow them past these checks.'
+            exit 1
+          fi
+          total=0
+          deployed=0
+          outside=0
+          release=0
+          while IFS= read -r -d '' file; do
+            total=$((total + 1))
+            rel="${file#"${M2REPO_PATH}"/}"
+            name="${rel##*/}"
+            parent="${rel%/*}"
+            # Judged by where a file sits, not by a name it could choose:
+            # a release artefact named maven-metadata.xml-1.0.jar, or
+            # ending .sha1, would pass a name pattern. In a Maven
+            # repository every file lies in a -SNAPSHOT version
+            # directory, except the artifact-level metadata, which sits
+            # beside the version directories under exactly these names.
+            case "${parent##*/}" in
+              *-SNAPSHOT)
+                # Metadata and checksums here describe the version, so
+                # they count neither as deployed nor as a release. Exact
+                # metadata names: an artifactId may itself begin with
+                # maven-metadata.xml, and its files are artefacts.
+                case "${name}" in
+                  maven-metadata.xml | *.md5 | *.sha1 | *.sha256 \
+                    | *.sha512) ;;
+                  *) deployed=$((deployed + 1)) ;;
+                esac ;;
+              *)
+                # Outside a SNAPSHOT version directory only metadata
+                # belongs, under its exact names: an artifact's, in a
+                # directory holding SNAPSHOT version directories, or a
+                # maven-plugin's group-level prefix index, in a directory
+                # holding artifact directories that hold them. Judged on
+                # disk rather than from fetch's baseline, which lacks the
+                # index of a plugin Nexus has never published. The same
+                # names inside a release version directory are that
+                # release's metadata.
+                artifact_level=false
+                case "${name}" in
+                  maven-metadata.xml | maven-metadata.xml.md5 \
+                    | maven-metadata.xml.sha1 | maven-metadata.xml.sha256 \
+                    | maven-metadata.xml.sha512)
+                    # find rather than globs: it matches a dot-prefixed
+                    # version such as .1-SNAPSHOT, never yields . or ..
+                    # (a glob's middle .* does on bash before 5.2), and
+                    # follows no link. Depth 1 is an artifact's version
+                    # directories, depth 2 a plugin index's.
+                    if [ -n "$(find "${M2REPO_PATH}/${parent}" -mindepth 1 \
+                      -maxdepth 2 -type d -name '*-SNAPSHOT' -print -quit)" ]
+                    then
+                      artifact_level=true
+                    fi ;;
+                esac
+                if [ "${artifact_level}" = false ]; then
+                  release=$((release + 1))
+                  echo "Not in a SNAPSHOT version directory: ${rel}"
+                fi ;;
+            esac
+            inside=false
+            for group in "${groups[@]}"; do
+              case "${rel}" in
+                "${group}"/*) inside=true; break ;;
+              esac
+            done
+            if [ "${inside}" = false ]; then
+              outside=$((outside + 1))
+              echo "Outside the reactor's group paths: ${rel}"
+            fi
+          done < <(find "${M2REPO_PATH}" -type f -print0)
+          if [ "${deployed}" -eq 0 ]; then
+            echo '::error::The m2repo holds no deployed artefacts, only' \
+              'metadata and checksums. Either the deploy went elsewhere' \
+              '(a POM that sets altSnapshotDeploymentRepository or' \
+              'altDeploymentRepository in the maven-deploy-plugin' \
+              'configuration overrides the command line), or every' \
+              'module sets maven.deploy.skip. Nothing to publish.'
+            exit 1
+          fi
+          if [ "${outside}" -ne 0 ]; then
+            echo "::error::${outside} file(s) in the m2repo lie outside" \
+              "the reactor's group paths (${GROUP_PATHS}), so no" \
+              'published metadata was seeded for them.'
+            exit 1
+          fi
+          if [ "${release}" -ne 0 ]; then
+            echo "::error::${release} artefact(s) in the m2repo carry a" \
+              'release version; the merge lane publishes SNAPSHOTs alone.'
+            exit 1
+          fi
+          echo "file_count=${total}" >> "${GITHUB_OUTPUT}"
+          echo "${deployed} deployed artefact(s), ${total} file(s) ✅"
+
+      # The hand-off to the publish job, kept three days, long enough to
+      # inspect a failed run without carrying a whole reactor's output
+      # for the default 90. A failed publish is retried by re-running
+      # every job, never the publish alone; see 'Refuse a stale m2repo'.
+      - name: 'Upload the m2repo'
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          # Lane-specific: a caller's run shares one artifact namespace
+          # across every lane it calls.
+          name: maven-merge-m2repo
+          path: ${{ steps.build.outputs.m2repo_path }}
+          # A Maven artifactId or version can begin with a dot; by
+          # default such paths would drop out of the hand-off while the
+          # landed check above counted them.
+          include-hidden-files: true
+          retention-days: 3
+          if-no-files-found: error
+
+      # --- SBOM (informational) ---
+      # Generated from the dependency graph the deploy resolved, as the
+      # verify lane does, after the hand-off upload. continue-on-error
+      # keeps a failure here from failing the job, which would stop the
+      # publish; the SBOM describes the SNAPSHOT, it does not gate it.
+      # untrusted_checkout is 'false' for the verify lane's reason: the
+      # deploy has already run Maven over this checkout.
+      #
+      # continue-on-error cannot absorb the job's own timeout, and this
+      # runs after the deploy: a slow build plus a hung SBOM would reach
+      # build_timeout_minutes, fail the job and skip the publish. So the
+      # step's timeout is clamped to what remains of the job's budget,
+      # less a margin for the steps after it, as the verify lane does
+      # for its CBOM, and the SBOM is skipped when nothing remains.
+      - name: 'Budget the SBOM step'
+        id: sbom-budget
+        if: inputs.sbom_enabled
+        continue-on-error: true
+        shell: bash
+        env:
+          STARTED: ${{ steps.job-start.outputs.epoch }}
+          JOB_LIMIT: ${{ inputs.build_timeout_minutes }}
+          STEP_LIMIT: ${{ inputs.sbom_timeout_minutes }}
+          MARGIN: 5
+        run: |
+          set -euo pipefail
+          # Whole minutes, rounding elapsed time up and limits down.
+          elapsed=$(( ($(date +%s) - STARTED + 59) / 60 ))
+          remaining=$(( ${JOB_LIMIT%%.*} - elapsed - MARGIN ))
+          minutes=${STEP_LIMIT%%.*}
+          if [ "${remaining}" -lt "${minutes}" ]; then
+            minutes=${remaining}
+          fi
+          if [ "${minutes}" -lt 1 ]; then
+            echo "::warning::SBOM skipped: build_timeout_minutes leaves" \
+              "no time for it after ${elapsed} minute(s)."
+            echo "- SBOM skipped: no time left within" \
+              "\`build_timeout_minutes\`." >> "${GITHUB_STEP_SUMMARY}"
+            minutes=0
+          fi
+          echo "minutes=${minutes}" >> "${GITHUB_OUTPUT}"
+      - name: 'Generate SBOM'
+        id: sbom
+        # yamllint disable-line rule:line-length
+        if: ${{ inputs.sbom_enabled && steps.sbom-budget.outputs.minutes != '' && steps.sbom-budget.outputs.minutes != '0' }}
+        continue-on-error: true
+        timeout-minutes: ${{ fromJSON(steps.sbom-budget.outputs.minutes) }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/sbom-action@58b6094cf67d072d6eb772590c43ee52c8c69bb6  # v0.2.0
+        with:
+          backend: 'cyclonedx'
+          dependency_manager: 'maven'
+          path_prefix: ${{ inputs.path_prefix }}
+          # yamllint disable-line rule:line-length
+          java_version: ${{ inputs.java_version != '' && inputs.java_version || steps.metadata.outputs.java_version || '21' }}
+          # The deploy's options and parameters, placeholders expanded.
+          # yamllint disable-line rule:line-length
+          maven_args: ${{ format('{0} {1} {2} {3}', inputs.mvn_profiles != '' && format('-P{0}', inputs.mvn_profiles) || '', steps.settings.outputs.arg, steps.expand.outputs.mvn_opts, steps.expand.outputs.mvn_params) }}
+          untrusted_checkout: 'false'
+
+      # Bounded inside the SBOM budget's five-minute margin, so a hung
+      # upload cannot reach the job timeout and skip the publish either:
+      # continue-on-error absorbs the step failing, not the job timing
+      # out. Two minutes stay for the settings cleanup that follows.
+      - name: 'Upload SBOM artifacts'
+        id: upload-sbom
+        if: inputs.sbom_enabled && steps.sbom.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 3
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          # Distinct from the verify lane's sbom-files-maven, since
+          # download-artifact resolves a shared name to the newest
+          # upload in the run.
+          name: sbom-files-maven-merge
+          path: sbom-cyclonedx.*
+          retention-days: 45
+          if-no-files-found: error
+
+      - name: 'Remove Maven global settings'
+        if: ${{ always() && steps.settings.outputs.path != '' }}
+        shell: bash
+        env:
+          SETTINGS_FILE: ${{ steps.settings.outputs.path }}
+        run: rm -f -- "${SETTINGS_FILE}"
+
+  publish:
+    name: 'Publish SNAPSHOT'
+    needs: [validate, build]
+    runs-on: ubuntu-latest
+    # Empty runs the job outside any environment.
+    environment: ${{ inputs.publish_environment }}
+    # The artefact download reads this run's artefacts through the
+    # runtime token, and nothing here checks out or calls the API, so
+    # the job needs no GITHUB_TOKEN scope.
+    permissions: {}
+    timeout-minutes: ${{ inputs.publish_timeout_minutes }}
+    outputs:
+      publication_count: ${{ steps.publish.outputs.publication_count }}
+      failed_count: ${{ steps.publish.outputs.failed_count }}
+      dry_run_count: ${{ steps.publish.outputs.dry_run_count }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+            ${{ needs.validate.outputs.nexus_endpoint }}
+
+      # "Re-run failed jobs" reruns this job alone and reuses the build
+      # job's outputs and artefact from the attempt that built them. If
+      # another run has published since, uploading that older m2repo
+      # would put its maven-metadata.xml back on Nexus and move the
+      # SNAPSHOT back to an older buildNumber. So a publish refuses an
+      # m2repo from an earlier attempt; "Re-run all jobs" rebuilds the
+      # branch head and fetches the metadata afresh.
+      - name: 'Refuse a stale m2repo'
+        shell: bash
+        env:
+          BUILD_ATTEMPT: ${{ needs.build.outputs.attempt }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          if [ "${BUILD_ATTEMPT}" != "${RUN_ATTEMPT}" ]; then
+            echo "::error::The m2repo comes from attempt ${BUILD_ATTEMPT}" \
+              "of this run, not attempt ${RUN_ATTEMPT}. Publishing it could" \
+              "roll Nexus back to an older SNAPSHOT if another run has" \
+              "published since. Use 'Re-run all jobs', not 'Re-run failed" \
+              "jobs'."
+            exit 1
+          fi
+
+      # The tree the build job deployed and pruned; this job builds
+      # nothing and runs none of the project's code.
+      - name: 'Download the m2repo'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: maven-merge-m2repo
+          path: m2repo
+
+      # A merge lane that skipped its publish would leave the SNAPSHOT
+      # behind the branch without failing, so a live run without the
+      # credential secrets fails here. dry_run is how a self-test runs
+      # without them.
+      - name: 'Require the credential secrets'
+        if: ${{ !inputs.dry_run }}
+        shell: bash
+        env:
+          # yamllint disable-line rule:line-length
+          HAS_CREDENTIALS: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN != '' && secrets.VAULT_MAPPING_JSON != '' }}
+        run: |
+          if [ "${HAS_CREDENTIALS}" != 'true' ]; then
+            echo '::error::OP_SERVICE_ACCOUNT_TOKEN and VAULT_MAPPING_JSON' \
+              'are required to publish; pass them by name, or set dry_run.'
+            exit 1
+          fi
+
+      # credential_grants_json wires the admin-managed
+      # CREDENTIAL_LOAD_GRANTS variable in at the workflow layer:
+      # composite actions cannot read vars, and the grants list must
+      # never become a caller-facing input. credential_name pairs the
+      # password with the username validate derived: the action
+      # otherwise loads the calling repository's item, which differs
+      # for a cross-repository call or an explicit nexus_username, and
+      # a name other than the caller's own needs a grant. export_env
+      # 'false' keeps the password a step output, out of the job
+      # environment.
+      - name: 'Load publish credential'
+        id: load-credential
+        if: ${{ !inputs.dry_run }}
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/credential-load-action@025002b47f4302fb7252175c470da69435060176  # v2.0.4
+        with:
+          op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          vault_mapping_json: ${{ secrets.VAULT_MAPPING_JSON }}
+          credential_name: ${{ needs.validate.outputs.nexus_username }}
+          credential_grants_json: ${{ vars.CREDENTIAL_LOAD_GRANTS }}
+          export_env: 'false'
+
+      # One upload of the whole m2repo. The build job confined it to
+      # the reactor's group paths, so this publishes each of them, at
+      # the URLs one upload per group path would use, while keeping a
+      # single metadata hold-back: the action uploads every artefact
+      # and checksum first and withholds all maven-metadata.xml files
+      # if any failed, so an artefact missing from one group leaves no
+      # group advertising it. A failure among the metadata uploads
+      # withholds the rest but cannot recall those already sent.
+      - name: 'Publish the m2repo to Nexus'
+        id: publish
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/nexus-publish-action@0b1f7998b05f3667c64648b86f620b3daff8370c  # v1.3.0
+        with:
+          nexus_server: ${{ inputs.nexus_server }}
+          nexus_username: ${{ needs.validate.outputs.nexus_username }}
+          nexus_password: ${{ steps.load-credential.outputs.credential }}
+          repository_name: ${{ inputs.repository_name }}
+          repository_format: 'maven2_upload'
+          files_path: ${{ github.workspace }}/m2repo
+          dry_run: ${{ inputs.dry_run && 'true' || 'false' }}
+
+      - name: 'Summarise the publish'
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          COMMIT: ${{ needs.build.outputs.commit }}
+          BRANCH: ${{ needs.build.outputs.branch }}
+          GROUP_PATHS: ${{ needs.build.outputs.group_paths }}
+          MODULE_COUNT: ${{ needs.build.outputs.module_count }}
+          METADATA_COUNT: ${{ needs.build.outputs.metadata_count }}
+          REMOVED_COUNT: ${{ needs.build.outputs.removed_count }}
+          KEPT_COUNT: ${{ needs.build.outputs.kept_count }}
+          FILE_COUNT: ${{ needs.build.outputs.file_count }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          PUBLISHED: ${{ steps.publish.outputs.publication_count }}
+          FAILED: ${{ steps.publish.outputs.failed_count }}
+          DRY_RUN_COUNT: ${{ steps.publish.outputs.dry_run_count }}
+        run: |
+          set -euo pipefail
+          {
+            echo '## Maven SNAPSHOT publish'
+            echo ''
+            echo '| Item | Value |'
+            echo '| ---- | ----- |'
+            echo "| Commit built | \`${COMMIT}\` |"
+            echo "| Branch | \`${BRANCH}\` |"
+            echo "| Group paths | \`${GROUP_PATHS}\` |"
+            echo "| Reactor modules | ${MODULE_COUNT} |"
+            echo "| Metadata seeded | ${METADATA_COUNT} |"
+            echo "| Metadata pruned (unchanged) | ${REMOVED_COUNT} |"
+            echo "| Metadata kept | ${KEPT_COUNT} |"
+            echo "| Files in the m2repo | ${FILE_COUNT} |"
+            if [ "${DRY_RUN}" = 'true' ]; then
+              echo "| Files a live run would publish | ${DRY_RUN_COUNT:-0} |"
+            else
+              echo "| Files published | ${PUBLISHED:-0} |"
+              echo "| Files failed | ${FAILED:-0} |"
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+  grype:
+    name: 'Grype Audit SBOM'
+    runs-on: ubuntu-latest
+    needs: build
+    # yamllint disable-line rule:line-length
+    if: ${{ !cancelled() && needs.build.outputs.sbom_uploaded == 'true' && inputs.grype_enabled }}
+    # Informational (D-3): findings, a scanner error or a timeout never
+    # fail the run, and the publish job does not wait for this one.
+    continue-on-error: true
+    timeout-minutes: ${{ inputs.grype_timeout_minutes }}
+    permissions:
+      contents: read
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Download SBOM artefact'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: sbom-files-maven-merge
+
+      - name: 'Grype audit SBOM'
+        id: grype-audit
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/grype-scan-action@9a85f35a26a71dafb2fa23a6f83a640d526ee559  # v0.2.0
+        with:
+          sbom: 'sbom-cyclonedx.json'
+          fail-on: 'medium'
+          permit-fail: 'true'
+          github-token: ${{ secrets.GITHUB_TOKEN }}

@@ -13,10 +13,10 @@
 # lightweight fixtures, lfreleng-actions/test-maven-project and
 # lfreleng-actions/test-gradle-project, under block egress.
 #
-# The planned merge and release lanes are not self-tested here: merge
-# requires a merged-commit context and release requires a signed semver
-# tag-push context; neither is available or safe on a pull request.
-# Instantiating repos validate those through their own cycles.
+# The Maven merge lane runs with dry_run against a real Nexus, so it
+# publishes nothing and needs no secrets. The planned release lane is
+# not self-tested here: it requires a signed semver tag-push context,
+# which is neither available nor safe on a pull request.
 name: 'Testing 🧪'
 
 # yamllint disable-line rule:truthy
@@ -86,11 +86,11 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@538904e241556d101fb908b50e2a2965fa0346cf'  # v0.16.6
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
         with:
           egress-policy: 'block'
           allowed-endpoints: >
@@ -133,6 +133,100 @@ jobs:
           fi
           exit "${status}"
 
+  # Self-test of the Maven merge lane. Jobs share no localhost, so a
+  # mock Nexus cannot serve the reusable workflow's build job; the
+  # metadata fetch reads ONAP's Nexus instead, which serves its
+  # snapshot repository anonymously and has never held the fixture's
+  # org.lfreleng.test group, so every module takes the first-publish
+  # path. dry_run makes the publish job log its uploads, with no
+  # credential and no network request. Whether the buildNumber carries
+  # on from published metadata is maven-snapshot-metadata-action's own
+  # end-to-end tests' to prove, on Maven 3.9 and Maven 4.
+  maven-merge:
+    name: 'Maven Merge'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: $/.github/workflows/maven-merge.yaml
+    with:
+      repository: 'lfreleng-actions/test-maven-project'
+      nexus_server: 'https://nexus.onap.org'
+      repository_name: 'snapshots'
+      dry_run: true
+
+  # Proves the merge lane deployed a publishable tree and handed all
+  # of it to the publish step: each fixture module's timestamped
+  # SNAPSHOT at buildNumber 1 with its version-level metadata, nothing
+  # outside the fixture's group, and a dry run covering every file.
+  merge-check:
+    name: 'Merge Check'
+    needs: maven-merge
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Download the m2repo'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: maven-merge-m2repo
+          path: m2repo
+
+      - name: 'Assert the m2repo and the dry run'
+        shell: bash
+        env:
+          DRY_RUN_COUNT: ${{ needs.maven-merge.outputs.dry_run_count }}
+        run: |
+          set -euo pipefail
+          status=0
+          fail() { echo "::error::$1"; status=1; }
+          group='m2repo/org/lfreleng/test'
+          stamp='1\.0\.0-[0-9]{8}\.[0-9]{6}-1'
+          for module in project:pom parent:pom core:jar app:jar; do
+            artifact="test-maven-${module%%:*}"
+            dir="${group}/${artifact}/1.0.0-SNAPSHOT"
+            if [ ! -f "${dir}/maven-metadata.xml" ]; then
+              fail "${artifact}: no version-level maven-metadata.xml"
+            elif ! grep -q '<buildNumber>1</buildNumber>' \
+              "${dir}/maven-metadata.xml"; then
+              fail "${artifact}: metadata does not start at buildNumber 1"
+            fi
+            for type in pom "${module##*:}"; do
+              if ! find "${dir}" -type f \
+                | grep -Eq "/${artifact}-${stamp}\.${type}\$"; then
+                fail "${artifact}: no timestamped .${type} at buildNumber 1"
+              fi
+            done
+          done
+          if find m2repo -type f -name '*-SNAPSHOT.jar' | grep -q .; then
+            fail 'the m2repo holds a non-timestamped SNAPSHOT jar'
+          fi
+          outside="$(find m2repo -type f ! -path "${group}/*" | wc -l)"
+          if [ "${outside}" -ne 0 ]; then
+            fail "${outside} file(s) lie outside org/lfreleng/test"
+          fi
+          files="$(find m2repo -type f | wc -l)"
+          if [ "${DRY_RUN_COUNT}" != "${files}" ]; then
+            fail "dry run covers '${DRY_RUN_COUNT}' of ${files} file(s)"
+          fi
+          echo "${files} file(s); dry run covers ${DRY_RUN_COUNT}"
+          exit "${status}"
+
   # Observes mvn_pom_file end to end: build core/pom.xml on its own,
   # which packages core and not app, where the root POM (the wiring
   # dropped) packages both. The SBOM POM guard rejects any POM other
@@ -172,11 +266,11 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@538904e241556d101fb908b50e2a2965fa0346cf'  # v0.16.6
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
         with:
           egress-policy: 'block'
           allowed-endpoints: >
@@ -226,11 +320,11 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@538904e241556d101fb908b50e2a2965fa0346cf'  # v0.16.6
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
         with:
           egress-policy: 'block'
           allowed-endpoints: >
@@ -288,11 +382,11 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@538904e241556d101fb908b50e2a2965fa0346cf'  # v0.16.6
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
         with:
           egress-policy: 'block'
           allowed-endpoints: >
@@ -354,11 +448,11 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@538904e241556d101fb908b50e2a2965fa0346cf'  # v0.16.6
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1  # v2.21.1
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
         with:
           egress-policy: 'block'
           allowed-endpoints: >

@@ -32,16 +32,17 @@ directory; subdirectories are not permitted for callable workflows. The
 Maven and Gradle families are therefore delineated by **filename prefix**,
 not by folder:
 
-| File                     | Family | Lane        |
-| ------------------------ | ------ | ----------- |
-| `maven-build-test.yaml`  | Maven  | Verify (PR) |
-| `gradle-build-test.yaml` | Gradle | Verify (PR) |
+| File                     | Family | Lane          |
+| ------------------------ | ------ | ------------- |
+| `maven-build-test.yaml`  | Maven  | Verify (PR)   |
+| `gradle-build-test.yaml` | Gradle | Verify (PR)   |
+| `maven-merge.yaml`       | Maven  | Merge (push)  |
 
-This initial repository ships only the verify lane. The merge and
-release lanes will follow the same prefix convention when added
-(`maven-merge.yaml`, `maven-stage.yaml`, `maven-build-test-release.yaml`,
-and their Gradle counterparts); see [Merge lane](#merge-lane-designed)
-and [Release lane](#release-lane-planned).
+The repository ships the verify lane and the Maven merge lane. The
+release lane, and a Gradle merge lane, will follow the same prefix
+convention when added (`maven-stage.yaml`,
+`maven-build-test-release.yaml`, and their Gradle counterparts); see
+[Merge lane](#merge-lane) and [Release lane](#release-lane-planned).
 
 Only `examples/` and `docs/` use real subfolders (`examples/maven/…`,
 `examples/gradle/…`). Gradle is a first-class parallel track, not an
@@ -77,7 +78,7 @@ One job owns the built tree: every step that reads it runs inside
    action's `mvn-opts`, `mvn-pom-file` and `env-vars`. A composite
    action applies a default only when an input is absent, never when it
    arrives empty, so each empty value falls back to the action's own
-   default: the workflow restates v0.4.3's `mvn-opts` default (the
+   default: the workflow restates v0.5.2's `mvn-opts` default (the
    `/tmp/r` local repository and quiet transfer logging), `pom.xml`,
    and `{}`. A non-empty `mvn_opts` replaces that default rather than
    adding to it, as it does on the action. `env_vars` takes a JSON
@@ -248,7 +249,7 @@ rule closes a bypass: the action upper-cases with JavaScript's
 `toUpperCase()`, which maps some non-ASCII letters onto ASCII ones
 (`maven_arg` followed by U+017F exports as `MAVEN_ARGS`), while the
 guard's `ascii_upcase` leaves them. The name lists follow `sbom-action`
-v0.2.0 and `maven-build-action` v0.4.3 and move with their pins.
+v0.2.0 and `maven-build-action` v0.5.2 and move with their pins.
 
 `sbom-action` resolves `path_prefix/pom.xml` and rejects `-f`/`--file`
 in `maven_args`, because an alternate POM would escape the directory it
@@ -298,14 +299,12 @@ Java jobs, by deliberate decision:
   rendering the JUnit XML the build already produced. A separate
   test-runner action would duplicate the build tool's own contract.
 
-## Merge lane (designed)
+## Merge lane
 
-`maven-merge.yaml` publishes Maven SNAPSHOTs when a change merges. The
-design below is agreed; the workflow is not written yet, because the
-building blocks it pins are still in review (see
-[Merge-lane prerequisites](#merge-lane-prerequisites)). It replaces the OpenDaylight
-`compose-maven-merge.yaml` from `lfit/releng-reusable-workflows`, keeping
-the behaviour worth keeping and none of its code.
+`maven-merge.yaml` publishes Maven SNAPSHOTs when a change merges. It
+replaces the OpenDaylight `compose-maven-merge.yaml` from
+`lfit/releng-reusable-workflows`, keeping the behaviour worth keeping
+and none of its code.
 
 ### Decisions
 
@@ -314,9 +313,9 @@ the behaviour worth keeping and none of its code.
 | ID  | Question                     | Decision                                                                                 |
 | --- | ---------------------------- | ---------------------------------------------------------------------------------------- |
 | D-1 | Publish credential           | `credential-load-action`, as the node and docker lanes use; optional GitHub environment  |
-| D-2 | What the lane builds         | The branch head, as the legacy lane and global-jjb do                                    |
+| D-2 | What the lane builds         | The branch head when the run starts, as the legacy lane and global-jjb do                |
 | D-3 | SBOM, Grype and provenance   | SBOM and Grype for information only; signing and attestation on full releases alone      |
-| D-4 | Reactor coordinates          | Maven's own `help:effective-pom`, inside `maven-snapshot-metadata-action`                |
+| D-4 | Reactor coordinates          | Maven's own `help:active-profiles`, inside `maven-snapshot-metadata-action`              |
 | D-5 | Artifactory                  | Kept for later; no project needs it, so neither lane ships it initially                  |
 
 <!-- markdownlint-enable MD013 -->
@@ -324,49 +323,151 @@ the behaviour worth keeping and none of its code.
 ### Job graph
 
 ```text
-gerrit-validate ─┬─ repository-metadata (informational)
-                 └─ build ─┬─ publish-snapshot
-                           └─ sbom ─ grype (informational)
+validate ─┬─ repository-metadata (informational)
+          └─ build ─┬─ publish
+                    └─ grype (informational)
 ```
 
 The shape is build once, publish from the artefact, as the node and
 docker merge lanes do: the job that runs the project's code never holds
 the write credential, and the job that holds it never runs the code.
+`validate` checks the Nexus inputs before anything builds, and derives
+the Nexus endpoint and username the later jobs share, and the branch
+their checkouts build: `gerrit_branch`, else `ref`, else the triggering
+branch. A run whose trigger is not a branch, a tag push or a dispatch
+on a tag say, fails there unless `ref` or `gerrit_branch` names one.
+The lane builds a branch head, never a change, so it has no Gerrit
+change to check.
+The SBOM runs at the end of `build`, as in the verify lane, and `grype`
+reads it. `repository-metadata` and `grype` both run with
+`continue-on-error`, so neither can fail a run whose publish succeeded,
+nor turn it into a negative Gerrit vote.
+
+The repository-metadata, build, publish and grype jobs run under
+harden-runner, as the verify lane's jobs do. `validate` does without,
+like the verify lane's `gerrit-validate`: it runs one shell check that
+makes no network call, with no checkout, token or credential. The build
+and publish jobs each add the `nexus_server` host and port to the
+central allow-list: `fetch` reads metadata from it in the build job,
+and the publish job writes to it.
 
 ### Build job
 
-1. Check out the branch head (D-2), with `persist-credentials: false`.
-2. `build-metadata-action`, for the Java version, as in the verify lane.
-3. Set up the JDK and Maven explicitly, with the versions the build
+1. Two guards. The POM guard is the verify lane's, copied verbatim:
+   the build must use the POM `sbom-action` resolves. The environment
+   guard extends the verify lane's, so `env_vars` must not set a name
+   any Maven run here sets itself. The metadata fetch inherits the
+   job's environment while the deploy step sets its own names, and a
+   profile activated on one would give the two different reactors, so
+   the deploy step's names, `MAVEN_ARGS`, and the `SNAPSHOT_METADATA_*`
+   variables `maven-snapshot-metadata-action` removes from the fetch
+   are refused whether or not the SBOM runs. `sbom-action`'s own names
+   are refused when it does. `wiring-check.sh` fails when the POM
+   guard drifts from the verify lane's, and tests the environment
+   guard on its own, with and without the SBOM.
+2. Check out the branch head (D-2) that `validate` resolved, with
+   `persist-credentials: false`, and record the commit and branch built
+   for the summary. The checkout names the branch, never the triggering
+   commit: GitHub does not promise the order in which queued runs start,
+   and a run building its triggering commit could publish an older
+   commit after a newer one. Each run builds the head as it stands when
+   the run starts instead, so the run that starts last publishes the
+   newest head, and the head may have moved past the merge that
+   triggered the run.
+3. `build-metadata-action`, for the Java version, as in the verify lane.
+4. Set up the JDK and Maven explicitly, with the versions the build
    resolves (`java_version`, `mvn_version`) and the same installers and
    pins `maven-build-action` uses. `fetch` runs Maven before
    `maven-build-action` provisions its own toolchain, and relying on
-   the runner's defaults could make `help:effective-pom` fail, or read
+   the runner's defaults could make `help:active-profiles` fail, or read
    the reactor differently from the deploy, on a self-hosted runner or
    with a pinned Maven. `maven-build-action` then installs the same
    versions, so the toolchain does not change between the two.
-4. `maven-snapshot-metadata-action` in `fetch` mode. It runs
-   `help:effective-pom` once over the reactor, then seeds the published
-   `maven-metadata.xml` for every module into the `m2repo`, so
-   `maven-deploy-plugin` carries on from the published `buildNumber`.
-5. `maven-build-action` with `mvn-phases: clean deploy`, deploying to its
-   fixed `m2repo`. `run-jacoco` and `artifact-upload` are off: coverage
-   belongs to the verify lane, and the workflow uploads the tree itself.
-   The seeding relies on the action leaving an existing `m2repo` in
-   place, a contract lfreleng-actions/maven-build-action#157 adds a test and
-   documentation for. It also relies on the deploy landing there, which
-   a caller can currently break: the action places `mvn-opts` and
-   `mvn-params` after its own `-DaltDeploymentRepository`, and Maven
-   honours the last one given, so a caller's own would redirect the
-   deploy while `prune` and the upload still read `m2repo`, publishing
-   only the seeded metadata. The action must refuse that override, or
-   place its value last, before the lane passes caller arguments.
-6. `maven-snapshot-metadata-action` in `prune` mode, removing metadata
+5. Export `env_vars`, with the action and pin `maven-build-action`
+   uses, before `fetch` reads the reactor: a profile can activate on an
+   environment variable, and `MAVEN_OPTS` reaches every Maven run.
+6. Write the `maven_global_settings` secret, when set, to a private
+   file under `RUNNER_TEMP` for `fetch` and the SBOM, which resolve
+   through the same mirrors as the deploy; a final `always()` step
+   removes it. `maven-build-action` writes and removes its own copy.
+7. `maven-snapshot-metadata-action` in `fetch` mode, after a check that
+   the checkout holds no `m2repo` of its own: `fetch` refuses existing
+   metadata but not existing artefacts, which the deploy would carry
+   into the publish. It runs
+   `help:active-profiles` once over the reactor, with the deploy's
+   profiles, settings, options and parameters, then seeds the
+   published `maven-metadata.xml` for every module into the `m2repo`,
+   so `maven-deploy-plugin` carries on from the published
+   `buildNumber`. It reports the reactor's top-level `group_paths`.
+   `maven-build-action` expands workspace placeholders such as
+   `${GITHUB_WORKSPACE}` in the options and parameters before Maven
+   sees them, so a step before `fetch` expands the same ones, with a
+   verbatim copy of that action's function, for `fetch` and the SBOM.
+   `wiring-check.sh` compares the copy with the script vendored from
+   the pinned action, and fails when the pin moves without it.
+   `fetch` runs Maven as the deploy does: from the workspace root, with
+   `-f` naming `<path_prefix>/<pom>`. Maven finds `.mvn` from the POM's
+   directory either way, but resolves relative paths inside
+   `.mvn/maven.config` (a `-s .mvn/settings.xml`, say) against the
+   directory it runs from, checked on Maven 3.9.16 and 4.0.0-rc-7. A
+   `fetch` run from `path_prefix` could read a configuration the
+   deploy can't.
+   `maven-build-action` also passes its inputs to Maven as `MVN_*`
+   environment variables that `fetch` never sees, so a profile keyed on
+   one of them would change the deploy's reactor alone
+   (lfreleng-actions/maven-build-action#169).
+8. `maven-build-action` v0.5.2 with `mvn-phases: deploy`,
+   deploying to its fixed `m2repo` and leaving the seeded metadata in
+   place. It leaves out `clean`, which a `maven-clean-plugin` fileset
+   could turn on the seeded metadata, and which has nothing to remove:
+   the job starts from a fresh checkout, `actions/checkout` removes
+   untracked build output from a reused workspace, and the job refuses
+   a checkout holding an `m2repo`. v0.5.2 sets the deploy repository
+   after every caller argument and refuses a caller's own, so no input
+   can redirect the deploy. `run-jacoco` and `artifact-upload` are off:
+   coverage belongs to the verify lane, and the workflow uploads the
+   tree itself.
+9. `maven-snapshot-metadata-action` in `prune` mode, removing metadata
    the deploy left unchanged, which would otherwise overwrite newer
    copies a sibling build published meanwhile.
-7. Upload the pruned `m2repo` as the hand-off artefact, kept three days:
-   enough to re-run a failed publish job without rebuilding, without
-   carrying a whole reactor's output for the default 90.
+10. Check the deploy landed in the `m2repo`. A POM that sets
+    `altSnapshotDeploymentRepository` or `altDeploymentRepository` in
+    the deploy plugin's `<configuration>` still wins over the command
+    line, and the deploy then leaves the `m2repo` holding the seeded
+    metadata alone, which `prune` removes. The step fails when nothing
+    but metadata and checksums remains, and when any file lies outside
+    the reactor's `group_paths`: `fetch` seeded none of its metadata,
+    so it would publish from `buildNumber` 1 over the published copy.
+    Not every module has to appear, since a project may set
+    `maven.deploy.skip` on some. The step also fails on an artefact
+    outside a `-SNAPSHOT` version directory, so a reactor mixing in a
+    release version cannot push it to the snapshot repository. It
+    fails, too, on any entry that is neither a regular file nor a
+    directory, the `m2repo` itself included: the checks read regular
+    files, while the upload follows symbolic links, so a link could
+    carry a release or out-of-group tree past them. The check cannot
+    see a single child POM redirecting its own deploy
+    while siblings land: no pinned action reports which modules skip
+    the deploy, so that child's SNAPSHOT would go unpublished, with
+    its metadata pruned rather than kept in the step summary's counts.
+11. Upload the `m2repo` as the `maven-merge-m2repo` artefact, hidden
+    files included, since an artifactId or version can begin with a
+    dot. It keeps three days, long enough to inspect a failed run
+    without carrying a whole reactor's output for the default 90. The
+    publish job refuses it in any later attempt, so a failed publish is
+    retried with "Re-run all jobs"; see the publish job.
+12. Generate the SBOM and upload it as `sbom-files-maven-merge`, both
+    with `continue-on-error`: the SBOM describes the SNAPSHOT and does
+    not gate its publish. `continue-on-error` cannot absorb the job's
+    own timeout, and the SBOM runs after the deploy, so a slow build and
+    a hung SBOM could still time out the job and skip the publish. As
+    the verify lane does for its CBOM, a budget step clamps the SBOM's
+    timeout to what remains of `build_timeout_minutes`, measured from
+    just after harden-runner, less five minutes for the steps after it,
+    and skips the SBOM with a warning when nothing remains. The names
+    carry the lane because a caller's run shares one artefact namespace
+    across every lane it calls, and the verify lane already uploads
+    `sbom-files-maven`.
 
 `fetch` takes no credentials. OpenDaylight's `opendaylight.snapshot` and
 ONAP's `snapshots` repositories both serve metadata anonymously (checked
@@ -377,24 +478,67 @@ that trade-off stated.
 
 ### Publish job
 
-1. Download the `m2repo` artefact.
-2. Load the Nexus password with `credential-load-action`, gated on the
+The job runs with `permissions: {}`: the artefact download reads this
+run's artefacts through the runtime token, and nothing here checks out
+the repository or calls the API.
+
+1. Refuse an `m2repo` built in an earlier attempt of the run. "Re-run
+   failed jobs" reruns the publish alone and reuses the build job's
+   outputs and artefact. If another run published in between, that
+   older `m2repo` would put its `maven-metadata.xml` back on Nexus and
+   move the SNAPSHOT back to an older `buildNumber`. The build job
+   records `github.run_attempt`, and the publish fails unless its own
+   matches, telling the reader to use "Re-run all jobs", which rebuilds
+   the branch head and fetches the metadata afresh.
+2. Download the `maven-merge-m2repo` artefact.
+3. Fail a live run that lacks `OP_SERVICE_ACCOUNT_TOKEN` or
+   `VAULT_MAPPING_JSON`. The node lane warns and skips its publish
+   instead, but a merge lane that skipped would leave the SNAPSHOT
+   behind the branch with every check green. `dry_run` is how a
+   self-test runs without them.
+4. Load the Nexus password with `credential-load-action`, gated on the
    `CREDENTIAL_LOAD_GRANTS` variable and with `export_env: false`, so the
    secret stays a step output and never enters the job environment. The
-   username comes from an input, falling back to the repository name, as
-   in the node lane.
-3. `nexus-publish-action` in `maven2_upload` mode, once per top-level
-   group path from `fetch`'s `group_paths` output, so artefacts outside
-   the root `groupId` publish too. The action retries transient failures,
-   uploads `maven-metadata.xml` after everything it describes, and holds
-   the metadata back when anything before it failed, so a partial publish
-   never advertises a SNAPSHOT that is not there.
-4. A step summary with the built commit, branch, group paths, metadata
-   seeded and pruned, and files published and failed (gap analysis G-15).
+   username comes from an input, falling back to the name of the
+   repository built, as in the node lane; `validate` derives and checks
+   it, and the job passes it as `credential_name`, so the password
+   loaded belongs to the same 1Password item. Without it the action
+   would load the calling repository's item, which differs for a
+   cross-repository call; a name other than the caller's own needs a
+   grant in `CREDENTIAL_LOAD_GRANTS`.
+5. `nexus-publish-action` in `maven2_upload` mode, run once over the
+   whole `m2repo`. The action uploads every file under it by its
+   relative path, so one run covers every `groupId` the reactor deploys,
+   at the URLs one run per group path would use. The legacy lane's
+   per-group runs worked around uploading from the root group's
+   directory (legacy finding FUN-07); this lane has no such limit, and
+   the build job's landed check confines the tree to `fetch`'s
+   `group_paths`. One run keeps a single metadata hold-back across all
+   groups: the action retries transient failures, uploads every
+   artefact and checksum before any `maven-metadata.xml`, and holds all
+   the metadata back when any of those uploads failed. An artefact
+   missing from one group therefore leaves no group's metadata
+   advertising it, where per-group runs would let an earlier group's
+   metadata through. The guarantee stops at the metadata stage: a
+   failed metadata upload holds back the files after it, but cannot
+   recall metadata already sent. The single run also loads the
+   credential once. v1.3.0 classes a file as metadata by its name's
+   `maven-metadata.xml` prefix, so an artifactId of `maven-metadata.xml`
+   would upload among the metadata
+   (lfreleng-actions/nexus-publish-action#184).
+6. A step summary with the built commit, branch, group paths, reactor
+   modules, metadata seeded, pruned and kept, files in the `m2repo`,
+   and files published and failed, or the dry-run count (gap analysis
+   G-15).
 
 An optional `publish_environment` input puts this job, and only this
 job, in a GitHub environment, for projects that keep the credential
-behind environment protection rules.
+behind environment protection rules. Left empty, the job runs outside
+any environment.
+
+The lane needs no `maven-xml-settings-action`: `nexus-publish-action`
+uploads over HTTP with the loaded credential, and the publish job runs
+no Maven.
 
 ### What the lane does not do
 
@@ -412,15 +556,25 @@ The caller keeps what depends on the project's own setup:
 - **Triggers:** the `gerrit_to_platform` dispatch with its `GERRIT_*`
   inputs, and a daily scheduled rebuild, which the legacy lane runs at
   02:49 UTC, the retired Jenkins slot.
-- **Replication:** wait until the merged `GERRIT_PATCHSET_REVISION` is
-  reachable from the mirrored `GERRIT_BRANCH` before calling the lane.
-  Gerrit dispatches on merge, possibly before its replication to the
-  GitHub mirror lands, and the lane builds the branch head (D-2); without
-  the wait it could publish the previous head's SNAPSHOT while voting on
-  the new change. Poll for the revision rather than sleep a fixed time,
-  as the legacy caller's 10-second wait does.
-- **Votes:** clear before building and vote on the result, both skipped
-  on scheduled runs, with `gerrit-review-action`.
+- **Replication:** wait until the merged commit is reachable from the
+  mirrored `GERRIT_BRANCH` before calling the lane. Gerrit dispatches on
+  merge, possibly before its replication to the GitHub mirror lands,
+  and the lane builds the branch head (D-2); without the wait it could
+  publish the previous head's SNAPSHOT while reporting on the new
+  change. Poll for the commit rather than sleep a fixed time, as the
+  legacy caller's 10-second wait does. The merged commit is the
+  change's current revision, read from Gerrit's REST API, not
+  `GERRIT_PATCHSET_REVISION`: `gerrit_to_platform` sends the reviewed
+  patch set, and a project that submits with `REBASE_IF_NECESSARY`,
+  as OpenDaylight `infrautils` does, can merge a new commit in its
+  place. infrautils change 126120 is one: patch set 1 never reached
+  the branch, and the commit Gerrit created at submit did.
+- **Results:** report the start and the outcome on the change with
+  `gerrit-review-action`, both skipped on scheduled runs. Both post
+  with `comment-only`, as the legacy caller's start comment does: the
+  change has already merged, and Gerrit refuses to lower a vote on a
+  closed change, so a `clear` or a failure vote would fail the job
+  rather than report.
 - **Secrets by name:** `OP_SERVICE_ACCOUNT_TOKEN` and
   `VAULT_MAPPING_JSON`, since `secrets: inherit` does not cross
   organisations.
@@ -444,36 +598,64 @@ The caller keeps what depends on the project's own setup:
   Within one branch that loses nothing, as the newer run builds a later
   head, but a group spanning branches would drop another branch's
   publish and its Gerrit vote. `queue: max` keeps up to 100 pending
-  runs, in order, and GitHub rejects it beside `cancel-in-progress:
-  true`.
+  runs, and GitHub rejects it beside `cancel-in-progress: true`. GitHub
+  starts queued runs in the order each began waiting on the group, not
+  the order the triggers fired, and does not guarantee even that; each
+  run builds the branch head when it starts (D-2), so the order does
+  not change what a branch ends up publishing.
+  That holds within one branch. Across branches the order does matter
+  when two publish the same SNAPSHOT coordinate: whichever run starts
+  last becomes the newest build Nexus serves, even with older code,
+  and no run can see the other branch's version to stop it. So every
+  publishing branch needs its own SNAPSHOT version, as on Jenkins,
+  where any two jobs deploying one coordinate race the same way;
+  a project that cannot keep them apart publishes from one branch.
   A concurrency group covers one GitHub repository and no further;
   publishers in different repositories need disjoint group paths.
 
 ### Self-test
 
-The lane runs on merges, but most of it can run on a pull request. The
-self-test will build `test-maven-project` with `clean deploy`, run
-`fetch` and `prune` against a mock Nexus serving published metadata,
-and publish with `nexus-publish-action`'s `dry_run`, asserting that the
-`buildNumber` carries on and untouched metadata stays unpublished.
-`maven-snapshot-metadata-action` already runs that sequence on a real
-Maven deploy, on Maven 3.9 and Maven 4, so the self-test proves the
-wiring rather than the mechanism.
+The lane runs on merges, but all of it except the live upload can run
+on a pull request. `testing.yaml`'s `maven-merge` job calls the lane
+through the self-repository reference against `test-maven-project`,
+with `nexus_server: https://nexus.onap.org`, `repository_name:
+snapshots` and `dry_run: true`. ONAP's snapshot repository serves
+metadata anonymously and has never held the fixture's
+`org.lfreleng.test` group, so `fetch` takes the first-publish path for
+every module. The dry run makes the publish job log each upload with no
+credential and no network request, so the run needs no secrets.
 
-### Merge-lane prerequisites
+`merge-check` then downloads the `m2repo` artefact and asserts that
+each of the fixture's four artefacts (`test-maven-project`,
+`test-maven-parent`, `test-maven-core`, `test-maven-app`) deployed a
+timestamped SNAPSHOT at `buildNumber` 1 with its version-level
+metadata, that nothing lies outside the fixture's group, and that the
+dry-run count equals the number of files in the tree.
+
+Whether the `buildNumber` carries on from published metadata, and
+whether `prune` keeps untouched metadata unpublished, is
+`maven-snapshot-metadata-action`'s to prove: its own end-to-end tests
+run that sequence on a real Maven deploy, on Maven 3.9 and Maven 4. The
+self-test proves the wiring rather than the mechanism.
+
+### Merge-lane pins
+
+The lane pins released versions of the building blocks it depends on:
 
 <!-- markdownlint-disable MD013 -->
 
-| Building block                   | Needed for                                         | State                                                                                               |
-| -------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| `maven-snapshot-metadata-action` | `fetch` and `prune`                                | First release in review                                                                             |
-| `nexus-publish-action`           | Retries, metadata last and held back; `dry_run`    | In review (lfreleng-actions/nexus-publish-action#171 and lfreleng-actions/nexus-publish-action#172) |
-| `maven-build-action`             | The tested `m2repo` contract                       | In review (lfreleng-actions/maven-build-action#157)                                                 |
-| `maven-build-action`             | An `m2repo` deploy path callers cannot override    | To do                                                                                               |
-| `java-workflows`                 | `mvn_opts`, `mvn_pom_file`, `env_vars`, submodules | In review (#68)                                                                                     |
-| `maven-xml-settings-action`      | Mirror-only settings without credentials           | In review (lfreleng-actions/maven-xml-settings-action#32)                                           |
+| Building block                   | Version | Needed for                                                                     |
+| -------------------------------- | ------- | ------------------------------------------------------------------------------ |
+| `maven-snapshot-metadata-action` | v0.0.1  | `fetch` and `prune`                                                            |
+| `nexus-publish-action`           | v1.3.0  | Retries, metadata last and held back; `dry_run`                                |
+| `maven-build-action`             | v0.5.2  | The tested `m2repo` contract; a deploy path callers cannot override            |
+| `credential-load-action`         | v2.0.4  | The publish credential, with `export_env: false`                               |
 
 <!-- markdownlint-enable MD013 -->
+
+`maven-xml-settings-action` does not appear: the publish job runs no
+Maven, and the build job takes the caller's `maven_global_settings`
+secret as the verify lane does.
 
 ## Release lane (planned)
 
@@ -902,9 +1084,11 @@ toolchain egress (Maven Central, Gradle distribution, Temurin, and the
 syft and grype tool downloads) is in the central harden-runner
 allow-list as of `.github` v0.7.0.
 
-The planned merge and release lanes are out of scope for the self-test
-until they are added: they need a merged-commit or signed semver tag-push
-context that is neither available nor safe on a pull request.
+`testing.yaml` also runs the Maven merge lane as a dry run, described
+under the merge lane's own Self-test section. The planned release lane
+is out of scope for the self-test until it lands: it needs a signed
+semver tag-push context that is neither available nor safe on a pull
+request.
 
 ## Conventions inherited from the template
 
