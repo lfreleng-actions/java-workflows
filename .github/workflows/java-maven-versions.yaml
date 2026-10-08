@@ -1,0 +1,184 @@
+---
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# Reusable list of the Maven and Java versions the Java/Maven estate
+# tests against: this repository and the Maven actions it calls
+# (maven-build-action, maven-make-build-action,
+# maven-snapshot-metadata-action, maven-stage-prep-action and
+# maven-xml-settings-action). A caller builds its compatibility matrix
+# from the two outputs, so every caller tests one set of versions and
+# a change here reaches each of them through the Dependabot bump of
+# this workflow's pin:
+#
+#   jobs:
+#     versions:
+#       uses: lfreleng-actions/java-workflows/<this file>@<sha>
+#     compatibility:
+#       needs: versions
+#       strategy:
+#         fail-fast: false
+#         matrix:
+#           maven: ${{ fromJSON(needs.versions.outputs.maven) }}
+#           java: ${{ fromJSON(needs.versions.outputs.java) }}
+#
+# Each Maven entry is an object: 'line' labels the release line in job
+# names and artifact names, 'version' is the release to install, and
+# 'sha512' is the digest of apache-maven-<version>-bin.tar.gz, for
+# callers that download the archive themselves. Callers going through
+# maven-build-action pass the version alone.
+name: '[R] Java/Maven Versions'
+
+# yamllint disable-line rule:truthy
+on:
+  workflow_call:
+    outputs:
+      maven:
+        description: >-
+          JSON array of the Maven releases under test, each an object
+          with 'line', 'version' and 'sha512'.
+        value: ${{ jobs.versions.outputs.maven }}
+      java:
+        description: >-
+          JSON array of the Java feature releases under test, as
+          strings setup-java accepts.
+        value: ${{ jobs.versions.outputs.java }}
+
+permissions: {}
+
+jobs:
+  versions:
+    name: 'Java/Maven Versions'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      maven: ${{ steps.versions.outputs.maven }}
+      java: ${{ steps.versions.outputs.java }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # Maven: the two GA lines the Apache Maven project maintains
+      # (https://maven.apache.org/docs/history.html), and the newest
+      # Maven 4 release, which is not yet GA. Take each digest from
+      # https://downloads.apache.org/maven/maven-<major>/<version>/binaries/
+      # and confirm Maven Central's copy beside the archive matches it:
+      # a digest fetched from beside the archive alone proves only that
+      # the download completed.
+      #
+      # Java: 17, the oldest LTS the estate builds with and the floor
+      # Maven 4 requires, then every feature release from 21, the LTS
+      # the workflows default to, up to 25, the current LTS. The
+      # releases between two LTS versions stay in: projects such as
+      # OpenDaylight move through them, and a JDK change that breaks a
+      # build shows up first in the release that introduced it.
+      - name: 'Publish the versions under test'
+        id: versions
+        shell: bash
+        env:
+          # The digests cannot wrap. Comments inside the block scalar
+          # below would become part of its JSON, so the rule is lifted
+          # around it from outside.
+          # yamllint disable rule:line-length
+          MAVEN: |
+            [
+              {
+                "line": "3.9",
+                "version": "3.9.16",
+                "sha512": "831a8591fe20c8243b1dbe7d71e3244f31d1665b0804b2e825e38cbbe5ce0cafb8338851f90780735568773e0a6cd07bbec107cda0b896b008b861075358b6f6"
+              },
+              {
+                "line": "3.10",
+                "version": "3.10.0",
+                "sha512": "908b1501bfb420bf7c8affb855534a9c407fd6099367bfb9f2f2dcb8e9799102bffb84518cde74c679bd76870247c6528683abdd620581bffa90f95d92d175aa"
+              },
+              {
+                "line": "4.0",
+                "version": "4.0.0-rc-7",
+                "sha512": "17b886c0ffb7ec225e514afa8179b3143d855d196cfbb4607ece6272a9b4f51501a389438ab6841b393a4b1391a1b714f07f450daba1951f53f732b400338184"
+              }
+            ]
+          # yamllint enable rule:line-length
+          JAVA: '["17", "21", "22", "23", "24", "25"]'
+        run: |
+          # Refuse a malformed list here, where the edit was made,
+          # rather than as a confusing matrix failure in each caller.
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          errors = []
+          maven = json.loads(os.environ["MAVEN"])
+          java = json.loads(os.environ["JAVA"])
+
+          # An empty axis would publish cleanly and then fail every
+          # caller's matrix, the failure this check exists to prevent.
+          for name, value in (("Maven", maven), ("Java", java)):
+              if not isinstance(value, list) or not value:
+                  print(f"::error::The {name} list must be a non-empty array")
+                  raise SystemExit(1)
+
+          # Shape first, so the checks below can rely on strings.
+          keys = {"line", "version", "sha512"}
+          for position, entry in enumerate(maven):
+              if not isinstance(entry, dict) or set(entry) != keys or not all(
+                  isinstance(entry[key], str) for key in keys
+              ):
+                  print(
+                      f"::error::Maven entry {position} must be an object "
+                      "with string 'line', 'version' and 'sha512' alone"
+                  )
+                  raise SystemExit(1)
+
+          lines = [entry["line"] for entry in maven]
+          if len(set(lines)) != len(lines):
+              errors.append("Maven lines repeat")
+          for entry in maven:
+              line = entry["line"]
+              version = entry["version"]
+              digest = entry["sha512"]
+              if not re.fullmatch(r"[0-9]+\.[0-9]+", line):
+                  errors.append(f"Maven line {line!r} is not major.minor")
+              if not version.startswith(f"{line}."):
+                  errors.append(f"Maven {version!r} is not on line {line}")
+              if not re.fullmatch(r"[0-9a-f]{128}", digest):
+                  errors.append(f"Maven {version}: sha512 is not 128 hex")
+
+          if not all(isinstance(v, str) and v.isdigit() for v in java):
+              errors.append(f"Java versions must be digit strings: {java}")
+          elif [int(v) for v in java] != sorted({int(v) for v in java}):
+              errors.append(f"Java versions must ascend, once each: {java}")
+          elif int(java[0]) < 17:
+              errors.append("Java below 17 cannot run Maven 4")
+
+          if errors:
+              for error in errors:
+                  print(f"::error::{error}")
+              raise SystemExit(1)
+
+          compact = {"separators": (",", ":")}
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"maven={json.dumps(maven, **compact)}\n")
+              output.write(f"java={json.dumps(java, **compact)}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write("## Java/Maven versions under test\n\n")
+              summary.write("| Maven line | Release |\n|---|---|\n")
+              for entry in maven:
+                  summary.write(f"| {entry['line']} | {entry['version']} |\n")
+              summary.write(f"\nJava: {', '.join(java)}\n")
+          PY

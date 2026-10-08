@@ -342,6 +342,28 @@ name, and `download-artifact` takes the newest without an error.
 already. A single call leaves the suffix empty and keeps the names
 given in this document.
 
+## Supported Java and Maven versions
+
+[`.github/workflows/java-maven-versions.yaml`](.github/workflows/java-maven-versions.yaml)
+lists the Maven releases and Java versions the Java/Maven estate tests
+against, and publishes them as two JSON outputs. This repository's
+self-test runs its compatibility matrix from it. `maven-build-action`,
+`maven-make-build-action`, `maven-snapshot-metadata-action`,
+`maven-stage-prep-action` and `maven-xml-settings-action` are to call
+it too, each pinning it by commit, so that once they do a change made
+there reaches every repository through the Dependabot bump of its pin.
+
+| Axis  | Versions                                                         |
+| ----- | ---------------------------------------------------------------- |
+| Maven | 3.9 (3.9.16), 3.10 (3.10.0), 4.0 (4.0.0-rc-7)                    |
+| Java  | 17, 21, 22, 23, 24, 25 (Temurin)                                 |
+
+Maven 3.9 and 3.10 are the two lines the Apache Maven project
+maintains; 4.0 is not yet GA, and the estate tests it ahead of that.
+Java starts at 17, the floor Maven 4 requires, and runs from 21
+through every feature release to 25, the current LTS, so a JDK change
+that breaks a build shows up in the release that introduced it.
+
 ## Gerrit support
 
 The reusable workflows are Gerrit-aware. A verify caller that sets the
