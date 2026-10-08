@@ -227,6 +227,106 @@ jobs:
           echo "${files} file(s); dry run covers ${DRY_RUN_COUNT}"
           exit "${status}"
 
+  # Proves the merge lane's prune refuses a SNAPSHOT coordinate fetch
+  # never read, inside the reactor's own group, where the landed
+  # check's group paths cannot see it: what a POM-bound deploy-file
+  # writes. A job calling the lane cannot set continue-on-error, so
+  # this runs the lane's metadata action itself, at the lane's pin and
+  # with its prune settings, which wiring-check holds in step. prune
+  # judges the m2repo alone, so the job plants the files a deploy
+  # would write rather than deploying. The same tree, less the extra
+  # coordinate, then passes, so the failure is that coordinate's.
+  merge-prune-check:
+    name: 'Merge Prune Check'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          egress-policy: 'block'
+          # The lane adds its nexus_server endpoint the same way
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+            nexus.onap.org:443
+
+      - name: 'Checkout fixture'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: 'lfreleng-actions/test-maven-project'
+          path: 'fixture'
+          persist-credentials: false
+
+      - name: 'Set up Java'
+        # yamllint disable-line rule:line-length
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6  # v6.0.1
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      # As the maven-merge job above: ONAP's Nexus has never held the
+      # fixture's group, so every module takes the first-publish path.
+      - name: 'Fetch published SNAPSHOT metadata'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/maven-snapshot-metadata-action@44ed26f32ea50d56e6361305fe5896532a560529  # v0.1.0
+        with:
+          mode: 'fetch'
+          nexus_server: 'https://nexus.onap.org'
+          repository_name: 'snapshots'
+          path_prefix: 'fixture'
+
+      # A module fetch read, and org.lfreleng.test:extra beside it
+      - name: 'Plant a deploy holding an extra coordinate'
+        shell: bash
+        run: |
+          set -euo pipefail
+          group="${GITHUB_WORKSPACE}/m2repo/org/lfreleng/test"
+          for artifact in test-maven-core extra; do
+            dir="${group}/${artifact}/1.0.0-SNAPSHOT"
+            mkdir -p "${dir}"
+            echo 'jar' > "${dir}/${artifact}-1.0.0-20261008.120000-1.jar"
+          done
+
+      - name: 'Prune with the extra coordinate (should fail)'
+        id: unrecorded
+        continue-on-error: true
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/maven-snapshot-metadata-action@44ed26f32ea50d56e6361305fe5896532a560529  # v0.1.0
+        with:
+          mode: 'prune'
+          check_coordinates: 'true'
+
+      - name: 'Error if the step above did NOT fail'
+        if: steps.unrecorded.outcome != 'failure'
+        shell: bash
+        run: |
+          echo '::error::prune accepted a coordinate fetch did not read'
+          exit 1
+
+      # prune refuses before removing anything, so the baseline and the
+      # rest of the tree are as they were
+      - name: 'Remove the extra coordinate'
+        shell: bash
+        run: rm -rf -- "${GITHUB_WORKSPACE}/m2repo/org/lfreleng/test/extra"
+
+      - name: 'Prune the reactor alone'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/maven-snapshot-metadata-action@44ed26f32ea50d56e6361305fe5896532a560529  # v0.1.0
+        with:
+          mode: 'prune'
+          check_coordinates: 'true'
+
   # Observes mvn_pom_file end to end: build core/pom.xml on its own,
   # which packages core and not app, where the root POM (the wiring
   # dropped) packages both. The SBOM POM guard rejects any POM other

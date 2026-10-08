@@ -11,6 +11,8 @@
 # - the merge lane's input validation, including the branch its
 #   checkouts build, and its m2repo checks, whose reject paths guard
 #   the publish;
+# - the merge lane's coordinate check: prune keeps it on, and the
+#   testing.yaml job proving the rejection runs the lane's own pin;
 # - the merge lane's copy of maven-build-action's workspace placeholder
 #   expansion, against the vendored script at the pinned SHA;
 # - the Gerrit submodule initialisation, against a local change that
@@ -24,6 +26,7 @@ set -euo pipefail
 maven='.github/workflows/maven-build-test.yaml'
 gradle='.github/workflows/gradle-build-test.yaml'
 merge='.github/workflows/maven-merge.yaml'
+testing='.github/workflows/testing.yaml'
 # The literal expression each checkout must pass, not a shell expansion.
 # shellcheck disable=SC2016
 wiring='${{ inputs.checkout_submodules }}'
@@ -190,7 +193,8 @@ for sbom in true false; do
     '{"MAVEN_ARGS": "-f x"}' '{"PATH_PREFIX": "x"}' \
     '{"SNAPSHOT_METADATA_MAVEN_ARGS": "x"}' \
     '{"snapshot_metadata_nexus_password": "x"}' \
-    '{"SNAPSHOT_METADATA_RETRY_DELAY": "1"}' '[]' 'not json' \
+    '{"SNAPSHOT_METADATA_RETRY_DELAY": "1"}' \
+    '{"SNAPSHOT_METADATA_CHECK_COORDINATES": "false"}' '[]' 'not json' \
     '{"maven_arg\u017f": "-f x"}'; do
     expect fail "merge guard (sbom ${sbom}) rejects ${value}" \
       "${merge_env}" "ENV_VARS=${value}" "SBOM_ENABLED=${sbom}"
@@ -570,6 +574,54 @@ expect fail 'a symbolic link to a file' "${landed}" \
 ln -s valid "${tmp}/root-link"
 expect fail 'an m2repo that is itself a link' "${landed}" \
   "M2REPO_PATH=${tmp}/root-link" 'GROUP_PATHS=org/example'
+
+# prune refuses a SNAPSHOT coordinate fetch did not read, which the
+# landed check's group paths cannot see inside a known group. A job
+# calling the lane cannot set continue-on-error, so testing.yaml's
+# merge-prune-check proves the rejection by running the lane's metadata
+# action itself. That proves the lane only while the check stays on in
+# both and every use shares one pin.
+echo 'Merge lane: coordinate check'
+prune_step='Prune unchanged SNAPSHOT metadata'
+metadata_uses='^lfreleng-actions/maven-snapshot-metadata-action@'
+# Each prune must still run the metadata action: a step keeping its
+# name and inputs under another 'uses:' would pass on inputs alone,
+# while the fetch kept the pin comparison below satisfied.
+if [ "$(STEP="${prune_step}" USES="${metadata_uses}" yq '[.jobs.build
+  .steps[] | select(.name == strenv(STEP))
+  | select((.uses // "") | test(strenv(USES)))
+  | select(.with.mode == "prune")
+  | select(.with.check_coordinates == "true")] | length' \
+  "${merge}")" != '1' ]; then
+  fail "${merge}: '${prune_step}' must run maven-snapshot-metadata-action" \
+    "in prune mode with check_coordinates: 'true'"
+fi
+# Exactly two prunes, the rejection and the passing baseline, both
+# running the action with the check on: counting only misconfigured
+# ones would pass when the prunes are gone altogether.
+prunes="$(yq '[.jobs["merge-prune-check"].steps[]
+  | select(.with.mode == "prune")] | length' "${testing}")"
+checked="$(USES="${metadata_uses}" yq '[.jobs["merge-prune-check"]
+  .steps[] | select((.uses // "") | test(strenv(USES)))
+  | select(.with.mode == "prune")
+  | select(.with.check_coordinates == "true")] | length' "${testing}")"
+if [ "${prunes}" != '2' ] || [ "${checked}" != '2' ]; then
+  fail "${testing}: merge-prune-check must prune twice with" \
+    "maven-snapshot-metadata-action and check_coordinates: 'true', as" \
+    "the lane does; found ${checked} of ${prunes}"
+fi
+lane_pins="$(USES="${metadata_uses}" yq '.jobs.build.steps[].uses
+  | select(. != null and test(strenv(USES)))' "${merge}" | sort -u)"
+test_pins="$(USES="${metadata_uses}" yq '.jobs["merge-prune-check"]
+  .steps[].uses | select(. != null and test(strenv(USES)))' \
+  "${testing}" | sort -u)"
+if [ -z "${lane_pins}" ] || [ -z "${test_pins}" ] \
+  || [ "$(printf '%s\n' "${lane_pins}" "${test_pins}" | sort -u \
+    | wc -l)" -ne 1 ]; then
+  fail "maven-snapshot-metadata-action must have one pin across" \
+    "${merge} and ${testing}'s merge-prune-check:" \
+    "${lane_pins//$'\n'/, } / ${test_pins//$'\n'/, }"
+fi
 
 echo 'Checkouts: submodule wiring'
 for workflow in "${maven}" "${gradle}" "${merge}"; do

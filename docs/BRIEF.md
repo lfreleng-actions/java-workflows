@@ -398,7 +398,9 @@ and the publish job writes to it.
    profiles, settings, options and parameters, then seeds the
    published `maven-metadata.xml` for every module into the `m2repo`,
    so `maven-deploy-plugin` carries on from the published
-   `buildNumber`. It reports the reactor's top-level `group_paths`.
+   `buildNumber`. It reports the reactor's top-level `group_paths`,
+   and records every module it read for `prune` to check the deploy
+   against.
    `maven-build-action` expands workspace placeholders such as
    `${GITHUB_WORKSPACE}` in the options and parameters before Maven
    sees them, so a step before `fetch` expands the same ones, with a
@@ -429,15 +431,28 @@ and the publish job writes to it.
    and the workflow uploads the tree itself.
 9. `maven-snapshot-metadata-action` in `prune` mode, removing metadata
    the deploy left unchanged, which would otherwise overwrite newer
-   copies a sibling build published meanwhile.
+   copies a sibling build published meanwhile. Before it removes
+   anything, `prune` fails on any SNAPSHOT version or metadata that no
+   module `fetch` read owns. A POM can deploy more than the reactor
+   lists: `maven-deploy-plugin:deploy-file` bound to `deploy` writes a
+   coordinate of its own, often inside the reactor's own group, where
+   the group-path check below cannot see it. `fetch` seeded none of
+   its metadata, so it would publish from `buildNumber` 1 over the
+   published copy. `check_coordinates` is on by default; the lane sets
+   it anyway, so a change of default cannot turn it off, and
+   `wiring-check.sh` holds it on.
 10. Check the deploy landed in the `m2repo`. A POM that sets
     `altSnapshotDeploymentRepository` or `altDeploymentRepository` in
     the deploy plugin's `<configuration>` still wins over the command
     line, and the deploy then leaves the `m2repo` holding the seeded
     metadata alone, which `prune` removes. The step fails when nothing
     but metadata and checksums remains, and when any file lies outside
-    the reactor's `group_paths`: `fetch` seeded none of its metadata,
-    so it would publish from `buildNumber` 1 over the published copy.
+    the reactor's `group_paths`. `prune` has already refused every
+    SNAPSHOT coordinate `fetch` did not read, and metadata no recorded
+    module owns, inside a known group or out of one. It leaves release
+    versions to this step, which refuses them below. The group-path
+    check catches any other stray file, and confines the publish to
+    those paths.
     Not every module has to appear, since a project may set
     `maven.deploy.skip` on some. The step also fails on an artefact
     outside a `-SNAPSHOT` version directory, so a reactor mixing in a
@@ -632,6 +647,17 @@ timestamped SNAPSHOT at `buildNumber` 1 with its version-level
 metadata, that nothing lies outside the fixture's group, and that the
 dry-run count equals the number of files in the tree.
 
+`merge-prune-check` proves the lane's `prune` refuses a coordinate
+`fetch` never read inside the reactor's own group, the shape of a
+POM-bound `deploy-file`. A job calling the lane cannot set
+`continue-on-error`, so it runs the lane's metadata action itself,
+with the lane's pin and `prune` settings, against the fixture's
+reactor: `fetch`, then a planted tree holding a fixture module and
+`org.lfreleng.test:extra`. `prune` must fail on that tree, and pass
+on the same tree once the extra coordinate goes, so the failure is
+that coordinate's. `wiring-check.sh` fails when the job's pin or
+`check_coordinates` drifts from the lane's.
+
 Whether the `buildNumber` carries on from published metadata, and
 whether `prune` keeps untouched metadata unpublished, is
 `maven-snapshot-metadata-action`'s to prove: its own end-to-end tests
@@ -646,7 +672,7 @@ The lane pins released versions of the building blocks it depends on:
 
 | Building block                   | Version | Needed for                                                                     |
 | -------------------------------- | ------- | ------------------------------------------------------------------------------ |
-| `maven-snapshot-metadata-action` | v0.0.1  | `fetch` and `prune`                                                            |
+| `maven-snapshot-metadata-action` | v0.1.0  | `fetch`, and `prune` refusing coordinates `fetch` did not read                 |
 | `nexus-publish-action`           | v1.3.0  | Retries, metadata last and held back; `dry_run`                                |
 | `maven-build-action`             | v0.5.3  | The tested `m2repo` contract; a deploy path callers cannot override            |
 | `credential-load-action`         | v2.0.4  | The publish credential, with `export_env: false`                               |
