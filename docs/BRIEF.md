@@ -78,7 +78,7 @@ One job owns the built tree: every step that reads it runs inside
    action's `mvn-opts`, `mvn-pom-file` and `env-vars`. A composite
    action applies a default only when an input is absent, never when it
    arrives empty, so each empty value falls back to the action's own
-   default: the workflow restates v0.5.2's `mvn-opts` default (the
+   default: the workflow restates v0.5.3's `mvn-opts` default (the
    `/tmp/r` local repository and quiet transfer logging), `pom.xml`,
    and `{}`. A non-empty `mvn_opts` replaces that default rather than
    adding to it, as it does on the action. `env_vars` takes a JSON
@@ -249,7 +249,7 @@ rule closes a bypass: the action upper-cases with JavaScript's
 `toUpperCase()`, which maps some non-ASCII letters onto ASCII ones
 (`maven_arg` followed by U+017F exports as `MAVEN_ARGS`), while the
 guard's `ascii_upcase` leaves them. The name lists follow `sbom-action`
-v0.2.0 and `maven-build-action` v0.5.2 and move with their pins.
+v0.2.0 and `maven-build-action` v0.5.3 and move with their pins.
 
 `sbom-action` resolves `path_prefix/pom.xml` and rejects `-f`/`--file`
 in `maven_args`, because an alternate POM would escape the directory it
@@ -416,17 +416,17 @@ and the publish job writes to it.
    environment variables that `fetch` never sees, so a profile keyed on
    one of them would change the deploy's reactor alone
    (lfreleng-actions/maven-build-action#169).
-8. `maven-build-action` v0.5.2 with `mvn-phases: deploy`,
+8. `maven-build-action` v0.5.3 with `mvn-phases: deploy`,
    deploying to its fixed `m2repo` and leaving the seeded metadata in
    place. It leaves out `clean`, which a `maven-clean-plugin` fileset
    could turn on the seeded metadata, and which has nothing to remove:
    the job starts from a fresh checkout, `actions/checkout` removes
    untracked build output from a reused workspace, and the job refuses
-   a checkout holding an `m2repo`. v0.5.2 sets the deploy repository
-   after every caller argument and refuses a caller's own, so no input
-   can redirect the deploy. `run-jacoco` and `artifact-upload` are off:
-   coverage belongs to the verify lane, and the workflow uploads the
-   tree itself.
+   a checkout holding an `m2repo`. v0.5.3 sets the deploy repository
+   after every caller argument and refuses a caller's own naming
+   anywhere else, so no input can redirect the deploy. `run-jacoco`
+   and `artifact-upload` are off: coverage belongs to the verify lane,
+   and the workflow uploads the tree itself.
 9. `maven-snapshot-metadata-action` in `prune` mode, removing metadata
    the deploy left unchanged, which would otherwise overwrite newer
    copies a sibling build published meanwhile.
@@ -648,7 +648,7 @@ The lane pins released versions of the building blocks it depends on:
 | -------------------------------- | ------- | ------------------------------------------------------------------------------ |
 | `maven-snapshot-metadata-action` | v0.0.1  | `fetch` and `prune`                                                            |
 | `nexus-publish-action`           | v1.3.0  | Retries, metadata last and held back; `dry_run`                                |
-| `maven-build-action`             | v0.5.2  | The tested `m2repo` contract; a deploy path callers cannot override            |
+| `maven-build-action`             | v0.5.3  | The tested `m2repo` contract; a deploy path callers cannot override            |
 | `credential-load-action`         | v2.0.4  | The publish credential, with `export_env: false`                               |
 
 <!-- markdownlint-enable MD013 -->

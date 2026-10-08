@@ -82,9 +82,11 @@ on:
         description: >-
           Extra parameters appended to the mvn command. Must not set
           altDeploymentRepository, altReleaseDeploymentRepository or
-          altSnapshotDeploymentRepository: maven-build-action v0.5.1
-          and later refuse them, since any deploy targets the
-          workspace m2repo. Remove them from shared build arguments.
+          altSnapshotDeploymentRepository: any deploy targets the
+          workspace m2repo, and maven-build-action refuses one naming
+          anywhere else (from v0.5.1) and warns on one naming the
+          m2repo (from v0.5.3). Remove them from shared build
+          arguments.
         required: false
         type: string
         default: ''
@@ -98,8 +100,8 @@ on:
           and quiet transfer logging; empty keeps them. The SBOM step
           receives the value too. Must not set altDeploymentRepository,
           altReleaseDeploymentRepository or
-          altSnapshotDeploymentRepository, which maven-build-action
-          refuses as for mvn_params.
+          altSnapshotDeploymentRepository, for the reasons given for
+          mvn_params.
         required: false
         type: string
         default: ''
@@ -565,7 +567,7 @@ jobs:
       # env: wins over GITHUB_ENV: sbom-action's generate step forces
       # MAVEN_ARGS empty, for one. Fail on those rather than resolve
       # another graph. The lists come from sbom-action v0.2.0 and
-      # maven-build-action v0.5.2; recheck them when either pin moves.
+      # maven-build-action v0.5.3; recheck them when either pin moves.
       - name: 'Require an environment the SBOM can reproduce'
         id: env-guard
         if: inputs.sbom_enabled
@@ -710,7 +712,7 @@ jobs:
       - name: 'Build with Maven'
         id: build
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-build-action@01a3700e14ee592694d1030c2305d0579e9df571  # v0.5.2
+        uses: lfreleng-actions/maven-build-action@0f09f8024307dbdba2f89286479e0e870f7065ff  # v0.5.3
         with:
           path_prefix: ${{ inputs.path_prefix }}
           # Caller override wins, else the detected version, else 21.
@@ -727,7 +729,7 @@ jobs:
           # A composite action applies an input default only when the
           # input is absent, never when it arrives empty, so each empty
           # value below falls back to the action's own default. The
-          # mvn-opts fallback restates maven-build-action v0.5.2's
+          # mvn-opts fallback restates maven-build-action v0.5.3's
           # default verbatim: it keeps the /tmp/r local repository
           # every existing caller builds with. Recheck it when the pin
           # above moves.
