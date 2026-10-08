@@ -396,9 +396,22 @@ fixture carries a git submodule and a test that reads it, and a
 `checkout_submodules` must actually fetch it. A
 `wiring-check` job runs `.github/scripts/wiring-check.sh` to test the
 guard steps, the merge lane's input checks, its coordinate check and
-its copy of `maven-build-action`'s placeholder expansion, and the
-submodule wiring the fixtures cannot exercise. See
-[`docs/BRIEF.md`](docs/BRIEF.md) for detail.
+its copy of `maven-build-action`'s placeholder expansion, the
+submodule wiring the fixtures cannot exercise, and that every artefact
+name the Maven lanes use carries `artifact_suffix`.
+
+The `compatibility-verify` and `compatibility-merge` jobs then run both
+Maven lanes once for every Maven release and Java version in
+`java-maven-versions.yaml`, 18 calls each. A matrix of reusable
+workflow calls returns one call's outputs alone, so
+`compatibility-check` reads every call's artefacts instead, through
+`.github/scripts/compatibility-check.sh`. It fails on a missing call,
+on a call whose recorded `mvn --version` names another Maven release
+or JDK, on Surefire reports from a JDK other than the one asked for,
+on an SBOM without the fixture's resolved dependencies, and on an
+`m2repo` that fails `.github/scripts/merge-check.sh` or holds jars
+another JDK built. A lane called without an `artifact_suffix` records
+no toolchain. See [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
 
 ## Design
 
