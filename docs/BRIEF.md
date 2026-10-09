@@ -1078,12 +1078,13 @@ but uploads from separate jobs coexist under one name, and
 `download-artifact` then takes the newest, without an error: run
 37857256399 of this repository's self-test kept three artefacts named
 `grype-scan-results`, one from each lane's Grype job. Two calls of a
-Maven lane in one run, as a version matrix makes, are separate jobs,
+lane in one run, as a version matrix makes, are separate jobs,
 so one call's Grype job would scan another's SBOM, and the merge
 lane's publish job push another call's `m2repo`. Each lane
 therefore takes an `artifact_suffix`, appended to every artefact name
 the lane chooses: the ones it uploads, the ones it reads back, and
-the names it passes to `maven-build-action` and `grype-scan-action`.
+the names it passes to `maven-build-action` and `grype-scan-action`
+(the Gradle lane turns `gradle-build-action`'s own upload off).
 `repository-metadata-action` names its own upload with a suffix of
 its own, a timestamp and a random part, so it cannot collide and the
 lane leaves it alone. An empty suffix, the default, keeps every
@@ -1092,11 +1093,18 @@ without the suffix.
 
 A matrix of reusable workflow calls also hands its caller one call's
 outputs alone, so per-call evidence has to travel as artefacts. A call
-with a suffix uploads a toolchain record, `mvn --version` run outside
-the project so its `.mvn` configuration cannot alter it: nothing else
-the build produces names the Maven release. The JDK is recorded twice
-over, in the record and in what the build produced (Surefire's
-`java.specification.version`, each jar's `Build-Jdk-Spec`).
+with a suffix uploads a toolchain record, since nothing else the build
+produces names the build tool's release. The Maven lanes record
+`mvn --version`, run outside the project so its `.mvn` configuration
+cannot alter it, and the JDK is recorded twice over, in the record and
+in what the build produced (Surefire's `java.specification.version`,
+each jar's `Build-Jdk-Spec`). The Gradle lane records
+`gradle --version` from the Gradle the build used, the wrapper or the
+provisioned `gradle_version`, run inside the project, where its own
+JVM settings apply: its launcher JVM is the JDK that ran the build.
+That record is the Gradle lane's only JDK evidence, because a project
+can compile and test through a Java toolchain of its own, as
+`test-gradle-project` does with Java 17.
 
 The self-test's `compatibility-verify` and `compatibility-merge` jobs
 call both lanes once per cell, and `compatibility-check` runs
