@@ -1019,21 +1019,24 @@ days of writing and would put every bump PR in conflict with the
 documentation. The `# vX.Y.Z` comment beside each `uses:` ref is the
 authoritative record.
 
-## Java and Maven version coverage
+## Java, Maven and Gradle version coverage
 
-`java-maven-versions.yaml` is the one list of Maven releases and Java
-versions the Java/Maven estate tests against. It publishes two JSON
-outputs, `maven` (objects with `line`, `version` and `sha512`) and
-`java` (feature-release strings), and a caller builds its matrix from
-them with `fromJSON`. This repository's self-test reads it, and the
-Maven actions (`maven-build-action`, `maven-make-build-action`,
-`maven-snapshot-metadata-action`, `maven-stage-prep-action` and
-`maven-xml-settings-action`) are to read it, each pinning the
-workflow by commit, so a change made there reaches every repository
-through the Dependabot bump of that pin. Version strings in a
-workflow are invisible to Dependabot; before this list, each
+`java-maven-versions.yaml` is the one list of Maven and Gradle
+releases and Java versions the Java estate tests against. It
+publishes JSON outputs: `maven` (objects with `line`, `version` and
+`sha512`), `java` (feature-release strings), `gradle` (objects with
+`line`, `version`, `sha256` and `max_java`) and `gradle_cells`; a
+caller builds its matrix from them with `fromJSON`. This repository's
+self-test reads it. The Maven and Gradle actions
+(`maven-build-action`, `maven-make-build-action`,
+`maven-snapshot-metadata-action`, `maven-stage-prep-action`,
+`maven-xml-settings-action` and `gradle-build-action`) are to read it
+too, each pinning the workflow by commit, so that a change made there
+reaches every repository through the Dependabot bump of that pin. Version strings
+in a workflow are invisible to Dependabot; before this list, each
 repository's test versions drifted on their own, and Maven 3.10.0
-went GA with no test running it.
+went GA with no test running it. The file name predates Gradle, and
+callers pin it by path, so it stays.
 
 - **Maven.** The two lines the Apache Maven project maintains (3.9
   and 3.10), and the newest Maven 4 release, ahead of its GA. Maven
@@ -1042,15 +1045,30 @@ went GA with no test running it.
   first. Each entry carries the SHA-512 of its binary archive, taken
   from `downloads.apache.org` and checked against Maven Central's
   copy, for callers that install Maven themselves.
-- **Java.** 17, the floor Maven 4 requires, then every feature
-  release from 21 to 25, not the LTS versions alone. Projects such as
-  OpenDaylight move through the releases between LTS versions, and a
-  JDK change that breaks a build shows up first in the release that
-  introduced it.
+- **Gradle.** The two lines Gradle maintains, 9 and 8, the latter for
+  security fixes. Each entry carries the SHA-256 of its distribution,
+  from `services.gradle.org` and checked against a download, and
+  `max_java`, the newest Java release that Gradle version supports
+  running on, from Gradle's compatibility matrix.
+- **Java.** 17, the floor Maven 4 and Gradle 9 require, then every
+  feature release from 21 to 25, not the LTS versions alone. Projects
+  such as OpenDaylight move through the releases between LTS
+  versions, and a JDK change that breaks a build shows up first in
+  the release that introduced it.
 
-The workflow validates both lists before publishing them, so a
+Maven runs on every Java version listed, so Maven matrices take the
+cross product of `maven` and `java`. Gradle runs on a bounded range:
+Gradle 8.14 stops at Java 24. A cross product would schedule a cell
+Gradle itself does not support, and every caller would have to
+exclude it, each keeping its own copy of Gradle's compatibility
+table. `gradle_cells` holds that rule once: every pair of a Gradle
+release and a Java version under test that it runs on, for a matrix
+`include`.
+
+The workflow validates every list before publishing it, so a
 malformed edit fails where it was made rather than as a matrix error
-in every caller.
+in every caller; a Gradle release that runs on none of the Java
+versions under test fails too.
 
 ### Calling a lane more than once in a run
 
@@ -1060,12 +1078,13 @@ but uploads from separate jobs coexist under one name, and
 `download-artifact` then takes the newest, without an error: run
 37857256399 of this repository's self-test kept three artefacts named
 `grype-scan-results`, one from each lane's Grype job. Two calls of a
-Maven lane in one run, as a version matrix makes, are separate jobs,
+lane in one run, as a version matrix makes, are separate jobs,
 so one call's Grype job would scan another's SBOM, and the merge
 lane's publish job push another call's `m2repo`. Each lane
 therefore takes an `artifact_suffix`, appended to every artefact name
 the lane chooses: the ones it uploads, the ones it reads back, and
-the names it passes to `maven-build-action` and `grype-scan-action`.
+the names it passes to `maven-build-action` and `grype-scan-action`
+(the Gradle lane turns `gradle-build-action`'s own upload off).
 `repository-metadata-action` names its own upload with a suffix of
 its own, a timestamp and a random part, so it cannot collide and the
 lane leaves it alone. An empty suffix, the default, keeps every
@@ -1074,16 +1093,27 @@ without the suffix.
 
 A matrix of reusable workflow calls also hands its caller one call's
 outputs alone, so per-call evidence has to travel as artefacts. A call
-with a suffix uploads a toolchain record, `mvn --version` run outside
-the project so its `.mvn` configuration cannot alter it: nothing else
-the build produces names the Maven release. The JDK is recorded twice
-over, in the record and in what the build produced (Surefire's
-`java.specification.version`, each jar's `Build-Jdk-Spec`).
+with a suffix uploads a toolchain record, since nothing else the build
+produces names the build tool's release. The Maven lanes record
+`mvn --version`, run outside the project so its `.mvn` configuration
+cannot alter it, and the JDK is recorded twice over, in the record and
+in what the build produced (Surefire's `java.specification.version`,
+each jar's `Build-Jdk-Spec`). The Gradle lane records
+`gradle --version` from the Gradle the build used, the wrapper or the
+provisioned `gradle_version`, run inside the project, where its own
+JVM settings apply: its launcher JVM is the JDK that ran the build.
+That record is the Gradle lane's only JDK evidence, because a project
+can compile and test through a Java toolchain of its own, as
+`test-gradle-project` does with Java 17.
 
 The self-test's `compatibility-verify` and `compatibility-merge` jobs
-call both lanes once per cell, and `compatibility-check` runs
+call both Maven lanes once per cell, and `compatibility-check` runs
 `.github/scripts/compatibility-check.sh` over every cell's artefacts,
 failing a missing cell as well as one that ran the wrong toolchain.
+`compatibility-gradle` calls the Gradle lane once per entry of
+`gradle_cells`, with `gradle_version` set so `gradle-build-action`
+provisions that release rather than the fixture's wrapper, and
+`.github/scripts/gradle-compatibility-check.sh` checks those cells.
 The merge cells apply `.github/scripts/merge-check.sh`, the same
 assertions the single `merge-check` call uses. Grype and the CBOM
 stay off in these calls: they read the SBOM and the bytecode, which

@@ -342,27 +342,36 @@ name, and `download-artifact` takes the newest without an error.
 already. A single call leaves the suffix empty and keeps the names
 given in this document.
 
-## Supported Java and Maven versions
+## Supported Java, Maven and Gradle versions
 
 [`.github/workflows/java-maven-versions.yaml`](.github/workflows/java-maven-versions.yaml)
-lists the Maven releases and Java versions the Java/Maven estate tests
-against, and publishes them as two JSON outputs. This repository's
-self-test runs its compatibility matrix from it. `maven-build-action`,
-`maven-make-build-action`, `maven-snapshot-metadata-action`,
-`maven-stage-prep-action` and `maven-xml-settings-action` are to call
-it too, each pinning it by commit, so that once they do a change made
-there reaches every repository through the Dependabot bump of its pin.
+lists the Maven and Gradle releases and the Java versions the Java
+estate tests against, and publishes them as JSON outputs. This
+repository's self-test runs its compatibility matrices from it. The
+Maven actions and `gradle-build-action` are to run theirs from it too,
+each pinning it by commit, so that a change made there reaches every
+repository through the Dependabot bump of its pin. The file name
+predates Gradle; callers pin it by path, so it stays.
 
-| Axis  | Versions                                                         |
-| ----- | ---------------------------------------------------------------- |
-| Maven | 3.9 (3.9.16), 3.10 (3.10.0), 4.0 (4.0.0-rc-7)                    |
-| Java  | 17, 21, 22, 23, 24, 25 (Temurin)                                 |
+| Axis   | Versions                                                       |
+| ------ | -------------------------------------------------------------- |
+| Maven  | 3.9 (3.9.16), 3.10 (3.10.0), 4.0 (4.0.0-rc-7)                  |
+| Gradle | 8 (8.14.6) on Java 17 to 24, 9 (9.8.1) on Java 17 to 25        |
+| Java   | 17, 21, 22, 23, 24, 25 (Temurin)                               |
 
 Maven 3.9 and 3.10 are the two lines the Apache Maven project
 maintains; 4.0 is not yet GA, and the estate tests it ahead of that.
-Java starts at 17, the floor Maven 4 requires, and runs from 21
-through every feature release to 25, the current LTS, so a JDK change
-that breaks a build shows up in the release that introduced it.
+Gradle 9 and 8 are the two lines Gradle maintains, 8 for security
+fixes. Java starts at 17, the floor Maven 4 and Gradle 9 require, and
+runs from 21 through every feature release to 25, the current LTS, so
+a JDK change that breaks a build shows up in the release that
+introduced it.
+
+Maven runs on every Java version listed, so Maven matrices take the
+cross product of the `maven` and `java` outputs. Gradle does not:
+each release runs on a bounded range of Java versions, and Gradle 8
+stops at Java 24. The `gradle_cells` output lists the combinations
+Gradle supports and no others, for use as a matrix `include`.
 
 ## Gerrit support
 
@@ -402,16 +411,21 @@ name the Maven lanes use carries `artifact_suffix`.
 
 The `compatibility-verify` and `compatibility-merge` jobs then run both
 Maven lanes once for every Maven release and Java version in
-`java-maven-versions.yaml`, 18 calls each. A matrix of reusable
-workflow calls returns one call's outputs alone, so
+`java-maven-versions.yaml`, 18 calls each, and `compatibility-gradle`
+runs the Gradle lane once for each of its 11 `gradle_cells`. A matrix
+of reusable workflow calls returns one call's outputs alone, so
 `compatibility-check` reads every call's artefacts instead, through
-`.github/scripts/compatibility-check.sh`. It fails on a missing call,
-on a call whose recorded `mvn --version` names another Maven release
-or JDK, on Surefire reports from a JDK other than the one asked for,
-on an SBOM without the fixture's resolved dependencies, and on an
-`m2repo` that fails `.github/scripts/merge-check.sh` or holds jars
-another JDK built. A lane called without an `artifact_suffix` records
-no toolchain. See [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
+`.github/scripts/compatibility-check.sh` for the Maven lanes and
+`.github/scripts/gradle-compatibility-check.sh` for the Gradle lane.
+They fail on a missing call, on a call whose recorded `mvn --version`
+or `gradle --version` names another release or Java version than the
+one asked for, on an SBOM without the fixture's resolved
+dependencies, and, for Maven, on Surefire reports from another JDK or
+an `m2repo` that fails `.github/scripts/merge-check.sh` or holds jars
+another JDK built. The Gradle fixture compiles through a Java 17
+toolchain, so for Gradle the launcher JVM in the record is the proof
+of the JDK under test. A lane called without an `artifact_suffix`
+records no toolchain. See [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
 
 ## Design
 
