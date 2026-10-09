@@ -114,9 +114,10 @@ for value in '[]' '"text"' 'not json' '{"MAVEN_ARGS": "-f x"}' \
   expect fail "environment guard rejects ${value}" "${env_guard}" \
     "ENV_VARS=${value}"
 done
-# Names JavaScript's toUpperCase() maps onto reserved ones (U+017F
-# and U+0131 upper-case to S and I) and other non-identifiers. The
-# JSON escapes keep this script ASCII and the case locale-independent.
+# Names that full Unicode case mapping, as vars-to-env-action applies
+# it, turns into reserved ones (U+017F and U+0131 upper-case to S and
+# I) and other non-identifiers. The JSON escapes keep this script ASCII
+# and the case locale-independent.
 for value in '{"maven_arg\u017f": "-f x"}' '{"path_pref\u0131x": "x"}' \
   '{"": "x"}' '{"1ST": "x"}' '{"MY-FLAG": "x"}' \
   '{"MY_FLAG\nMAVEN_ARGS": "x"}'; do
@@ -124,11 +125,12 @@ for value in '{"maven_arg\u017f": "-f x"}' '{"path_pref\u0131x": "x"}' \
     "${env_guard}" "ENV_VARS=${value}"
 done
 # The first case must be a bypass without the ASCII check, or it tests
-# nothing: prove the action would export it as MAVEN_ARGS.
-if command -v node > /dev/null; then
-  upper="$(node -e 'console.log("maven_arg\u017f".toUpperCase())')"
+# nothing: prove the action, which upper-cases with Python's str.upper(),
+# would export it as MAVEN_ARGS.
+if command -v python3 > /dev/null; then
+  upper="$(python3 -c 'print("maven_arg\u017f".upper())')"
   if [ "${upper}" != 'MAVEN_ARGS' ]; then
-    fail "toUpperCase() maps the U+017F case to '${upper}', not MAVEN_ARGS"
+    fail "str.upper() maps the U+017F case to '${upper}', not MAVEN_ARGS"
   fi
 fi
 

@@ -245,8 +245,8 @@ between the two, because a step's own `env:` wins over `GITHUB_ENV`:
 set their own inputs as variables. When `sbom_enabled` is set, the build
 job fails before checkout on any of those names, on a name that is not
 an ASCII identifier, and on a value that is not a JSON object. The ASCII
-rule closes a bypass: the action upper-cases with JavaScript's
-`toUpperCase()`, which maps some non-ASCII letters onto ASCII ones
+rule closes a bypass: the action upper-cases with full Unicode case
+mapping, which maps some non-ASCII letters onto ASCII ones
 (`maven_arg` followed by U+017F exports as `MAVEN_ARGS`), while the
 guard's `ascii_upcase` leaves them. The name lists follow `sbom-action`
 v0.2.0 and `maven-build-action` v0.5.3 and move with their pins.
@@ -383,9 +383,11 @@ and the publish job writes to it.
    the reactor differently from the deploy, on a self-hosted runner or
    with a pinned Maven. `maven-build-action` then installs the same
    versions, so the toolchain does not change between the two.
-5. Export `env_vars`, with the action and pin `maven-build-action`
-   uses, before `fetch` reads the reactor: a profile can activate on an
-   environment variable, and `MAVEN_OPTS` reaches every Maven run.
+5. Export `env_vars` before `fetch` reads the reactor, naming each
+   variable as `maven-build-action`'s own export does: a profile can
+   activate on an environment variable, and `MAVEN_OPTS` reaches every
+   Maven run. That export later skips every name already set here, so
+   the build sees the same values.
 6. Write the `maven_global_settings` secret, when set, to a private
    file under `RUNNER_TEMP` for `fetch` and the SBOM, which resolve
    through the same mirrors as the deploy; a final `always()` step
@@ -638,7 +640,9 @@ snapshots` and `dry_run: true`. ONAP's snapshot repository serves
 metadata anonymously and has never held the fixture's
 `org.lfreleng.test` group, so `fetch` takes the first-publish path for
 every module. The dry run makes the publish job log each upload with no
-credential and no network request, so the run needs no secrets.
+credential and no network request, so the run needs no secrets. The
+job also sets `env_vars` to `{"MAVEN_OPTS": "-DprojectType=application"}`,
+which leaves the fixture's graph and the deploy alone.
 
 `merge-check` then downloads the `m2repo` artefact and asserts that
 each of the fixture's four artefacts (`test-maven-project`,
@@ -646,6 +650,15 @@ each of the fixture's four artefacts (`test-maven-project`,
 timestamped SNAPSHOT at `buildNumber` 1 with its version-level
 metadata, that nothing lies outside the fixture's group, and that the
 dry-run count equals the number of files in the tree.
+
+`merge-env-check` proves the lane exports `env_vars` itself, before
+`fetch` reads the reactor. `maven-build-action` exports the same JSON
+again before the deploy, so a mark the value leaves on the build would
+survive the lane's own export being skipped. The job therefore reads
+the run's jobs from the Actions API and requires the build job's
+`Export env_vars` step to have succeeded. It also requires the merge
+SBOM's root component to be of type `application`, which shows the
+value reached the build.
 
 `merge-prune-check` proves the lane's `prune` refuses a coordinate
 `fetch` never read inside the reactor's own group, the shape of a
@@ -1166,7 +1179,7 @@ job, the structural guard beside that behavioural one, runs
 branch's workflows. It extracts the POM, environment and
 metadata-location guards and runs their accept and reject paths,
 including a line break that must not start a workflow command and
-names `toUpperCase()` maps onto reserved ones. It requires
+names Unicode case mapping turns into reserved ones. It requires
 `checkout_submodules` on every checkout in both lanes, and the
 initialisation step after every Gerrit checkout. It also rebuilds, in
 local repositories, the Gerrit path's sequence: the base checkout
