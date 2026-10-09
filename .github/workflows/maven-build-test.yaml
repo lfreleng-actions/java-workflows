@@ -616,8 +616,8 @@ jobs:
               'variables.'
             exit 1
           fi
-          # vars-to-env-action upper-cases each name with JavaScript's
-          # toUpperCase(), which maps some non-ASCII letters onto ASCII
+          # vars-to-env-action upper-cases each name with full Unicode
+          # case mapping, which maps some non-ASCII letters onto ASCII
           # ones: 'maven_arg\u017f' exports as MAVEN_ARGS. jq's
           # ascii_upcase leaves them, so such a name would pass the
           # comparison below. Reject every name that is not an ASCII

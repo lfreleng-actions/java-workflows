@@ -301,7 +301,9 @@ The `testing.yaml` self-test runs the lane over `test-maven-project`
 with `dry_run`, reading metadata from ONAP's Nexus, where the fixture's
 group has never published. A `merge-check` job then asserts each
 module's timestamped SNAPSHOT at `buildNumber` 1 with its metadata, and
-a dry run covering every file in the `m2repo`. A `merge-prune-check`
+a dry run covering every file in the `m2repo`. A `merge-env-check` job
+asserts that the lane's own `env_vars` export ran and that the value
+reached the SBOM. A `merge-prune-check`
 job runs the lane's `prune`, at the lane's pin, over the fixture's
 reactor plus an extra coordinate inside its group, and asserts that
 `prune` refuses it.
