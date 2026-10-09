@@ -411,16 +411,21 @@ name the Maven lanes use carries `artifact_suffix`.
 
 The `compatibility-verify` and `compatibility-merge` jobs then run both
 Maven lanes once for every Maven release and Java version in
-`java-maven-versions.yaml`, 18 calls each. A matrix of reusable
-workflow calls returns one call's outputs alone, so
+`java-maven-versions.yaml`, 18 calls each, and `compatibility-gradle`
+runs the Gradle lane once for each of its 11 `gradle_cells`. A matrix
+of reusable workflow calls returns one call's outputs alone, so
 `compatibility-check` reads every call's artefacts instead, through
-`.github/scripts/compatibility-check.sh`. It fails on a missing call,
-on a call whose recorded `mvn --version` names another Maven release
-or JDK, on Surefire reports from a JDK other than the one asked for,
-on an SBOM without the fixture's resolved dependencies, and on an
-`m2repo` that fails `.github/scripts/merge-check.sh` or holds jars
-another JDK built. A lane called without an `artifact_suffix` records
-no toolchain. See [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
+`.github/scripts/compatibility-check.sh` for the Maven lanes and
+`.github/scripts/gradle-compatibility-check.sh` for the Gradle lane.
+They fail on a missing call, on a call whose recorded `mvn --version`
+or `gradle --version` names another release or Java version than the
+one asked for, on an SBOM without the fixture's resolved
+dependencies, and, for Maven, on Surefire reports from another JDK or
+an `m2repo` that fails `.github/scripts/merge-check.sh` or holds jars
+another JDK built. The Gradle fixture compiles through a Java 17
+toolchain, so for Gradle the launcher JVM in the record is the proof
+of the JDK under test. A lane called without an `artifact_suffix`
+records no toolchain. See [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
 
 ## Design
 

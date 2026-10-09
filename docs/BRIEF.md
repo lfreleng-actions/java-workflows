@@ -1107,9 +1107,13 @@ can compile and test through a Java toolchain of its own, as
 `test-gradle-project` does with Java 17.
 
 The self-test's `compatibility-verify` and `compatibility-merge` jobs
-call both lanes once per cell, and `compatibility-check` runs
+call both Maven lanes once per cell, and `compatibility-check` runs
 `.github/scripts/compatibility-check.sh` over every cell's artefacts,
 failing a missing cell as well as one that ran the wrong toolchain.
+`compatibility-gradle` calls the Gradle lane once per entry of
+`gradle_cells`, with `gradle_version` set so `gradle-build-action`
+provisions that release rather than the fixture's wrapper, and
+`.github/scripts/gradle-compatibility-check.sh` checks those cells.
 The merge cells apply `.github/scripts/merge-check.sh`, the same
 assertions the single `merge-check` call uses. Grype and the CBOM
 stay off in these calls: they read the SBOM and the bytecode, which

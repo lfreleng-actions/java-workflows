@@ -695,3 +695,83 @@ jobs:
         run: |
           bash .github/scripts/compatibility-check.sh \
             "${LANE}" cells "${MAVEN}" "${JAVA}"
+
+  # The Gradle lane on every Gradle release and Java version under
+  # test that Gradle supports running on: Gradle 8 stops at Java 24,
+  # so the versions workflow publishes the valid pairs, not a cross
+  # product. gradle_version makes gradle-build-action provision that
+  # release rather than run the fixture's wrapper. The fixture compiles
+  # through a Java 17 toolchain, which the runner image provides beside
+  # the JDK under test. Grype and the CBOM stay off, as in the Maven
+  # compatibility calls.
+  compatibility-gradle:
+    # yamllint disable-line rule:line-length
+    name: 'Compatibility Gradle (Gradle ${{ matrix.gradle.line }}, JDK ${{ matrix.java }})'
+    needs: versions
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.versions.outputs.gradle_cells) }}
+    uses: $/.github/workflows/gradle-build-test.yaml
+    with:
+      repository: 'lfreleng-actions/test-gradle-project'
+      java_version: ${{ matrix.java }}
+      gradle_version: ${{ matrix.gradle.version }}
+      # yamllint disable-line rule:line-length
+      artifact_suffix: '-gradle-${{ matrix.gradle.line }}-java-${{ matrix.java }}'
+      grype_enabled: false
+      cbom_enabled: false
+
+  # Reads every Gradle cell's artefacts, as compatibility-check does
+  # for the Maven lanes, through
+  # .github/scripts/gradle-compatibility-check.sh.
+  compatibility-gradle-check:
+    name: 'Compatibility Check (gradle)'
+    needs: [versions, compatibility-gradle]
+    if: ${{ !cancelled() && needs.versions.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # For the check script only; the fixture is not checked out here.
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Each artefact lands in a directory of its own name. A cell that
+      # uploaded nothing leaves no directory, which the check reports.
+      - name: 'Download every cell'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          # yamllint disable-line rule:line-length
+          pattern: '{gradle-toolchain,gradle-junit-reports,sbom-files-gradle}-gradle-*'
+          path: cells
+
+      - name: 'Assert every cell'
+        shell: bash
+        env:
+          CELLS: ${{ needs.versions.outputs.gradle_cells }}
+        run: |
+          bash .github/scripts/gradle-compatibility-check.sh cells "${CELLS}"
