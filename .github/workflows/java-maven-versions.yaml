@@ -2,32 +2,45 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-# Reusable list of the Maven and Java versions the Java/Maven estate
-# tests against: this repository and the Maven actions it calls
-# (maven-build-action, maven-make-build-action,
-# maven-snapshot-metadata-action, maven-stage-prep-action and
-# maven-xml-settings-action). A caller builds its compatibility matrix
-# from the two outputs, so every caller tests one set of versions and
-# a change here reaches each of them through the Dependabot bump of
-# this workflow's pin:
+# Reusable list of the Maven, Gradle and Java versions the Java estate
+# tests against: this repository and the Maven and Gradle actions it
+# calls (maven-build-action, maven-make-build-action,
+# maven-snapshot-metadata-action, maven-stage-prep-action,
+# maven-xml-settings-action and gradle-build-action). A caller builds
+# its compatibility matrix from the outputs, so every caller tests one
+# set of versions and a change here reaches each of them through the
+# Dependabot bump of this workflow's pin. The name predates Gradle;
+# callers pin it by path, so it stays.
 #
 #   jobs:
 #     versions:
 #       uses: lfreleng-actions/java-workflows/<this file>@<sha>
-#     compatibility:
+#     maven-compatibility:
 #       needs: versions
 #       strategy:
 #         fail-fast: false
 #         matrix:
 #           maven: ${{ fromJSON(needs.versions.outputs.maven) }}
 #           java: ${{ fromJSON(needs.versions.outputs.java) }}
+#     gradle-compatibility:
+#       needs: versions
+#       strategy:
+#         fail-fast: false
+#         matrix:
+#           include: ${{ fromJSON(needs.versions.outputs.gradle_cells) }}
 #
 # Each Maven entry is an object: 'line' labels the release line in job
 # names and artifact names, 'version' is the release to install, and
 # 'sha512' is the digest of apache-maven-<version>-bin.tar.gz, for
 # callers that download the archive themselves. Callers going through
 # maven-build-action pass the version alone.
-name: '[R] Java/Maven Versions'
+#
+# Gradle is not a plain cross product: each Gradle line runs on a
+# bounded range of JDKs (Gradle 8 on Java 24 at most), so gradle_cells
+# holds only the combinations Gradle supports, each an object with
+# 'gradle' (the Gradle entry: 'line', 'version', 'sha256' of
+# gradle-<version>-bin.zip) and 'java'.
+name: '[R] Java/Maven/Gradle Versions'
 
 # yamllint disable-line rule:truthy
 on:
@@ -43,18 +56,33 @@ on:
           JSON array of the Java feature releases under test, as
           strings setup-java accepts.
         value: ${{ jobs.versions.outputs.java }}
+      gradle:
+        description: >-
+          JSON array of the Gradle releases under test, each an object
+          with 'line', 'version', 'sha256' and 'max_java', the newest
+          Java release that version of Gradle runs on.
+        value: ${{ jobs.versions.outputs.gradle }}
+      gradle_cells:
+        description: >-
+          JSON array of the Gradle and Java combinations to test, each
+          an object with 'gradle' (an entry of the gradle output) and
+          'java': every Java version under test that the Gradle release
+          runs on. Use it as matrix include.
+        value: ${{ jobs.versions.outputs.gradle_cells }}
 
 permissions: {}
 
 jobs:
   versions:
-    name: 'Java/Maven Versions'
+    name: 'Java/Maven/Gradle Versions'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions: {}
     outputs:
       maven: ${{ steps.versions.outputs.maven }}
       java: ${{ steps.versions.outputs.java }}
+      gradle: ${{ steps.versions.outputs.gradle }}
+      gradle_cells: ${{ steps.versions.outputs.gradle_cells }}
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
@@ -85,13 +113,22 @@ jobs:
       # releases between two LTS versions stay in: projects such as
       # OpenDaylight move through them, and a JDK change that breaks a
       # build shows up first in the release that introduced it.
+      #
+      # Gradle: the two lines Gradle maintains
+      # (https://endoflife.date/gradle), 9 and 8, the latter for
+      # security fixes. Take each digest from
+      # https://services.gradle.org/distributions/gradle-<version>-bin.zip.sha256
+      # and confirm a download matches it. max_java is the newest Java
+      # release that Gradle version supports running on, from
+      # https://docs.gradle.org/current/userguide/compatibility.html:
+      # Gradle 8.14 stops at 24, so it never meets JDK 25.
       - name: 'Publish the versions under test'
         id: versions
         shell: bash
         env:
-          # The digests cannot wrap. Comments inside the block scalar
-          # below would become part of its JSON, so the rule is lifted
-          # around it from outside.
+          # The digests cannot wrap. Comments inside the block scalars
+          # below would become part of their JSON, so the rule is lifted
+          # around them from outside.
           # yamllint disable rule:line-length
           MAVEN: |
             [
@@ -111,6 +148,21 @@ jobs:
                 "sha512": "17b886c0ffb7ec225e514afa8179b3143d855d196cfbb4607ece6272a9b4f51501a389438ab6841b393a4b1391a1b714f07f450daba1951f53f732b400338184"
               }
             ]
+          GRADLE: |
+            [
+              {
+                "line": "8",
+                "version": "8.14.6",
+                "sha256": "7988ed071b2a07900e2ec715fca15c6ab72bce6db433af301fa7fa7e9407bd24",
+                "max_java": "24"
+              },
+              {
+                "line": "9",
+                "version": "9.8.1",
+                "sha256": "dce76f55f8e251a3a1f130eb120f30b3d271de2b76c9b0729d316b5a1b6dc01f",
+                "max_java": "27"
+              }
+            ]
           # yamllint enable rule:line-length
           JAVA: '["17", "21", "22", "23", "24", "25"]'
         run: |
@@ -125,25 +177,32 @@ jobs:
           errors = []
           maven = json.loads(os.environ["MAVEN"])
           java = json.loads(os.environ["JAVA"])
+          gradle = json.loads(os.environ["GRADLE"])
 
           # An empty axis would publish cleanly and then fail every
           # caller's matrix, the failure this check exists to prevent.
-          for name, value in (("Maven", maven), ("Java", java)):
+          for name, value in (
+              ("Maven", maven), ("Java", java), ("Gradle", gradle)
+          ):
               if not isinstance(value, list) or not value:
                   print(f"::error::The {name} list must be a non-empty array")
                   raise SystemExit(1)
 
           # Shape first, so the checks below can rely on strings.
-          keys = {"line", "version", "sha512"}
-          for position, entry in enumerate(maven):
-              if not isinstance(entry, dict) or set(entry) != keys or not all(
-                  isinstance(entry[key], str) for key in keys
-              ):
-                  print(
-                      f"::error::Maven entry {position} must be an object "
-                      "with string 'line', 'version' and 'sha512' alone"
-                  )
-                  raise SystemExit(1)
+          for name, entries, keys in (
+              ("Maven", maven, {"line", "version", "sha512"}),
+              ("Gradle", gradle, {"line", "version", "sha256", "max_java"}),
+          ):
+              for position, entry in enumerate(entries):
+                  shaped = isinstance(entry, dict) and set(entry) == keys
+                  if not shaped or not all(
+                      isinstance(entry[key], str) for key in keys
+                  ):
+                      print(
+                          f"::error::{name} entry {position} must be an object "
+                          f"with string {', '.join(sorted(keys))} alone"
+                      )
+                      raise SystemExit(1)
 
           lines = [entry["line"] for entry in maven]
           if len(set(lines)) != len(lines):
@@ -166,6 +225,37 @@ jobs:
           elif int(java[0]) < 17:
               errors.append("Java below 17 cannot run Maven 4")
 
+          gradle_lines = [entry["line"] for entry in gradle]
+          if len(set(gradle_lines)) != len(gradle_lines):
+              errors.append("Gradle lines repeat")
+          for entry in gradle:
+              line = entry["line"]
+              version = entry["version"]
+              if not re.fullmatch(r"[0-9]+", line):
+                  errors.append(f"Gradle line {line!r} is not a major version")
+              if not version.startswith(f"{line}."):
+                  errors.append(f"Gradle {version!r} is not on line {line}")
+              if not re.fullmatch(r"[0-9a-f]{64}", entry["sha256"]):
+                  errors.append(f"Gradle {version}: sha256 is not 64 hex")
+              if not entry["max_java"].isdigit():
+                  errors.append(f"Gradle {version}: max_java is not a number")
+
+          if errors:
+              for error in errors:
+                  print(f"::error::{error}")
+              raise SystemExit(1)
+
+          # Every Java version under test a Gradle release runs on. A
+          # release that runs on none of them would test nothing.
+          gradle_cells = []
+          for entry in gradle:
+              runs_on = [v for v in java if int(v) <= int(entry["max_java"])]
+              if not runs_on:
+                  errors.append(
+                      f"Gradle {entry['version']} runs on no Java under test"
+                  )
+              gradle_cells += [{"gradle": entry, "java": v} for v in runs_on]
+
           if errors:
               for error in errors:
                   print(f"::error::{error}")
@@ -175,10 +265,24 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"], "a") as output:
               output.write(f"maven={json.dumps(maven, **compact)}\n")
               output.write(f"java={json.dumps(java, **compact)}\n")
+              output.write(f"gradle={json.dumps(gradle, **compact)}\n")
+              output.write(
+                  f"gradle_cells={json.dumps(gradle_cells, **compact)}\n"
+              )
           with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
-              summary.write("## Java/Maven versions under test\n\n")
+              summary.write("## Java/Maven/Gradle versions under test\n\n")
               summary.write("| Maven line | Release |\n|---|---|\n")
               for entry in maven:
                   summary.write(f"| {entry['line']} | {entry['version']} |\n")
+              summary.write("\n| Gradle line | Release | Java |\n")
+              summary.write("|---|---|---|\n")
+              for entry in gradle:
+                  runs_on = [
+                      c["java"] for c in gradle_cells if c["gradle"] is entry
+                  ]
+                  summary.write(
+                      f"| {entry['line']} | {entry['version']} | "
+                      f"{', '.join(runs_on)} |\n"
+                  )
               summary.write(f"\nJava: {', '.join(java)}\n")
           PY
