@@ -20,7 +20,9 @@
 # - the submodule wiring of every checkout in all three lanes;
 # - the Maven lanes' artifact_suffix, on every artefact name they
 #   choose for an upload or a download, so a matrix of calls cannot
-#   cross them.
+#   cross them;
+# - zizmor's impostor-commit ignores for the examples' placeholder SHA,
+#   which only an online run applies, against the examples themselves.
 #
 # Run from the repository root: bash .github/scripts/wiring-check.sh
 
@@ -757,6 +759,90 @@ for workflow in "${maven}" "${merge}"; do
     expect fail "${workflow}: suffix '${value}' rejected" "${check}" \
       "ARTIFACT_SUFFIX=${value}"
   done
+done
+
+# The examples pin an all-zero placeholder SHA, which zizmor's
+# impostor-commit rule reports. .github/zizmor.yml ignores it by base
+# filename and line, and only an online run applies those entries,
+# while the pre-commit hook runs zizmor offline. Nothing else notices
+# when an edit moves a placeholder off its entry, so hold them to the
+# examples here: every placeholder needs an entry, every entry must
+# mark a placeholder in some example of that name, and no entry may
+# land on a real 'uses:' line, whose impostor commit it would hide.
+echo 'Examples: zizmor placeholder ignores'
+zizmor_config='.github/zizmor.yml'
+# A 'uses:' line, as zizmor numbers it. Each check reads the value
+# alone, with any trailing YAML comment (a '#' after whitespace)
+# stripped, so a real reference that names the placeholder in its
+# comment still counts as real. yq's own line numbers drift from the
+# file's around these examples' comment blocks, so lines come from awk.
+uses_values() {
+  awk '/^[[:space:]]*(-[[:space:]]+)?uses:/ {
+    v = $0
+    sub(/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*/, "", v)
+    sub(/[[:space:]]+#.*$/, "", v)
+    print NR " " v
+  }' "$1"
+}
+placeholder_re='@0{40}$'
+examples=()
+while IFS= read -r -d '' file; do
+  examples+=("${file}")
+done < <(find examples -type f \( -name '*.yaml' -o -name '*.yml' \) \
+  -print0 | sort -z)
+if [ "${#examples[@]}" -eq 0 ]; then
+  fail 'examples/: found no example workflows'
+fi
+# base-name:line of each placeholder, with the examples holding it
+declare -A placeholders=()
+for file in "${examples[@]}"; do
+  # The values awk reads must be the ones YAML holds, or a quoting or
+  # comment form it misreads would let a real reference pass as one
+  # the check ignores.
+  if [ "$(uses_values "${file}" | cut -d' ' -f2- | sort)" != \
+    "$(yq '.. | select(tag == "!!map" and has("uses")) | .uses' \
+      "${file}" | sort)" ]; then
+    fail "${file}: the 'uses:' values read line by line differ from the" \
+      "YAML's; this check cannot judge the file"
+  fi
+  while read -r number value; do
+    if [[ "${value}" =~ ${placeholder_re} ]]; then
+      placeholders["${file##*/}:${number}"]+=" ${file}"
+    fi
+  done < <(uses_values "${file}")
+done
+if [ "${#placeholders[@]}" -eq 0 ]; then
+  fail 'examples/: found no placeholder SHA to check the ignores against'
+fi
+declare -A ignored=()
+while IFS= read -r entry; do
+  if ! [[ "${entry}" =~ ^([^:/]+):([0-9]+)$ ]]; then
+    fail "${zizmor_config}: impostor-commit entry '${entry}' is not" \
+      '<file name>:<line>'
+    continue
+  fi
+  name="${BASH_REMATCH[1]}"
+  number="${BASH_REMATCH[2]}"
+  ignored["${entry}"]=1
+  if [ -z "${placeholders[${entry}]:-}" ]; then
+    fail "${zizmor_config}: impostor-commit entry '${entry}' marks no" \
+      "placeholder in any example named ${name}"
+  fi
+  for file in "${examples[@]}"; do
+    [ "${file##*/}" = "${name}" ] || continue
+    value="$(uses_values "${file}" | awk -v n="${number}" \
+      '$1 == n { sub(/^[0-9]+ /, ""); print }')"
+    if [ -n "${value}" ] && ! [[ "${value}" =~ ${placeholder_re} ]]; then
+      fail "${zizmor_config}: impostor-commit entry '${entry}' would" \
+        "hide a real 'uses:' at ${file}:${number}"
+    fi
+  done
+done < <(yq '.rules["impostor-commit"].ignore[]' "${zizmor_config}")
+for key in $(printf '%s\n' "${!placeholders[@]}" | sort); do
+  if [ -z "${ignored[${key}]:-}" ]; then
+    fail "${zizmor_config}: no impostor-commit entry '${key}' for the" \
+      "placeholder in${placeholders[${key}]}"
+  fi
 done
 
 if [ "${status}" -eq 0 ]; then

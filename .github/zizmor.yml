@@ -27,24 +27,25 @@ rules:
       # precisely what this audit exists to catch.
 
       # An ignore rule takes no path, only a base filename, so each entry
-      # applies to that line in every example sharing the name. Verified
-      # that no entry below lands on a different 'uses:' line in a
-      # same-named file.
+      # applies to that line in every example sharing the name: the
+      # build-test and merge examples alike.
 
-      # Line numbers make these brittle, which is the safer failure
-      # mode: editing an example above a placeholder shifts the line,
-      # the entry stops matching, and the finding reappears. That fails
-      # loudly and is fixed by correcting the number, where a file-wide
-      # ignore fails silently.
-
-      # Inert under the pre-commit hook, which pins zizmor to --offline;
-      # impostor-commit needs the GitHub API and does not run in that
-      # mode. These apply to online runs -- a developer invoking zizmor
-      # with a token, or a future CI lane.
+      # Line numbers make these brittle: editing an example above a
+      # placeholder moves it off its entry. Online, the finding then
+      # reappears; but the pre-commit hook pins zizmor to --offline,
+      # where impostor-commit needs the GitHub API and does not run, so
+      # nothing there would notice. .github/scripts/wiring-check.sh
+      # does, offline: it fails unless every placeholder line has an
+      # entry, every entry lands on a placeholder in some example, and
+      # no entry lands on a real 'uses:' line in any same-named file.
 
       # Configured here rather than as inline 'zizmor: ignore' comments
       # on purpose. Consumers copy these files wholesale, and an inline
       # suppression would travel with them, masking a genuine finding in
       # their repository once they replace the placeholder.
-      - gerrit.yaml:134
-      - github.yaml:44
+      # gerrit.yaml: build-test (maven, gradle) 133, merge 240.
+      # github.yaml: build-test (maven, gradle) 43, merge 63.
+      - gerrit.yaml:133
+      - gerrit.yaml:240
+      - github.yaml:43
+      - github.yaml:63
