@@ -330,6 +330,40 @@ examples/
 Inputs are optional and default to the canonical behaviour; read the
 `inputs:` block at the top of each workflow file for the documented list.
 
+To call a Maven lane more than once in one run, as a matrix of Java or
+Maven versions does, give each call its own `artifact_suffix`, for
+example `-java-${{ matrix.java }}`. Every artefact name the lane
+chooses, for what it uploads or reads back, ends with it, so the calls
+cannot read each other's reports, SBOM or `m2repo`. Matrix calls run
+as separate jobs, and while `upload-artifact` refuses a name already
+used within one job, uploads from separate jobs coexist under one
+name, and `download-artifact` takes the newest without an error.
+`repository-metadata-action` gives its own upload a unique name
+already. A single call leaves the suffix empty and keeps the names
+given in this document.
+
+## Supported Java and Maven versions
+
+[`.github/workflows/java-maven-versions.yaml`](.github/workflows/java-maven-versions.yaml)
+lists the Maven releases and Java versions the Java/Maven estate tests
+against, and publishes them as two JSON outputs. This repository's
+self-test runs its compatibility matrix from it. `maven-build-action`,
+`maven-make-build-action`, `maven-snapshot-metadata-action`,
+`maven-stage-prep-action` and `maven-xml-settings-action` are to call
+it too, each pinning it by commit, so that once they do a change made
+there reaches every repository through the Dependabot bump of its pin.
+
+| Axis  | Versions                                                         |
+| ----- | ---------------------------------------------------------------- |
+| Maven | 3.9 (3.9.16), 3.10 (3.10.0), 4.0 (4.0.0-rc-7)                    |
+| Java  | 17, 21, 22, 23, 24, 25 (Temurin)                                 |
+
+Maven 3.9 and 3.10 are the two lines the Apache Maven project
+maintains; 4.0 is not yet GA, and the estate tests it ahead of that.
+Java starts at 17, the floor Maven 4 requires, and runs from 21
+through every feature release to 25, the current LTS, so a JDK change
+that breaks a build shows up in the release that introduced it.
+
 ## Gerrit support
 
 The reusable workflows are Gerrit-aware. A verify caller that sets the
@@ -362,9 +396,22 @@ fixture carries a git submodule and a test that reads it, and a
 `checkout_submodules` must actually fetch it. A
 `wiring-check` job runs `.github/scripts/wiring-check.sh` to test the
 guard steps, the merge lane's input checks, its coordinate check and
-its copy of `maven-build-action`'s placeholder expansion, and the
-submodule wiring the fixtures cannot exercise. See
-[`docs/BRIEF.md`](docs/BRIEF.md) for detail.
+its copy of `maven-build-action`'s placeholder expansion, the
+submodule wiring the fixtures cannot exercise, and that every artefact
+name the Maven lanes use carries `artifact_suffix`.
+
+The `compatibility-verify` and `compatibility-merge` jobs then run both
+Maven lanes once for every Maven release and Java version in
+`java-maven-versions.yaml`, 18 calls each. A matrix of reusable
+workflow calls returns one call's outputs alone, so
+`compatibility-check` reads every call's artefacts instead, through
+`.github/scripts/compatibility-check.sh`. It fails on a missing call,
+on a call whose recorded `mvn --version` names another Maven release
+or JDK, on Surefire reports from a JDK other than the one asked for,
+on an SBOM without the fixture's resolved dependencies, and on an
+`m2repo` that fails `.github/scripts/merge-check.sh` or holds jars
+another JDK built. A lane called without an `artifact_suffix` records
+no toolchain. See [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
 
 ## Design
 

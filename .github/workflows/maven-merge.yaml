@@ -162,6 +162,24 @@ on:
         required: false
         type: boolean
         default: false
+      # A run shares one artifact namespace across every lane it calls.
+      # upload-artifact refuses a name already used within one job, but
+      # uploads from separate jobs coexist under one name, and
+      # download-artifact then takes the newest. Two calls of this
+      # workflow in one run, as a matrix makes, are separate jobs, so
+      # each would publish whichever m2repo landed last. Each call sets
+      # its own suffix; a single call leaves it empty.
+      artifact_suffix:
+        description: >-
+          Appended to the name of every artefact this workflow names
+          itself, uploaded or read back, so several calls can share
+          one run (a matrix of Java or Maven versions, say).
+          repository-metadata-action names its own upload uniquely.
+          Empty, or a '-' followed by letters, digits, '.', '_' or
+          '-'.
+        required: false
+        type: string
+        default: ''
 
       # --- SBOM and Grype (informational) ---
       sbom_enabled:
@@ -295,6 +313,20 @@ jobs:
       nexus_username: ${{ steps.validate.outputs.nexus_username }}
       checkout_ref: ${{ steps.validate.outputs.checkout_ref }}
     steps:
+      # Every artefact name ends with the suffix, and upload-artifact
+      # refuses some characters only at upload time, after the build.
+      - name: 'Validate artifact_suffix'
+        if: inputs.artifact_suffix != ''
+        shell: bash
+        env:
+          ARTIFACT_SUFFIX: ${{ inputs.artifact_suffix }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${ARTIFACT_SUFFIX}" =~ ^-[A-Za-z0-9._-]{1,64}$ ]]; then
+            echo "::error::artifact_suffix must be a '-' followed by up" \
+              "to 64 letters, digits, '.', '_' or '-'."
+            exit 1
+          fi
       - name: 'Validate inputs'
         id: validate
         shell: bash
@@ -1081,12 +1113,37 @@ jobs:
         with:
           # Lane-specific: a caller's run shares one artifact namespace
           # across every lane it calls.
-          name: maven-merge-m2repo
+          name: maven-merge-m2repo${{ inputs.artifact_suffix }}
           path: ${{ steps.build.outputs.m2repo_path }}
           # A Maven artifactId or version can begin with a dot; by
           # default such paths would drop out of the hand-off while the
           # landed check above counted them.
           include-hidden-files: true
+          retention-days: 3
+          if-no-files-found: error
+
+      # A caller running several calls in one run reads the JDK from
+      # the deployed jars, but nothing the lane uploads records which
+      # Maven deployed them. Record both as Maven reports them, run
+      # from outside the project so its .mvn configuration does not
+      # apply. A single call, with no suffix, uploads nothing more.
+      - name: 'Record the toolchain'
+        id: toolchain
+        if: ${{ !cancelled() && inputs.artifact_suffix != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/toolchain"
+          cd "${RUNNER_TEMP}"
+          mvn --version | tee "${RUNNER_TEMP}/toolchain/toolchain.txt"
+      - name: 'Upload the toolchain record'
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        timeout-minutes: 3
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: maven-merge-toolchain${{ inputs.artifact_suffix }}
+          path: ${{ runner.temp }}/toolchain/toolchain.txt
           retention-days: 3
           if-no-files-found: error
 
@@ -1165,7 +1222,7 @@ jobs:
           # Distinct from the verify lane's sbom-files-maven, since
           # download-artifact resolves a shared name to the newest
           # upload in the run.
-          name: sbom-files-maven-merge
+          name: sbom-files-maven-merge${{ inputs.artifact_suffix }}
           path: sbom-cyclonedx.*
           retention-days: 45
           if-no-files-found: error
@@ -1238,7 +1295,7 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: maven-merge-m2repo
+          name: maven-merge-m2repo${{ inputs.artifact_suffix }}
           path: m2repo
 
       # A merge lane that skipped its publish would leave the SNAPSHOT
@@ -1372,7 +1429,7 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
         with:
-          name: sbom-files-maven-merge
+          name: sbom-files-maven-merge${{ inputs.artifact_suffix }}
 
       - name: 'Grype audit SBOM'
         id: grype-audit
@@ -1383,3 +1440,6 @@ jobs:
           fail-on: 'medium'
           permit-fail: 'true'
           github-token: ${{ secrets.GITHUB_TOKEN }}
+          # The action's default name, with the suffix that keeps each
+          # call's reports apart.
+          artifact-name: grype-scan-results${{ inputs.artifact_suffix }}

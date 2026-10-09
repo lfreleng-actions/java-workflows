@@ -17,7 +17,10 @@
 #   expansion, against the vendored script at the pinned SHA;
 # - the Gerrit submodule initialisation, against a local change that
 #   adds a submodule, which a plain 'git submodule update' skips;
-# - the submodule wiring of every checkout in all three lanes.
+# - the submodule wiring of every checkout in all three lanes;
+# - the Maven lanes' artifact_suffix, on every artefact name they
+#   choose for an upload or a download, so a matrix of calls cannot
+#   cross them.
 #
 # Run from the repository root: bash .github/scripts/wiring-check.sh
 
@@ -711,6 +714,50 @@ extract "${maven}" build "${init_step}" "${init}"
     exit 1
   fi
 ) || status=1
+
+# A matrix calls a lane once per cell in one run, and download-artifact
+# resolves a name to the newest upload, so every artefact name a Maven
+# lane chooses, for an upload or a download, must end with the call's
+# suffix. A name without it would hand one cell another cell's SBOM
+# or, in the merge lane, another cell's m2repo to publish. The guard
+# covers each step that names an artefact: upload-artifact,
+# download-artifact, and the actions the lanes pass a name to.
+# repository-metadata-action takes no name; it suffixes its upload
+# with a timestamp and a random part of its own, so it cannot collide.
+echo 'Maven lanes: artefact names carry artifact_suffix'
+# The literal expression each name must end with.
+# shellcheck disable=SC2016
+suffix='${{ inputs.artifact_suffix }}'
+for workflow in "${maven}" "${merge}"; do
+  names="$(yq -o=json '.' "${workflow}" | jq -r '.jobs[].steps[]?
+    | select((.uses // "")
+      | test("^(actions/(upload|download)-artifact|lfreleng-actions/(maven-build-action|grype-scan-action))@"))
+    | select(.with["artifact-upload"] != "false")
+    | "\(.name)\t\(.with.name // .with["artifact-name"] // "")"')"
+  count=0
+  while IFS=$'\t' read -r step name; do
+    [ -n "${step}" ] || continue
+    count=$((count + 1))
+    case "${name}" in
+      *"${suffix}") ;;
+      *) fail "${workflow}: '${step}' names '${name:-its default}'" \
+        'without the artifact_suffix' ;;
+    esac
+  done <<< "${names}"
+  echo "  ${workflow}: ${count} artefact names checked"
+  check="${tmp}/suffix.sh"
+  STEP='Validate artifact_suffix' yq -e '.jobs[].steps[]
+    | select(.name == strenv(STEP)) | .run' "${workflow}" > "${check}"
+  for value in '-maven-3.10-java-25' '-a' '-4.0_rc.7'; do
+    expect pass "${workflow}: suffix '${value}' accepted" "${check}" \
+      "ARTIFACT_SUFFIX=${value}"
+  done
+  for value in 'maven' '-' '-a/b' '-a b' '-a:b' \
+    "-$(printf 'x%.0s' {1..65})" $'-a\n::warning::injected'; do
+    expect fail "${workflow}: suffix '${value}' rejected" "${check}" \
+      "ARTIFACT_SUFFIX=${value}"
+  done
+done
 
 if [ "${status}" -eq 0 ]; then
   echo 'Wiring check passed ✅'
