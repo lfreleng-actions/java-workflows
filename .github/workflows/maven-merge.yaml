@@ -1109,7 +1109,7 @@ jobs:
       # every job, never the publish alone; see 'Refuse a stale m2repo'.
       - name: 'Upload the m2repo'
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           # Lane-specific: a caller's run shares one artifact namespace
           # across every lane it calls.
@@ -1140,7 +1140,7 @@ jobs:
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         timeout-minutes: 3
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: maven-merge-toolchain${{ inputs.artifact_suffix }}
           path: ${{ runner.temp }}/toolchain/toolchain.txt
@@ -1217,7 +1217,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: 3
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           # Distinct from the verify lane's sbom-files-maven, since
           # download-artifact resolves a shared name to the newest

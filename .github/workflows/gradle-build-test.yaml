@@ -570,7 +570,7 @@ jobs:
       - name: 'Upload the toolchain record'
         if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: gradle-toolchain${{ inputs.artifact_suffix }}
           path: ${{ runner.temp }}/toolchain/toolchain.txt
@@ -602,7 +602,7 @@ jobs:
       - name: 'Upload JUnit reports'
         if: ${{ always() && steps.reports.outputs.found == '1' }}
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: gradle-junit-reports${{ inputs.artifact_suffix }}
           path: junit-reports
@@ -671,7 +671,7 @@ jobs:
         # yamllint disable-line rule:line-length
         if: ${{ always() && inputs.upload_build_artifacts && steps.build-artifacts.outputs.count != '0' }}
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: gradle-build-artifacts${{ inputs.artifact_suffix }}
           path: build-artifacts
@@ -831,7 +831,7 @@ jobs:
         # yamllint disable-line rule:line-length
         if: ${{ !cancelled() && steps.sbom.outcome == 'success' && steps.sbom.outputs.skipped != 'true' }}
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           # Lane-specific: a caller invoking both the Maven and Gradle
           # workflows shares one run, and so one artifact namespace.
@@ -943,7 +943,7 @@ jobs:
         if: ${{ !cancelled() && steps.cbom.outcome == 'success' && steps.cbom.outputs.file_count != '0' }}
         continue-on-error: true
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           # Lane-specific for the same reason as the SBOM upload.
           name: cbom-files-gradle${{ inputs.artifact_suffix }}
