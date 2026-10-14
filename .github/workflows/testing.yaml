@@ -90,7 +90,7 @@ jobs:
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           egress-policy: 'block'
           allowed-endpoints: >
@@ -183,7 +183,7 @@ jobs:
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           egress-policy: 'block'
           allowed-endpoints: >
@@ -233,7 +233,7 @@ jobs:
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           egress-policy: 'block'
           allowed-endpoints: >
@@ -298,7 +298,7 @@ jobs:
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           egress-policy: 'block'
           # The lane adds its nexus_server endpoint the same way
@@ -416,7 +416,7 @@ jobs:
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           egress-policy: 'block'
           allowed-endpoints: >
@@ -470,7 +470,7 @@ jobs:
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           egress-policy: 'block'
           allowed-endpoints: >
@@ -532,7 +532,7 @@ jobs:
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           egress-policy: 'block'
           allowed-endpoints: >
@@ -598,7 +598,7 @@ jobs:
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           egress-policy: 'block'
           allowed-endpoints: >
@@ -734,7 +734,7 @@ jobs:
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           egress-policy: 'block'
           allowed-endpoints: >
@@ -816,7 +816,7 @@ jobs:
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
-        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
         with:
           egress-policy: 'block'
           allowed-endpoints: >
