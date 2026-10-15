@@ -373,6 +373,28 @@ on:
         description: 'Maven global settings.xml content (masked secret)'
         required: false
 
+    # The build artefact upload_build_artifacts asks for, so a caller's
+    # next job (a container build, a publish) can download it without
+    # re-deriving a name that depends on the run. The README documents
+    # the layout of each shape.
+    outputs:
+      build_artifact_name:
+        description: >-
+          Name of the uploaded build artefact, artifact_suffix
+          included; empty when nothing was uploaded.
+        value: ${{ jobs.build.outputs.build_artifact_name }}
+      build_artifact_shape:
+        description: >-
+          Layout of the build artefact: 'm2repo' (a Maven repository
+          tree a deploy phase wrote), 'reactor' (packaged files at
+          their paths below path_prefix) or 'none'.
+        value: ${{ jobs.build.outputs.build_artifact_shape }}
+      build_artifact_count:
+        description: >-
+          Number of files collected into the build artefact: jars,
+          wars and ears, plus POMs for the m2repo shape; 0 for none.
+        value: ${{ jobs.build.outputs.build_artifact_count }}
+
 permissions: {}
 
 jobs:
@@ -519,6 +541,15 @@ jobs:
       m2repo_exists: ${{ steps.build.outputs.m2repo_exists }}
       m2repo_path: ${{ steps.build.outputs.m2repo_path }}
       artifact_count: ${{ steps.build.outputs.artifact_count }}
+      # Set from the upload's own outcome, so a name is never published
+      # for an artefact that did not upload. Without upload_build_artifacts
+      # the collect step does not run, and the shape falls back to none.
+      # yamllint disable-line rule:line-length
+      build_artifact_name: ${{ steps.upload-build-artifacts.outcome == 'success' && format('maven-build-artifacts-{0}{1}', steps.build-artifacts.outputs.shape, inputs.artifact_suffix) || '' }}
+      # yamllint disable-line rule:line-length
+      build_artifact_shape: ${{ steps.upload-build-artifacts.outcome == 'success' && steps.build-artifacts.outputs.shape || 'none' }}
+      # yamllint disable-line rule:line-length
+      build_artifact_count: ${{ steps.upload-build-artifacts.outcome == 'success' && steps.build-artifacts.outputs.count || '0' }}
     permissions:
       contents: read
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
@@ -894,7 +925,7 @@ jobs:
             # not the compiled classes or unpacked dependencies below it.
             # Searched from inside path_prefix, so each file keeps its
             # path below it whatever form the prefix takes ('sub',
-            # './sub' or 'sub/'), where a consumer of the artefact expects it.
+            # './sub' or 'sub/'), as the README's layout contract says.
             shape="reactor"
             cd "${PATH_PREFIX}"
             while IFS= read -r -d '' dir; do
@@ -929,6 +960,7 @@ jobs:
           echo "Collected ${count} file(s) as '${shape}' layout"
 
       - name: 'Upload build artefacts'
+        id: upload-build-artifacts
         # yamllint disable-line rule:line-length
         if: ${{ always() && inputs.upload_build_artifacts && steps.build-artifacts.outputs.count != '0' }}
         # yamllint disable-line rule:line-length

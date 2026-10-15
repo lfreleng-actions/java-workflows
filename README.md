@@ -172,6 +172,57 @@ Fixing it needs explicit metadata inputs on `cbom-action`.
 
 <!-- markdownlint-enable MD013 -->
 
+### Build artefacts
+
+Set `upload_build_artifacts: true` and either lane uploads its packaged
+output, kept for `build_artifact_retention_days` (default 7). Each lane
+publishes the artefact as workflow outputs, so a caller's next job, a
+container build or a publish, can download it without re-deriving a
+name that depends on the run:
+
+| Output                 | Value                                         |
+| ---------------------- | --------------------------------------------- |
+| `build_artifact_name`  | The artefact's name; empty when none uploaded |
+| `build_artifact_shape` | `m2repo`, `reactor` or `none`                 |
+| `build_artifact_count` | Jars, wars and ears collected (plus POMs)     |
+
+The shape is the layout contract:
+
+- **`reactor`.** Each packaged file sits at its path below `path_prefix`:
+  a Maven module's `target/` files (`app/target/app-1.0.jar`), a Gradle
+  project's `build/libs/` files (`app/build/libs/app-1.0.jar`), nested
+  projects at their full depth. Download the artefact into the
+  directory `path_prefix` names, and each module finds its output where
+  its own build left it: a Dockerfile in `app/` can `COPY target/*.jar`
+  (Maven) or `COPY build/libs/*.jar` (Gradle). The Maven lane takes this
+  shape when no deploy phase ran, as with its default `clean install`,
+  and the Gradle lane takes no other.
+- **`m2repo`.** A Maven repository tree (`groupId/artifactId/version/`)
+  under a top-level `m2repo/` directory, from a deploy phase, as Nexus
+  staging and `nexus-publish-action` consume it. The Maven lane alone
+  produces it, when `mvn_phases` deploys.
+- **`none`.** The lane uploaded nothing: `upload_build_artifacts` was
+  off, the build packaged nothing, or the upload failed. The name is
+  then empty.
+
+```yaml
+jobs:
+  build-test:
+    uses: lfreleng-actions/java-workflows/.github/workflows/maven-build-test.yaml@<sha>
+    with:
+      upload_build_artifacts: true
+  image:
+    needs: build-test
+    if: needs.build-test.outputs.build_artifact_shape == 'reactor'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<sha>
+      - uses: actions/download-artifact@<sha>
+        with:
+          name: ${{ needs.build-test.outputs.build_artifact_name }}
+          path: .  # path_prefix: each jar returns to its module
+```
+
 ## Maven merge lane
 
 `maven-merge.yaml` publishes Maven SNAPSHOTs to a Nexus 2 snapshot
