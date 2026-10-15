@@ -874,7 +874,7 @@ jobs:
         run: |
           # Stage the build output under a single directory for upload.
           set -euo pipefail
-          dest="build-artifacts"
+          dest="${GITHUB_WORKSPACE}/build-artifacts"
           shape="none"
           count=0
 
@@ -892,16 +892,20 @@ jobs:
             # No deploy phase ran. Take the reactor's packaged output:
             # files sitting directly in a module's target/ directory,
             # not the compiled classes or unpacked dependencies below it.
+            # Searched from inside path_prefix, so each file keeps its
+            # path below it whatever form the prefix takes ('sub',
+            # './sub' or 'sub/'), where a consumer of the artefact expects it.
             shape="reactor"
+            cd "${PATH_PREFIX}"
             while IFS= read -r -d '' dir; do
               for f in "${dir}"/*.jar "${dir}"/*.war "${dir}"/*.ear; do
                 [ -f "${f}" ] || continue
-                rel="${f#"${PATH_PREFIX}/"}"
+                rel="${f#./}"
                 mkdir -p "${dest}/$(dirname "${rel}")"
                 cp "${f}" "${dest}/${rel}"
                 count=$((count + 1))
               done
-            done < <(find "${PATH_PREFIX}" -type d -name target -print0)
+            done < <(find . -type d -name target -print0)
           fi
 
           if [ "${count}" -eq 0 ]; then

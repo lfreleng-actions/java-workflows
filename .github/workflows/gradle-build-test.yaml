@@ -641,19 +641,23 @@ jobs:
           PATH_PREFIX: ${{ inputs.path_prefix }}
         run: |
           # Stage the build output under a single directory for upload.
+          # Searched from inside path_prefix, so each file keeps its path
+          # below it whatever form the prefix takes ('sub', './sub' or
+          # 'sub/'), where a consumer of the artefact expects it.
           set -euo pipefail
-          dest="build-artifacts"
+          dest="${GITHUB_WORKSPACE}/build-artifacts"
           count=0
 
+          cd "${PATH_PREFIX}"
           while IFS= read -r -d '' dir; do
             for f in "${dir}"/*.jar "${dir}"/*.war "${dir}"/*.ear; do
               [ -f "${f}" ] || continue
-              rel="${f#"${PATH_PREFIX}/"}"
+              rel="${f#./}"
               mkdir -p "${dest}/$(dirname "${rel}")"
               cp "${f}" "${dest}/${rel}"
               count=$((count + 1))
             done
-          done < <(find "${PATH_PREFIX}" -type d -path '*/build/libs' -print0)
+          done < <(find . -type d -path '*/build/libs' -print0)
 
           echo "count=${count}" >> "$GITHUB_OUTPUT"
 
