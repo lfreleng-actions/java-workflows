@@ -123,12 +123,23 @@ artefact name (`maven-build-artifacts-m2repo` or
 `maven-build-artifacts-reactor`), so a consumer knows what it has
 without inspecting the contents. Note the lane's default `mvn_phases` is
 `clean install`, which produces the reactor shape; `m2repo` appears only
-when a caller asks for `deploy`. The build job also surfaces
-`m2repo_exists`, `m2repo_path` and `artifact_count` as job outputs.
+when a caller asks for `deploy`.
 
 Gradle has no `m2repo` equivalent in a plain build, so its lane collects
 one shape — each module's `build/libs` output — and names the artefact
-`gradle-build-artifacts`.
+`gradle-build-artifacts`, which the reactor shape describes too.
+
+Both lanes publish the artefact as workflow outputs
+(`build_artifact_name`, `build_artifact_shape`, `build_artifact_count`),
+so a caller chaining a container build can download it without
+re-deriving a name that depends on the run; the README documents the
+layout each shape guarantees. The outputs come from the upload step's
+own outcome, so a name is never published for an artefact that did not
+upload. The reactor shape keeps each file at its path below
+`path_prefix`, which the collect step guarantees by searching from
+inside `path_prefix` rather than stripping it from each path: stripping
+`${PATH_PREFIX}/` missed a prefix written with a trailing slash and left
+the whole prefix in every path.
 
 A global `settings.xml` (which commonly carries Nexus server credentials)
 is never accepted as a plain input: the workflow declares a

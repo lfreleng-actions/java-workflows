@@ -426,7 +426,8 @@ jobs:
         # yamllint disable-line rule:line-length
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
-          name: maven-build-artifacts-reactor
+          # By the name the lane publishes, as a caller would
+          name: ${{ needs.maven-pom-test.outputs.build_artifact_name }}
           path: build-artifacts
 
       - name: 'Assert the build ran the selected POM'
@@ -447,6 +448,108 @@ jobs:
             status=1
           fi
           exit "${status}"
+
+  # Proves each build lane publishes its build artefact's name, shape
+  # and count as workflow outputs a caller can use, and that the
+  # artefact keeps the README's layout contract. Each row downloads the
+  # artefact by the name its lane published, as a caller chaining a
+  # container build would. maven-build-test uploads nothing, so it
+  # holds the shape none to an empty name.
+  build-artifact-check:
+    name: 'Build Artefact Check (${{ matrix.lane }})'
+    needs: [maven-build-test, maven-pom-test, gradle-build-test]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: 'maven'
+            call: 'maven-pom-test'
+            # yamllint disable-line rule:line-length
+            name: ${{ needs.maven-pom-test.outputs.build_artifact_name }}
+            shape: ${{ needs.maven-pom-test.outputs.build_artifact_shape }}
+            count: ${{ needs.maven-pom-test.outputs.build_artifact_count }}
+            want_name: 'maven-build-artifacts-reactor'
+            want_shape: 'reactor'
+            expect: 'core/target/test-maven-core-1.0.0-SNAPSHOT.jar'
+          - lane: 'maven'
+            call: 'maven-build-test'
+            # yamllint disable-line rule:line-length
+            name: ${{ needs.maven-build-test.outputs.build_artifact_name }}
+            # yamllint disable-line rule:line-length
+            shape: ${{ needs.maven-build-test.outputs.build_artifact_shape }}
+            # yamllint disable-line rule:line-length
+            count: ${{ needs.maven-build-test.outputs.build_artifact_count }}
+            want_name: ''
+            want_shape: 'none'
+            expect: ''
+          # The nested project keeps its depth below path_prefix
+          - lane: 'gradle'
+            call: 'gradle-build-test'
+            # yamllint disable-line rule:line-length
+            name: ${{ needs.gradle-build-test.outputs.build_artifact_name }}
+            # yamllint disable-line rule:line-length
+            shape: ${{ needs.gradle-build-test.outputs.build_artifact_shape }}
+            # yamllint disable-line rule:line-length
+            count: ${{ needs.gradle-build-test.outputs.build_artifact_count }}
+            want_name: 'gradle-build-artifacts'
+            want_shape: 'reactor'
+            expect: >-
+              core/build/libs/core-1.0.0-SNAPSHOT.jar
+              app/build/libs/app-1.0.0-SNAPSHOT.jar
+              app/nested/build/libs/nested-1.0.0-SNAPSHOT.jar
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@51ef68401547a8b648275129b9a21544612596d5  # v0.13.1
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@ccd8616d44fd3846e67624a50d5aad6d37bf2d25  # v2.22.1
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # For the check script only; the fixture is not checked out here.
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: 'Download the build artefact by its published name'
+        if: matrix.name != ''
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: ${{ matrix.name }}
+          path: build-artifact
+
+      - name: 'Assert the outputs and the layout (${{ matrix.call }})'
+        shell: bash
+        env:
+          LANE: ${{ matrix.lane }}
+          NAME: ${{ matrix.name }}
+          SHAPE: ${{ matrix.shape }}
+          COUNT: ${{ matrix.count }}
+          WANT_NAME: ${{ matrix.want_name }}
+          WANT_SHAPE: ${{ matrix.want_shape }}
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          # Passed as published: a lane that stopped publishing an
+          # output must fail here, not pass as shape none.
+          # shellcheck disable=SC2086  # one argument per expected path
+          bash .github/scripts/build-artifact-check.sh "${LANE}" \
+            build-artifact "${NAME}" "${SHAPE}" "${COUNT}" \
+            "${WANT_NAME}" "${WANT_SHAPE}" ${EXPECT}
 
   # Exercises what the fixtures cannot: the guard steps' rejection
   # paths, the Gerrit submodule initialisation, and the submodule
@@ -640,6 +743,9 @@ jobs:
       # The fixture carries a submodule, which submodule-check proves
       # this call checked out.
       checkout_submodules: true
+      # build-artifact-check reads the artefact through the lane's
+      # outputs.
+      upload_build_artifacts: true
 
   # The Maven releases and Java versions the estate tests against,
   # from the workflow the Java/Maven repositories are to read them from.

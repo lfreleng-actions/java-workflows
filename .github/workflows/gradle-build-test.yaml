@@ -298,6 +298,27 @@ on:
         type: string
         default: ''
 
+    # The build artefact upload_build_artifacts asks for, so a caller's
+    # next job (a container build, a publish) can download it without
+    # re-deriving its name. The README documents the layout.
+    outputs:
+      build_artifact_name:
+        description: >-
+          Name of the uploaded build artefact, artifact_suffix
+          included; empty when nothing was uploaded.
+        value: ${{ jobs.build.outputs.build_artifact_name }}
+      build_artifact_shape:
+        description: >-
+          Layout of the build artefact: 'reactor' (each module's
+          build/libs files at their paths below path_prefix) or 'none'.
+          The Maven lane's m2repo shape has no Gradle counterpart.
+        value: ${{ jobs.build.outputs.build_artifact_shape }}
+      build_artifact_count:
+        description: >-
+          Number of jars, wars and ears collected into the build
+          artefact; 0 for none.
+        value: ${{ jobs.build.outputs.build_artifact_count }}
+
 permissions: {}
 
 jobs:
@@ -437,6 +458,14 @@ jobs:
       # Read by the Grype job, which runs whenever an SBOM was uploaded,
       # including after a test failure.
       sbom_uploaded: ${{ steps.upload-sbom.outcome == 'success' }}
+      # Set from the upload's own outcome, so a name is never published
+      # for an artefact that did not upload.
+      # yamllint disable-line rule:line-length
+      build_artifact_name: ${{ steps.upload-build-artifacts.outcome == 'success' && format('gradle-build-artifacts{0}', inputs.artifact_suffix) || '' }}
+      # yamllint disable-line rule:line-length
+      build_artifact_shape: ${{ steps.upload-build-artifacts.outcome == 'success' && 'reactor' || 'none' }}
+      # yamllint disable-line rule:line-length
+      build_artifact_count: ${{ steps.upload-build-artifacts.outcome == 'success' && steps.build-artifacts.outputs.count || '0' }}
     permissions:
       contents: read
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
@@ -641,19 +670,23 @@ jobs:
           PATH_PREFIX: ${{ inputs.path_prefix }}
         run: |
           # Stage the build output under a single directory for upload.
+          # Searched from inside path_prefix, so each file keeps its path
+          # below it whatever form the prefix takes ('sub', './sub' or
+          # 'sub/'), as the README's layout contract says.
           set -euo pipefail
-          dest="build-artifacts"
+          dest="${GITHUB_WORKSPACE}/build-artifacts"
           count=0
 
+          cd "${PATH_PREFIX}"
           while IFS= read -r -d '' dir; do
             for f in "${dir}"/*.jar "${dir}"/*.war "${dir}"/*.ear; do
               [ -f "${f}" ] || continue
-              rel="${f#"${PATH_PREFIX}/"}"
+              rel="${f#./}"
               mkdir -p "${dest}/$(dirname "${rel}")"
               cp "${f}" "${dest}/${rel}"
               count=$((count + 1))
             done
-          done < <(find "${PATH_PREFIX}" -type d -path '*/build/libs' -print0)
+          done < <(find . -type d -path '*/build/libs' -print0)
 
           echo "count=${count}" >> "$GITHUB_OUTPUT"
 
@@ -668,6 +701,7 @@ jobs:
           echo "Collected ${count} file(s) from build/libs"
 
       - name: 'Upload build artefacts'
+        id: upload-build-artifacts
         # yamllint disable-line rule:line-length
         if: ${{ always() && inputs.upload_build_artifacts && steps.build-artifacts.outputs.count != '0' }}
         # yamllint disable-line rule:line-length
