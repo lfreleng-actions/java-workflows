@@ -807,21 +807,23 @@ build ─┬─ sign ─┬─ stage ────────────┐
   storage record for an image pushed to a registry (`push-to-registry`),
   which file subjects never are. It runs here, in the run that
   built them, because provenance describes the run that makes it:
-  `actions/attest-build-provenance` builds its predicate from the
-  current job's OIDC claims (the commit, ref, workflow and run). Run
-  from the later release workflow, it would name the release-file merge
-  as the source and the release workflow as the builder. Those claims
-  name the commit that triggered the run, though, not the one the build
-  checked out: a stage of a Gerrit refspec builds a patchset the
-  dispatch never named. The job therefore makes two attestations over
-  the same subjects. The standard build provenance binds the artefacts
-  to this run and workflow; a second, with a lane-defined predicate type
-  made through `actions/attest`, records the refspec or branch asked
-  for, the source revision checked out and the release commit built
-  from it, taken from the build job's outputs. Both carry this run's
-  signing identity. The subjects are the unsigned tree: signing then
-  adds `.asc` files beside them without changing them, and the release
-  workflow verifies those signatures on their own.
+  `actions/attest`, given no predicate, builds SLSA build provenance
+  from the current job's OIDC claims (the commit, ref, workflow and
+  run). Run from the later release workflow, it would name the
+  release-file merge as the source and the release workflow as the
+  builder. Those claims name the commit that triggered the run, though,
+  not the one the build checked out: a stage of a Gerrit refspec builds
+  a patchset the dispatch never named. The job therefore makes two
+  `actions/attest` calls over the same subjects, told apart by
+  predicate. The first
+  supplies none and gets the default SLSA build provenance, which binds
+  the artefacts to this run and workflow; the second passes a
+  lane-defined `predicate-type` and `predicate` that record the refspec
+  or branch asked for, the source revision checked out and the release
+  commit built from it, taken from the build job's outputs. Both carry
+  this run's signing identity. The subjects are the unsigned tree:
+  signing then adds `.asc` files beside them without changing them, and
+  the release workflow verifies those signatures on their own.
 
 The Jenkins job runs signing in the same job as the build, so the
 signing credentials sit beside the project's code (gap analysis G-09).
