@@ -205,6 +205,16 @@ The shape is the layout contract:
   off, the build packaged nothing, or the upload failed. The name is
   then empty.
 
+To build a container image from a `reactor` artefact, chain the lane to
+the `docker-workflows` `build-test.yaml` workflow through its
+`build_artifacts` input. That input downloads each named artefact into
+`path_prefix` by default, so the `reactor` layout lands where each
+module's Dockerfile expects it. The `docker-workflows` repository holds
+the full, runnable caller in
+[`examples/build-artifacts/github.yaml`](https://github.com/lfreleng-actions/docker-workflows/blob/main/examples/build-artifacts/github.yaml).
+
+<!-- markdownlint-disable MD013 -->
+
 ```yaml
 jobs:
   build-test:
@@ -214,14 +224,12 @@ jobs:
   image:
     needs: build-test
     if: needs.build-test.outputs.build_artifact_shape == 'reactor'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@<sha>
-      - uses: actions/download-artifact@<sha>
-        with:
-          name: ${{ needs.build-test.outputs.build_artifact_name }}
-          path: .  # path_prefix: each jar returns to its module
+    uses: lfreleng-actions/docker-workflows/.github/workflows/build-test.yaml@914d4da83c50b6455571934eafe6e10ad507f17b  # v0.11.0
+    with:
+      build_artifacts: '[{"name": "${{ needs.build-test.outputs.build_artifact_name }}"}]'
 ```
+
+<!-- markdownlint-enable MD013 -->
 
 ## Maven merge lane
 
