@@ -255,7 +255,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@ac32415b91e0b6db1166bc451024c472cdbcbd3d'  # v0.16.8
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
 
       # --- Timeouts (minutes) ---
       # The test summary, SBOM and CBOM run as steps inside the build
