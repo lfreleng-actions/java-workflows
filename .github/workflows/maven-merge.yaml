@@ -734,7 +734,7 @@ jobs:
       # the deploy, from v0.5.2, builds on the Temurin requested here.
       - name: 'Set up Java'
         # yamllint disable-line rule:line-length
-        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6  # v6.0.1
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad  # v6.1.0
         with:
           # yamllint disable-line rule:line-length
           java-version: ${{ inputs.java_version != '' && inputs.java_version || steps.metadata.outputs.java_version || '21' }}
