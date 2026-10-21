@@ -896,7 +896,7 @@ jobs:
       - name: 'Fetch published SNAPSHOT metadata'
         id: fetch
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-snapshot-metadata-action@44ed26f32ea50d56e6361305fe5896532a560529  # v0.1.0
+        uses: lfreleng-actions/maven-snapshot-metadata-action@85152ef5a7f99d05af19c08f9f2fa31e7ef19725  # v0.1.1
         with:
           mode: 'fetch'
           nexus_server: ${{ inputs.nexus_server }}
@@ -957,7 +957,7 @@ jobs:
       - name: 'Prune unchanged SNAPSHOT metadata'
         id: prune
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-snapshot-metadata-action@44ed26f32ea50d56e6361305fe5896532a560529  # v0.1.0
+        uses: lfreleng-actions/maven-snapshot-metadata-action@85152ef5a7f99d05af19c08f9f2fa31e7ef19725  # v0.1.1
         with:
           mode: 'prune'
           m2repo_path: ${{ steps.build.outputs.m2repo_path }}
