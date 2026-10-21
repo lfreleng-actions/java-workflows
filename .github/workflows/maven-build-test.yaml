@@ -871,7 +871,7 @@ jobs:
         if: ${{ !cancelled() && steps.reports.outputs.found == '1' }}
         timeout-minutes: ${{ inputs.tests_timeout_minutes }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/junit-test-report-action@cbc41af8f2e0cf6363d5b04df00025f938bf9a5e  # v0.0.2
+        uses: lfreleng-actions/junit-test-report-action@85e6bbd4dfcc434acf458fa1b49d55f367f802cc  # v0.0.3
         with:
           report-paths: 'junit-reports/**/*.xml'
           fail-on-failure: ${{ !inputs.test_permit_fail }}
