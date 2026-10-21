@@ -1042,7 +1042,7 @@ jobs:
         if: ${{ !cancelled() && inputs.sbom_enabled && steps.settings.outcome == 'success' }}
         timeout-minutes: ${{ inputs.sbom_timeout_minutes }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/sbom-action@398aec0a5f332a0414246a6d9d45678ef4a95e98  # v0.3.0
+        uses: lfreleng-actions/sbom-action@cd6b02f4d099fc19153b505c9faa7bd01ccfa0e5  # v0.4.0
         with:
           backend: 'cyclonedx'
           # Named rather than left to 'auto', so the lane states the
