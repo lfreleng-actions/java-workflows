@@ -923,7 +923,7 @@ jobs:
       - name: 'Build and deploy to the m2repo'
         id: build
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-build-action@0f09f8024307dbdba2f89286479e0e870f7065ff  # v0.5.3
+        uses: lfreleng-actions/maven-build-action@22149998fae8dd5ef1ffc8890ec0ce3785683983  # v0.5.5
         with:
           path_prefix: ${{ inputs.path_prefix }}
           # yamllint disable-line rule:line-length
