@@ -1348,7 +1348,7 @@ jobs:
       - name: 'Publish the m2repo to Nexus'
         id: publish
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/nexus-publish-action@0b1f7998b05f3667c64648b86f620b3daff8370c  # v1.3.0
+        uses: lfreleng-actions/nexus-publish-action@d929e9053da8383d47c1ae857e8aa4e47f6b1bd9  # v1.3.2
         with:
           nexus_server: ${{ inputs.nexus_server }}
           nexus_username: ${{ needs.validate.outputs.nexus_username }}
