@@ -224,7 +224,7 @@ jobs:
   image:
     needs: build-test
     if: needs.build-test.outputs.build_artifact_shape == 'reactor'
-    uses: lfreleng-actions/docker-workflows/.github/workflows/build-test.yaml@914d4da83c50b6455571934eafe6e10ad507f17b  # v0.11.0
+    uses: lfreleng-actions/docker-workflows/.github/workflows/build-test.yaml@0a748986df8f93fd610655ee4ffe357cf6d06c4a  # v0.11.3
     with:
       build_artifacts: '[{"name": "${{ needs.build-test.outputs.build_artifact_name }}"}]'
 ```

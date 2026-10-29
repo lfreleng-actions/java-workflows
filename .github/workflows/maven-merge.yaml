@@ -468,7 +468,7 @@ jobs:
       - name: 'Gather repository metadata'
         id: repo-metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/repository-metadata-action@b2078d32ca207a0e110b2157a95271a35688c8e7  # v0.3.2
+        uses: lfreleng-actions/repository-metadata-action@2206d754f65f1a90f57b49be546712c5f594def2  # v0.3.3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           github_summary: 'true'
@@ -716,7 +716,7 @@ jobs:
       - name: 'Detect build metadata'
         id: metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/build-metadata-action@cc5d2da580c58c96455ebc0cb1004352bece2baa  # v0.10.0
+        uses: lfreleng-actions/build-metadata-action@f5788fd76522ba71a079caaa77b7e50d7a7c5d0f  # v0.11.1
         with:
           path_prefix: ${{ steps.pom.outputs.metadata_path }}
 
@@ -896,7 +896,7 @@ jobs:
       - name: 'Fetch published SNAPSHOT metadata'
         id: fetch
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-snapshot-metadata-action@85152ef5a7f99d05af19c08f9f2fa31e7ef19725  # v0.1.1
+        uses: lfreleng-actions/maven-snapshot-metadata-action@063f53e596f92e98f16eac8b131005b712da6a95  # v0.1.2
         with:
           mode: 'fetch'
           nexus_server: ${{ inputs.nexus_server }}
@@ -957,7 +957,7 @@ jobs:
       - name: 'Prune unchanged SNAPSHOT metadata'
         id: prune
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-snapshot-metadata-action@85152ef5a7f99d05af19c08f9f2fa31e7ef19725  # v0.1.1
+        uses: lfreleng-actions/maven-snapshot-metadata-action@063f53e596f92e98f16eac8b131005b712da6a95  # v0.1.2
         with:
           mode: 'prune'
           m2repo_path: ${{ steps.build.outputs.m2repo_path }}
@@ -1195,7 +1195,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(steps.sbom-budget.outputs.minutes) }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/sbom-action@cd6b02f4d099fc19153b505c9faa7bd01ccfa0e5  # v0.4.0
+        uses: lfreleng-actions/sbom-action@73cdda97132f74a64733b238747d34151444da15  # v0.7.0
         with:
           backend: 'cyclonedx'
           dependency_manager: 'maven'
@@ -1348,7 +1348,7 @@ jobs:
       - name: 'Publish the m2repo to Nexus'
         id: publish
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/nexus-publish-action@0b1f7998b05f3667c64648b86f620b3daff8370c  # v1.3.0
+        uses: lfreleng-actions/nexus-publish-action@d929e9053da8383d47c1ae857e8aa4e47f6b1bd9  # v1.3.2
         with:
           nexus_server: ${{ inputs.nexus_server }}
           nexus_username: ${{ needs.validate.outputs.nexus_username }}
@@ -1434,7 +1434,7 @@ jobs:
       - name: 'Grype audit SBOM'
         id: grype-audit
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/grype-scan-action@9a85f35a26a71dafb2fa23a6f83a640d526ee559  # v0.2.0
+        uses: lfreleng-actions/grype-scan-action@7b6b12b60de8ff051f2f8021439c1ef0b82b98c1  # v0.4.0
         with:
           sbom: 'sbom-cyclonedx.json'
           fail-on: 'medium'
