@@ -325,7 +325,7 @@ jobs:
       # fixture's group, so every module takes the first-publish path.
       - name: 'Fetch published SNAPSHOT metadata'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-snapshot-metadata-action@85152ef5a7f99d05af19c08f9f2fa31e7ef19725  # v0.1.1
+        uses: lfreleng-actions/maven-snapshot-metadata-action@063f53e596f92e98f16eac8b131005b712da6a95  # v0.1.2
         with:
           mode: 'fetch'
           nexus_server: 'https://nexus.onap.org'
@@ -348,7 +348,7 @@ jobs:
         id: unrecorded
         continue-on-error: true
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-snapshot-metadata-action@85152ef5a7f99d05af19c08f9f2fa31e7ef19725  # v0.1.1
+        uses: lfreleng-actions/maven-snapshot-metadata-action@063f53e596f92e98f16eac8b131005b712da6a95  # v0.1.2
         with:
           mode: 'prune'
           check_coordinates: 'true'
@@ -368,7 +368,7 @@ jobs:
 
       - name: 'Prune the reactor alone'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-snapshot-metadata-action@85152ef5a7f99d05af19c08f9f2fa31e7ef19725  # v0.1.1
+        uses: lfreleng-actions/maven-snapshot-metadata-action@063f53e596f92e98f16eac8b131005b712da6a95  # v0.1.2
         with:
           mode: 'prune'
           check_coordinates: 'true'

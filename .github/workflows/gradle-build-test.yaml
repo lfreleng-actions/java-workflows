@@ -407,7 +407,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -442,7 +442,7 @@ jobs:
       - name: 'Gather repository metadata'
         id: repo-metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/repository-metadata-action@b2078d32ca207a0e110b2157a95271a35688c8e7  # v0.3.2
+        uses: lfreleng-actions/repository-metadata-action@2206d754f65f1a90f57b49be546712c5f594def2  # v0.3.3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           github_summary: 'true'
@@ -512,7 +512,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@35e98c8043ec411611e464e296bcfb441a5c5093  # v1.1.2
+        uses: lfreleng-actions/checkout-gerrit-change-action@fb7446a92c01efcfbd967f073b2957ef90ecb49f  # v1.2.0
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -552,7 +552,7 @@ jobs:
       - name: 'Detect build metadata'
         id: metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/build-metadata-action@cc5d2da580c58c96455ebc0cb1004352bece2baa  # v0.10.0
+        uses: lfreleng-actions/build-metadata-action@f5788fd76522ba71a079caaa77b7e50d7a7c5d0f  # v0.11.1
         with:
           path_prefix: ${{ inputs.path_prefix }}
 
@@ -821,7 +821,7 @@ jobs:
         if: ${{ !cancelled() && inputs.sbom_enabled && steps.gradle-args.outcome == 'success' && steps.wrapper.outcome != 'failure' }}
         timeout-minutes: ${{ inputs.sbom_timeout_minutes }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/sbom-action@cd6b02f4d099fc19153b505c9faa7bd01ccfa0e5  # v0.4.0
+        uses: lfreleng-actions/sbom-action@73cdda97132f74a64733b238747d34151444da15  # v0.7.0
         with:
           backend: 'cyclonedx'
           # Named rather than left to 'auto', which resolves a tree
@@ -952,7 +952,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(steps.cbom-budget.outputs.minutes) }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/cbom-action@06a25686fe4ebcbb8c9f28d6948cdca7d65ed852  # v0.0.1
+        uses: lfreleng-actions/cbom-action@ec9253d00fccbe103002ada6067224ec767a7b1c  # v0.0.2
         with:
           path_prefix: ${{ inputs.path_prefix }}
           # Reports go to runner temp, never the workspace. The action
@@ -1039,7 +1039,7 @@ jobs:
       - name: 'Grype audit SBOM'
         id: grype-audit
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/grype-scan-action@9a85f35a26a71dafb2fa23a6f83a640d526ee559  # v0.2.0
+        uses: lfreleng-actions/grype-scan-action@7b6b12b60de8ff051f2f8021439c1ef0b82b98c1  # v0.4.0
         with:
           sbom: 'sbom-cyclonedx.json'
           fail-on: ${{ inputs.grype_fail_on }}
