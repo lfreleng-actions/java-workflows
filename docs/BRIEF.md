@@ -1272,6 +1272,19 @@ request.
   a step-level `if:`. Two steps would both engage the agent, the first
   would win, and audit mode would be silently unreachable. The central
   allow-list is pinned in the `harden_runner_allowlist` default.
+  Every lane workflow exposes the same five hardening inputs, the set
+  rolled out to every `*-workflows` repository: `harden_runner_egress`,
+  `harden_runner_allowlist`, `harden_runner_supplemental_allowlist`
+  (default empty), `harden_runner_supplemental_unpinned` (boolean,
+  default `false`) and `harden_runner_extra_endpoints` (default
+  empty). Each `harden-runner-block-action` step passes all of them
+  through, setting `supplemental_required` whenever a supplemental list
+  is named, so a missing list fails the job at the allow-list step.
+  `tests/test-harden-runner-inputs.sh`, run as a prek hook, fails on any
+  drift from that set, its pass-through form or the action's pin.
+  `java-maven-versions.yaml` takes no inputs and loads no allow-list:
+  its one job publishes static JSON and runs no project code, so its
+  harden-runner step blocks everything but a fixed `github.com:443`.
   The build job additionally honours `build_permit_egress_traffic`
   (boolean, default `false`): when true it runs harden-runner in audit
   for the build job only, which includes the SBOM and CBOM steps — for
