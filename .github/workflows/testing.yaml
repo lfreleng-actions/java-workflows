@@ -86,7 +86,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -179,7 +179,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -229,7 +229,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -294,7 +294,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -412,7 +412,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -508,7 +508,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -569,7 +569,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -631,7 +631,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -697,7 +697,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -751,7 +751,7 @@ jobs:
       # 'lfreleng-actions//' resolves to the organisation list itself,
       # which de-duplication absorbs. The organisation list already
       # carries github.com:443, so the action reports it as redundant.
-      harden_runner_supplemental_allowlist: 'lfreleng-actions//'
+      harden_runner_supplemental_allowlist: 'lfreleng-actions//@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
       harden_runner_supplemental_unpinned: true
       harden_runner_extra_endpoints: 'github.com:443'
 
@@ -844,7 +844,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
@@ -926,7 +926,7 @@ jobs:
         uses: lfreleng-actions/harden-runner-block-action@e5e8179f45aa893b23cc8b5d2e25466355d9c4f8  # v0.14.0
         with:
           # yamllint disable-line rule:line-length
-          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@084d6861688632b2edb6bde3c180145bebf9cc7a'  # v0.17.2
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
           allow_list_summary: 'false'
       - name: 'Harden runner'
         # yamllint disable-line rule:line-length
