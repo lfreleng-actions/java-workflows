@@ -53,6 +53,10 @@ nothing but the SBOM document, runs after it (`->` denotes sequence):
 build -> grype
 ```
 
+Every job after the input checks runs under harden-runner, in `block`
+mode by default; see [Egress allow-list](#egress-allow-list) for the
+inputs that extend what it allows.
+
 The `build` job builds the project once and does everything that
 depends on the result in the same job, so no job checks out, resolves
 or builds it a second time. It detects the project's Java version
@@ -243,6 +247,10 @@ that code. A first job checks the Nexus inputs before anything builds
 input check -> { repository-metadata | build -> { publish | grype } }
 ```
 
+Every job after the input checks runs under harden-runner, in `block`
+mode by default; see [Egress allow-list](#egress-allow-list) for the
+inputs that extend what it allows.
+
 The `build` job checks out the branch head as it stands when the run
 starts, sets up the JDK and Maven the deploy uses, then:
 
@@ -403,6 +411,56 @@ name, and `download-artifact` takes the newest without an error.
 already. A single call leaves the suffix empty and keeps the names
 given in this document.
 
+## Egress allow-list
+
+Every job after the input checks in the three lane workflows loads its
+egress allow-list with `harden-runner-block-action`, then runs
+harden-runner against it. Five inputs, the same in every lane, control
+that list:
+
+<!-- markdownlint-disable MD013 -->
+
+| Input                                  | Type    | Default                       | Effect                                                         |
+| -------------------------------------- | ------- | ----------------------------- | -------------------------------------------------------------- |
+| `harden_runner_egress`                 | string  | `'block'`                     | `'audit'` permits all egress and logs it; anything else blocks |
+| `harden_runner_allowlist`              | string  | organisation list, pinned     | The baseline allow-list                                        |
+| `harden_runner_supplemental_allowlist` | string  | `''`                          | A second list merged with the baseline                         |
+| `harden_runner_supplemental_unpinned`  | boolean | `false`                       | Lets the supplemental list follow its default branch           |
+| `harden_runner_extra_endpoints`        | string  | `''`                          | Inline `host[:port]` endpoints merged into the list            |
+
+<!-- markdownlint-enable MD013 -->
+
+The supplemental list uses the same coordinate grammar as
+`harden_runner_allowlist`. A list in the caller's own organisation may
+omit `@ref` and follow its default branch, so an ONAP caller can track
+its own list as it changes:
+
+```yaml
+    with:
+      harden_runner_supplemental_allowlist: 'onap//'
+      harden_runner_supplemental_unpinned: true
+```
+
+A list in any other organisation must carry a pinned `@ref`; the
+action refuses an unpinned list from outside the caller's
+organisation, whatever `harden_runner_supplemental_unpinned` says.
+
+Naming a supplemental list makes the job depend on it: the workflows
+set the action's `supplemental_required` whenever
+`harden_runner_supplemental_allowlist` is non-empty, so a list the
+action cannot find fails the job at the allow-list step, not at the
+first blocked connection.
+
+`harden_runner_extra_endpoints` takes `host[:port]` tokens separated
+by spaces or newlines. It suits a short-term fix while a change to the
+allow-list lands; the list stays the lasting home for an endpoint, since
+it reaches every caller and keeps a reviewed history.
+
+An unpinned list changes under the caller between runs. The action's
+`supplemental_source` and `supplemental_sha` outputs record which list
+each run loaded and at which commit, so an audit can tell what a given
+run allowed.
+
 ## Supported Java, Maven and Gradle versions
 
 [`.github/workflows/java-maven-versions.yaml`](.github/workflows/java-maven-versions.yaml)
@@ -487,6 +545,14 @@ another JDK built. The Gradle fixture compiles through a Java 17
 toolchain, so for Gradle the launcher JVM in the record is the proof
 of the JDK under test. A lane called without an `artifact_suffix`
 records no toolchain. See [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
+
+The Gradle self-test call also sets the three supplemental
+[egress allow-list](#egress-allow-list) inputs to values that grant
+nothing new, so every pull request runs the pass-through in `block`
+mode. `bash tests/test-harden-runner-inputs.sh`, which a prek hook
+runs, fails when a lane workflow drops one of the five inputs, passes
+one in another form, or pins another release of
+`harden-runner-block-action`.
 
 ## Design
 
