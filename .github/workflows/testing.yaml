@@ -449,6 +449,448 @@ jobs:
           fi
           exit "${status}"
 
+  # Runs the Maven lane under grype_gate_when: dependencies-changed
+  # against a fixture checked out at a pinned commit, which is not the
+  # commit this run is for, so dependency-change-action reports
+  # unresolved by its own rules, writes no sidecar, and the Grype
+  # gate stays armed: the fail-closed path, which every caller takes
+  # on its first run and on any change the detector cannot judge. The
+  # resolved paths run below, on this repository's own fixtures.
+  # Tests, JaCoCo and the CBOM stay off, as in maven-pom-test, and the
+  # suffix keeps this call's artefacts apart from the call above.
+  maven-gate-test:
+    name: 'Maven Build/Test (Grype gate policy)'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: $/.github/workflows/maven-build-test.yaml
+    with:
+      repository: 'lfreleng-actions/test-maven-project'
+      ref: 'a4a75c32d65719559271b1ab8de03ab585927c34'
+      artifact_suffix: '-gate'
+      grype_gate_when: 'dependencies-changed'
+      mvn_params: '-DskipTests'
+      run_jacoco: false
+      cbom_enabled: false
+
+  # Proves the unresolved path gates: the lane publishes the verdict
+  # grype-scan-action reached, and no sidecar artefact exists, since
+  # an unresolved detection writes none and the lane must not fail
+  # for that. The download filters by pattern rather than name: a
+  # name that matches nothing fails the step, a pattern downloads
+  # nothing and leaves the directory empty.
+  gate-check:
+    name: 'Grype Gate Check (unresolved)'
+    needs: maven-gate-test
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Download any dependency-change sidecar'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          pattern: dependency-change-maven-gate
+          path: sidecar
+
+      - name: 'Assert the unresolved path gated'
+        shell: bash
+        env:
+          RESULT: ${{ needs.maven-gate-test.result }}
+          GATE_ACTIVE: ${{ needs.maven-gate-test.outputs.grype_gate_active }}
+          GATE_REASON: ${{ needs.maven-gate-test.outputs.grype_gate_reason }}
+        run: |
+          set -euo pipefail
+          status=0
+          fail() { echo "::error::$*"; status=1; }
+          echo "Lane result: ${RESULT}"
+          echo "gate-active: ${GATE_ACTIVE}"
+          echo "gate-reason: ${GATE_REASON}"
+          if [ "${RESULT}" != 'success' ]; then
+            fail "the gated lane concluded '${RESULT}', not success"
+          fi
+          if [ "${GATE_ACTIVE}" != 'true' ]; then
+            fail "grype_gate_active is '${GATE_ACTIVE}', not true"
+          fi
+          if [ -d sidecar ] && find sidecar -type f | grep -q .; then
+            find sidecar -type f
+            fail 'an unresolved detection uploaded a sidecar artefact'
+          fi
+          exit "${status}"
+
+  # The resolved path end to end: both lanes build a fixture in this
+  # repository (tests/fixtures/maven and tests/fixtures/gradle), at
+  # the commit this run is for. On a pull request of this repository
+  # the detector resolves by its own rules: HEAD is the run's commit,
+  # the whole-history checkout holds the base, the target branch's
+  # tip, and no symbolic link or submodule anywhere in the repository
+  # can leave it undecided, which grype-gate-check.sh enforces. So a
+  # sidecar always reaches the Grype job here, and gate-resolved-check
+  # holds the lane to what any resolved run must satisfy: a sidecar
+  # whose base is the commit's parent and whose changed flag the
+  # lane's grype_gate_active follows. Which flag the pull request's
+  # own diff earns is not re-derived here; gate-verdict-cases below
+  # proves each value on a change built for it. The Gradle fixture
+  # carries no wrapper, so the lane pins the Gradle it provisions; the
+  # version matches the current line in java-maven-versions.yaml.
+  maven-gate-resolved:
+    name: 'Maven Build/Test (Grype gate resolved)'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: $/.github/workflows/maven-build-test.yaml
+    with:
+      path_prefix: 'tests/fixtures/maven'
+      artifact_suffix: '-gate-resolved'
+      grype_gate_when: 'dependencies-changed'
+      mvn_params: '-DskipTests'
+      run_jacoco: false
+      cbom_enabled: false
+
+  gradle-gate-resolved:
+    name: 'Gradle Build/Test (Grype gate resolved)'
+    permissions:
+      contents: read
+      pull-requests: read  # repository-metadata-action queries PR data
+    uses: $/.github/workflows/gradle-build-test.yaml
+    with:
+      path_prefix: 'tests/fixtures/gradle'
+      gradle_version: '9.8.1'
+      artifact_suffix: '-gate-resolved'
+      grype_gate_when: 'dependencies-changed'
+      cbom_enabled: false
+
+  # Reads each resolved lane's sidecar and verdict. The download is
+  # required: on a pull request of this repository the detector
+  # resolves (see above), so a missing artefact means the sidecar
+  # did not reach it. The check asserts the lane passed, the sidecar
+  # names the commit's parent as its base and a boolean changed flag,
+  # and the lane's grype_gate_active equals that flag: a Grype step
+  # that ignored the sidecar, or a sidecar that never reached it,
+  # fails here. The flag's value is the detector's to decide, and
+  # gate-verdict-cases holds it to a known change.
+  gate-resolved-check:
+    name: 'Grype Gate Check (resolved, ${{ matrix.lane }})'
+    needs: [maven-gate-resolved, gradle-gate-resolved]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: 'maven'
+            result: ${{ needs.maven-gate-resolved.result }}
+            # yamllint disable-line rule:line-length
+            gate_active: ${{ needs.maven-gate-resolved.outputs.grype_gate_active }}
+            # yamllint disable-line rule:line-length
+            gate_reason: ${{ needs.maven-gate-resolved.outputs.grype_gate_reason }}
+          - lane: 'gradle'
+            result: ${{ needs.gradle-gate-resolved.result }}
+            # yamllint disable-line rule:line-length
+            gate_active: ${{ needs.gradle-gate-resolved.outputs.grype_gate_active }}
+            # yamllint disable-line rule:line-length
+            gate_reason: ${{ needs.gradle-gate-resolved.outputs.grype_gate_reason }}
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      # Depth 2 reaches the base the detector compared against on a
+      # pull request, where it is the merge commit's first parent.
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: 'Download the dependency-change sidecar'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: dependency-change-${{ matrix.lane }}-gate-resolved
+          path: sidecar
+
+      - name: 'Assert the gate followed the sidecar'
+        shell: bash
+        env:
+          LANE_RESULT: ${{ matrix.result }}
+          GATE_ACTIVE: ${{ matrix.gate_active }}
+          GATE_REASON: ${{ matrix.gate_reason }}
+        run: |
+          set -euo pipefail
+          status=0
+          fail() { echo "::error::$*"; status=1; }
+          echo "Lane result: ${LANE_RESULT}"
+          echo "gate-active: ${GATE_ACTIVE}"
+          echo "gate-reason: ${GATE_REASON}"
+          if [ "${LANE_RESULT}" != 'success' ]; then
+            fail "the lane concluded '${LANE_RESULT}', not success"
+          fi
+          sidecar='sidecar/dependency-change.json'
+          if [ ! -f "${sidecar}" ]; then
+            fail "no ${sidecar}: the sidecar did not reach its artefact"
+            exit "${status}"
+          fi
+          echo 'Sidecar:'
+          sed 's/^/  | /' "${sidecar}"
+          # 'jq -c' keeps the JSON type: a string "true" prints quoted
+          # and fails the match, as Grype would leave it unresolved.
+          changed="$(jq -c '.changed' "${sidecar}")"
+          case "${changed}" in
+            true | false) ;;
+            *) fail "the sidecar's changed is ${changed}, not a boolean" ;;
+          esac
+          base="$(jq -r '.base // ""' "${sidecar}")"
+          parent="$(git rev-parse HEAD^1)"
+          if [ "${base}" != "${parent}" ]; then
+            fail "the sidecar compared against '${base}', not this" \
+              "commit's parent ${parent}"
+          fi
+          if [ "${GATE_ACTIVE}" != "${changed}" ]; then
+            fail "grype_gate_active is '${GATE_ACTIVE}', but the sidecar" \
+              "says changed=${changed}"
+          fi
+          exit "${status}"
+
+  # Each verdict on a change built for it. A case starts a scratch
+  # repository in the workspace from a lane's fixture, commits it,
+  # then commits one known change: the dependency file at the
+  # fixture's root for 'changed', a Java source for 'unchanged'. It
+  # runs dependency-change-action with the lane's exact inputs and
+  # the first commit as the explicit base, then grype-scan-action
+  # with the lane's policy over the SBOM the resolved lane built from
+  # that fixture, reading the sidecar through the same manifest path.
+  # The expected changed flag, file list and gate-active are known
+  # when the case is written, so no second matcher re-derives them.
+  gate-verdict-cases:
+    name: 'Grype Gate Verdict (${{ matrix.lane }}, ${{ matrix.case }})'
+    needs: [maven-gate-resolved, gradle-gate-resolved]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        lane: ['maven', 'gradle']
+        case: ['unchanged', 'changed']
+        include:
+          - lane: 'maven'
+            ecosystems: 'maven'
+            patterns: '.mvn/jvm.config'
+            dependency_file: 'pom.xml'
+          - lane: 'gradle'
+            ecosystems: 'gradle'
+            patterns: |
+              *.gradle
+              *.gradle.kts
+            dependency_file: 'build.gradle.kts'
+          - case: 'unchanged'
+            expected: 'false'
+          - case: 'changed'
+            expected: 'true'
+    steps:
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        with:
+          # yamllint disable-line rule:line-length
+          config: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+          allow_list_summary: 'false'
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          egress-policy: 'block'
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout repository'
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: source
+          persist-credentials: false
+
+      # The scratch repository is the workspace itself, since the
+      # action reads git in the working directory. The checkout is
+      # removed before the first commit so no nested repository
+      # becomes a gitlink, which the detector would count as a
+      # submodule it cannot see through.
+      - name: 'Build a known change'
+        id: scratch
+        shell: bash
+        env:
+          LANE: ${{ matrix.lane }}
+          CASE: ${{ matrix.case }}
+          DEPENDENCY_FILE: ${{ matrix.dependency_file }}
+        run: |
+          set -euo pipefail
+          cp -R "source/tests/fixtures/${LANE}/." .
+          rm -rf source
+          git init -q .
+          git config user.email 'gate-verdict@example.invalid'
+          git config user.name 'gate-verdict'
+          git add -A
+          git commit -q -m 'base'
+          echo "base=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+          case "${CASE}" in
+            changed) target="${DEPENDENCY_FILE}" ;;
+            unchanged)
+              target="$(find src -type f -name '*.java' | sort | head -n 1)" ;;
+            *) echo "::error::unknown case '${CASE}'"; exit 1 ;;
+          esac
+          case "${target}" in
+            *.xml) marker='<!-- edited by gate-verdict-cases -->' ;;
+            *) marker='// edited by gate-verdict-cases' ;;
+          esac
+          printf '\n%s\n' "${marker}" >> "${target}"
+          git commit -q -a -m "${CASE}"
+          echo "Base $(git rev-parse HEAD^1), HEAD $(git rev-parse HEAD)"
+          git --no-pager diff --stat HEAD^1 HEAD
+
+      - name: 'Detect dependency changes'
+        id: dependency-change
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/dependency-change-action@257928b15e4e6a5cc5a888435be59b058055c4e1  # v0.0.1
+        with:
+          ecosystems: ${{ matrix.ecosystems }}
+          patterns: ${{ matrix.patterns }}
+          path-prefix: '.'
+          base: ${{ steps.scratch.outputs.base }}
+          output: 'dependency-change.json'
+
+      - name: 'Assert the detector reported the known change'
+        shell: bash
+        env:
+          EXPECTED: ${{ matrix.expected }}
+          CASE: ${{ matrix.case }}
+          DEPENDENCY_FILE: ${{ matrix.dependency_file }}
+          BASE: ${{ steps.scratch.outputs.base }}
+          CHANGED: ${{ steps.dependency-change.outputs.changed }}
+          REASON: ${{ steps.dependency-change.outputs.reason }}
+          GOT_BASE: ${{ steps.dependency-change.outputs.base }}
+          MANIFEST: ${{ steps.dependency-change.outputs.manifest }}
+        run: |
+          set -euo pipefail
+          status=0
+          fail() { echo "::error::$*"; status=1; }
+          echo "changed: ${CHANGED}"
+          echo "reason: ${REASON}"
+          echo "base: ${GOT_BASE}"
+          echo "manifest: ${MANIFEST}"
+          if [ "${CHANGED}" != "${EXPECTED}" ]; then
+            fail "changed is '${CHANGED}', expected ${EXPECTED} for the" \
+              "${CASE} case"
+          fi
+          case "${REASON}" in
+            '' | unresolved*) fail "reason '${REASON}' is not a resolved one" ;;
+          esac
+          if [ "${GOT_BASE}" != "${BASE}" ]; then
+            fail "base is '${GOT_BASE}', not the explicit ${BASE}"
+          fi
+          if [ "${MANIFEST}" != 'dependency-change.json' ]; then
+            fail "manifest is '${MANIFEST}', not dependency-change.json"
+          fi
+          if [ ! -f dependency-change.json ]; then
+            fail 'no dependency-change.json written'
+            exit "${status}"
+          fi
+          echo 'Sidecar:'
+          sed 's/^/  | /' dependency-change.json
+          # 'jq -c' keeps the JSON type, so a string "true" fails here.
+          if [ "$(jq -c '.changed' dependency-change.json)" != "${EXPECTED}" ]
+          then
+            fail "the sidecar's changed is not the boolean ${EXPECTED}"
+          fi
+          case "${EXPECTED}" in
+            true) files="[\"${DEPENDENCY_FILE}\"]" ;;
+            false) files='[]' ;;
+          esac
+          if [ "$(jq -c '[.files[] | ltrimstr("./")]' dependency-change.json)" \
+            != "${files}" ]; then
+            fail "the sidecar lists $(jq -c '.files' dependency-change.json)," \
+              "expected ${files}"
+          fi
+          exit "${status}"
+
+      # The SBOM the resolved lane built from the same fixture, so the
+      # scan below sees what the lane's Grype job saw.
+      - name: 'Download the SBOM artefact'
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: sbom-files-${{ matrix.lane }}-gate-resolved
+
+      # The lane's policy, value for value, at the lane's pin. The
+      # database is restored only: four cases run at once, and the
+      # lanes' own scans write it.
+      - name: 'Grype audit SBOM'
+        id: grype-audit
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/grype-scan-action@5c81b23afb2ea771b2d247807a12d90783328675  # v0.5.0
+        with:
+          sbom: 'sbom-cyclonedx.json'
+          fail-on: 'medium'
+          gate-when: 'dependencies-changed'
+          dependency-change-manifest: 'dependency-change.json'
+          dependency-policy: 'declared'
+          transitive-fail-on: 'critical'
+          only-fixed: 'true'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          cache-db: 'restore-only'
+          upload-artifact: 'false'
+
+      - name: 'Assert the gate followed the known change'
+        shell: bash
+        env:
+          EXPECTED: ${{ matrix.expected }}
+          CASE: ${{ matrix.case }}
+          GATE_ACTIVE: ${{ steps.grype-audit.outputs.gate-active }}
+          GATE_REASON: ${{ steps.grype-audit.outputs.gate-reason }}
+        run: |
+          set -euo pipefail
+          echo "gate-active: ${GATE_ACTIVE}"
+          echo "gate-reason: ${GATE_REASON}"
+          if [ "${GATE_ACTIVE}" != "${EXPECTED}" ]; then
+            echo "::error::gate-active is '${GATE_ACTIVE}', expected" \
+              "${EXPECTED} for the ${CASE} case"
+            exit 1
+          fi
+          echo "Grype gate verdict (${CASE}, gate-active=${EXPECTED}) checked ✅"
+
   # Proves each build lane publishes its build artefact's name, shape
   # and count as workflow outputs a caller can use, and that the
   # artefact keeps the README's layout contract. Each row downloads the
@@ -588,6 +1030,16 @@ jobs:
       - name: 'Check the guards and the submodule wiring'
         shell: bash
         run: bash .github/scripts/wiring-check.sh
+
+      # The Grype gate policy: its inputs, their validation, the
+      # detection step in repository-metadata, the checkout depth it
+      # needs, the sidecar's route to the Grype job, the self-test
+      # lanes above, and that gate-verdict-cases runs the two actions
+      # with the lanes' own inputs. gate-check, gate-resolved-check
+      # and gate-verdict-cases prove the verdicts.
+      - name: 'Check the Grype gate wiring'
+        shell: bash
+        run: bash .github/scripts/grype-gate-check.sh
 
   # Proves each lane's SBOM comes from the resolved dependency graph.
   # Without this the self-test stays green whatever the SBOM contains:

@@ -121,6 +121,131 @@ the JVM, dependency-risk auditing is the SBOM/Grype chain plus the
 separate Sonatype CLM lane, and the build tool (`surefire`/`failsafe` or
 the Gradle `test` task) runs the tests as part of its own lifecycle.
 
+### Grype gate policy
+
+By default the `grype` job gates every scan at `grype_fail_on`, as it
+always has. Six inputs, the same in both lanes, pass the gate policy of
+`grype-scan-action` through:
+
+<!-- markdownlint-disable MD013 -->
+
+| Name                             | Type    | Default    | Description                                                                                         |
+| -------------------------------- | ------- | ---------- | --------------------------------------------------------------------------------------------------- |
+| `grype_gate_when`                | string  | `always`   | `always`, or `dependencies-changed` to gate a change that touched the dependency files              |
+| `grype_dependency_policy`        | string  | `declared` | `all`, or `declared` to gate the packages the project declares; inherited ones are warnings         |
+| `grype_transitive_fail_on`       | string  | `critical` | Severity from which an inherited package gates anyway, `none` to `critical`                         |
+| `grype_only_fixed`               | boolean | `true`     | Gate on findings with a published fix version; a finding without one is a warning                   |
+| `grype_remediation_window_days`  | string  | `''`       | Days a finding stays a warning on an unarmed run after its fix appeared; empty turns the window off |
+| `grype_remediation_window_start` | string  | `''`       | `YYYY-MM-DD` floor for the window clock; a fix with no date starts there, else gates at once        |
+
+<!-- markdownlint-enable MD013 -->
+
+Two of these defaults are a change of behaviour from the gate as it
+stood, and from what `grype-scan-action` alone would do; both are the
+policy agreed for the families, not an oversight. `grype_only_fixed`
+defaults to `true`: a finding with a published fix version blocks the
+run, and a finding nobody can act on yet appears as a warning, where
+before every finding at or above `grype_fail_on` blocked.
+`grype_dependency_policy` defaults to `declared`: a finding in a
+package the project never asked for, one it inherits through a
+dependency, is a warning unless it reaches `grype_transitive_fail_on`,
+which defaults to `critical`, where before it blocked at
+`grype_fail_on`. The action reads the SBOM's dependency graph to tell
+the two apart, and a package it cannot classify counts as declared
+and gates. So a caller who takes the defaults now sees an unfixed
+finding, or an inherited high-severity one, reported rather than
+blocking; `grype_only_fixed: false` and `grype_dependency_policy: all`
+restore the previous strictness. The `grype_gate_when` default,
+`always`, keeps today's timing: every scan gates.
+
+With `grype_gate_when: dependencies-changed`, the `repository-metadata`
+job runs
+[`dependency-change-action`](https://github.com/lfreleng-actions/dependency-change-action)
+with the `maven` or `gradle` preset after its checkout. The job runs
+nothing from the project, where the `build` job runs its plugins and
+build scripts, and nothing the project ships can write or replace the
+sidecar before the upload. Detection is repository-wide
+(`path-prefix: '.'`), not scoped to `path_prefix`: a Maven parent POM
+or a Gradle included build sits outside the project directory as often
+as in it, and a change there must arm the gate; the cost is one strict
+run for a dependency change in an unrelated project of the same
+repository. The lanes add patterns to the presets: Maven watches
+`.mvn/jvm.config`, since a `-D` property set there can select a
+dependency version; Gradle watches every `*.gradle` and `*.gradle.kts`,
+which covers a convention script a subproject applies. The
+`dependency-change.json` sidecar travels in an artefact of its own,
+`dependency-change-maven<suffix>` or `dependency-change-gradle<suffix>`,
+to the `grype` job. That job downloads the sidecar and the SBOM each
+by the ID its upload returned, never by name, and each into a
+directory of its own: the `build` job runs project code, and an
+artefact it uploaded under a reused name, or a file planted inside
+the SBOM artefact, could otherwise stand in for the sidecar. The job
+reads the file through `dependency-change-manifest`. Detection needs
+`sbom_enabled` on, since without an SBOM no scan consumes its result.
+A change that left the dependency files alone then has its findings
+reported as warnings, except a finding whose remediation window
+(below) has run out, which gates even then; one that touched them
+gates as on `always`.
+Detection covers the preset's files and the extras listed above, by
+name, and nothing inferred from the build's configuration: the action
+detects changes to the files that declare or lock dependencies and
+does not parse build logic or follow indirection, so a version
+catalogue imported from an arbitrary TOML path, a parent POM with a
+non-standard file name, a settings file `.mvn/maven.config` selects, a
+convention-plugin build outside `buildSrc/` and `build-logic/`, or a
+version property passed through `mvn_params` or `build_arguments` is
+not a dependency change by its rules. A repository that declares its
+dependencies in such a place keeps `grype_gate_when: always`, the
+default. The
+action's README holds the file list per preset, how it picks the base
+commit per event, the fail-closed contract and the symbolic-link rule;
+in short, when it cannot prove what the change touched, it writes no
+sidecar and the scan gates as it does today. The base it compares
+against depends on how the lane checked out. On a GitHub call it takes
+the base from the event and checks that the checked-out commit is the
+run's own, `GITHUB_SHA`; it compares commits, not repository or ref
+names. A call whose `repository` or `ref` checks out a different
+commit stays unresolved and gates, while one that lands on the same
+commit resolves as a plain call would. On a Gerrit call, one with a
+`gerrit_refspec`, the checkout is the change itself and `GITHUB_SHA`
+names the caller's trigger commit rather than the change, so the
+action compares the change against its parent (`HEAD^1`) and does not
+check `GITHUB_SHA`:
+whatever `checkout-gerrit-change-action` fetched is what it measures,
+and a Gerrit call resolves rather than gating by default. A symbolic
+link or submodule anywhere in the repository that the change did not
+touch counts as unresolved under repository-wide detection, so such a
+repository always gates. Both presets include files that change for
+reasons other than dependencies (`.mvn/maven.config`,
+`gradle.properties`, `buildSrc/`, `build-logic/`), at the cost of a
+strict run. The `repository-metadata` job's `actions/checkout` fetches
+the whole history, which holds the base the action compares against;
+`checkout-gerrit-change-action` fetches depth 2 already.
+
+The remediation window bounds that leniency in time. With
+`grype_gate_when: dependencies-changed` and a change that left the
+dependency chain alone, a finding stays a warning for
+`grype_remediation_window_days` days after its fix became available,
+then gates as in an armed run; `grype_remediation_window_start` sets
+the day the team adopted the window, so an existing backlog gets the
+full window. Each finding's clock starts at the later of its fix date
+and the start date. A fixable finding for which Grype reports no fix
+date has no clock of its own: with a start date set, that date starts
+it; with none, the finding gates at once, since a missing date must not
+buy unlimited time. Both inputs default to empty, as in the action, and
+do nothing on `always` runs. The lanes check every policy input in
+`gerrit-validate`, so a typo fails in seconds rather than after the
+build; whether a start date lies in the future is the action's call.
+
+Each lane publishes `grype_gate_active` and `grype_gate_reason` (one
+line saying why); both are empty when the scan did not run.
+`grype_gate_active` is `grype-scan-action`'s own verdict, whether a
+finding could block the run before `grype_permit_fail` takes effect,
+and not a restatement of the dependency-change signal: the value
+reads `false` under `grype_fail_on: none` whatever the dependencies
+did, and `true` on an unchanged chain once a finding's remediation
+window has run out.
+
 ### CBOM (informational)
 
 The CBOM steps run `cbom-action` to produce a CycloneDX Cryptography
@@ -521,12 +646,44 @@ every pull request. The Maven lane builds the dedicated
 proves a second Maven call builds the `mvn_pom_file` it names. Each
 fixture carries a git submodule and a test that reads it, and a
 `submodule-check` job fails unless that test passed in each lane, so
-`checkout_submodules` must actually fetch it. A
+`checkout_submodules` must actually fetch it. Three calls run under
+`grype_gate_when: dependencies-changed`. `maven-gate-test` builds the
+fixture at a pinned commit, which is not the commit the run is for,
+and `dependency-change-action` reports unresolved; its `gate-check` job
+asserts the lane's `grype_gate_active` is `true` and that no sidecar
+artefact exists. `maven-gate-resolved` and `gradle-gate-resolved`
+build the small projects under `tests/fixtures/maven` and
+`tests/fixtures/gradle` in this repository, at the run's own commit,
+where the action resolves the change and writes a sidecar; the
+`gate-resolved-check` job requires that sidecar, since on a pull
+request of this repository the action resolves by its own rules, and
+holds the lane's `grype_gate_active` to the sidecar's `changed` flag,
+which the two agree on under the lane's policy (a blocking
+`grype_fail_on`, no remediation window), with the base the commit's
+parent. Which flag the pull request earns
+is the detector's call and is not re-derived; `gate-verdict-cases`
+proves each value instead, on a change built for it: per lane and
+case it starts a scratch repository from the fixture, commits one
+known change (the fixture's `pom.xml` or `build.gradle.kts`, or a
+Java source), runs `dependency-change-action` with the lane's inputs
+and an explicit base, asserts the `changed` flag, `reason`, `base`
+and file list it expects, then runs `grype-scan-action` with the
+lane's policy over the resolved lane's SBOM and asserts `gate-active`
+is `false` for the unchanged case and `true` for the changed one. A
 `wiring-check` job runs `.github/scripts/wiring-check.sh` to test the
 guard steps, the merge lane's input checks, its coordinate check and
 its copy of `maven-build-action`'s placeholder expansion, the
 submodule wiring the fixtures cannot exercise, and that every artefact
-name the Maven lanes use carries `artifact_suffix`.
+name the Maven lanes use carries `artifact_suffix`; it then runs
+`.github/scripts/grype-gate-check.sh`, which holds both lanes to the
+Grype gate policy's wiring: each input's `gerrit-validate` rejection,
+the detection step's job, pin, preset, extra patterns and position,
+the checkout depth, the sidecar's own artefact, the download of it and
+of the SBOM each by its upload's ID into a directory of its own, the
+verdict outputs, the self-test calls, that no
+symbolic link or submodule sits in this repository's tree, and that
+`gate-verdict-cases` runs both actions at the lanes' pins with the
+lanes' inputs and the expected verdict fixed per case.
 
 The `compatibility-verify` and `compatibility-merge` jobs then run both
 Maven lanes once for every Maven release and Java version in
