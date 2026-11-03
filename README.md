@@ -158,13 +158,14 @@ blocking; `grype_only_fixed: false` and `grype_dependency_policy: all`
 restore the previous strictness. The `grype_gate_when` default,
 `always`, keeps today's timing: every scan gates.
 
-With `grype_gate_when: dependencies-changed`, the `repository-metadata`
+With `grype_gate_when: dependencies-changed`, a `dependency-change`
 job runs
 [`dependency-change-action`](https://github.com/lfreleng-actions/dependency-change-action)
 with the `maven` or `gradle` preset after its checkout. The job runs
 nothing from the project, where the `build` job runs its plugins and
 build scripts, and nothing the project ships can write or replace the
-sidecar before the upload. Detection is repository-wide
+sidecar before the upload. Any other call skips the job, so with the
+default `always` the `grype` job waits for `build` alone. Detection is repository-wide
 (`path-prefix: '.'`), not scoped to `path_prefix`: a Maven parent POM
 or a Gradle included build sits outside the project directory as often
 as in it, and a change there must arm the gate; the cost is one strict
@@ -218,7 +219,7 @@ touch counts as unresolved under repository-wide detection, so such a
 repository always gates. Both presets include files that change for
 reasons other than dependencies (`.mvn/maven.config`,
 `gradle.properties`, `buildSrc/`, `build-logic/`), at the cost of a
-strict run. The `repository-metadata` job's `actions/checkout` fetches
+strict run. The `dependency-change` job's `actions/checkout` fetches
 the whole history, which holds the base the action compares against;
 `checkout-gerrit-change-action` fetches depth 2 already.
 

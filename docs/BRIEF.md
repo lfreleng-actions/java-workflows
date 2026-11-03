@@ -58,12 +58,17 @@ wired. The job graph is:
 
 ```text
 gerrit-validate ─┬─ repository-metadata (informational)
+                 ├─ dependency-change (grype_gate_when: dependencies-changed)
                  └─ build ─ grype
 ```
 
 One job owns the built tree: every step that reads it runs inside
 `build`, so nothing is checked out, resolved or built twice. Only
-`grype`, which reads nothing but the SBOM document, runs downstream.
+`grype`, which reads nothing but the SBOM document, runs downstream,
+with the dependency-change sidecar when that job ran. The
+`dependency-change` job runs nothing from the project and only when
+the call asks for change-scoped gating with the SBOM on; any other
+call skips it, and `grype` then waits for `build` alone.
 
 `build` job (Maven):
 

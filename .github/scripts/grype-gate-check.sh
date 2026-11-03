@@ -10,11 +10,13 @@
 #   sidecar path and at the pin the lanes share;
 # - gerrit-validate's input check accepts each allowed value and
 #   rejects a typo, run as extracted from the workflows;
-# - the detection step runs dependency-change-action at its pin in the
-#   repository-metadata job, which runs nothing from the project, with
-#   the lane's preset and extra patterns over the whole repository,
-#   after the checkout and before the sidecar upload, and only under
-#   grype_gate_when: dependencies-changed with the SBOM on;
+# - the detection step runs dependency-change-action at its pin in a
+#   dependency-change job of its own, which runs nothing from the
+#   project, with the lane's preset and extra patterns over the whole
+#   repository, after the checkout and before the sidecar upload; the
+#   job, not the step, runs only under grype_gate_when:
+#   dependencies-changed with the SBOM on, so any other call skips it
+#   and the Grype job waits for nothing but the build;
 # - that job's actions/checkout holds the parent of HEAD, without
 #   which every pull request would be unresolved and gate;
 # - the sidecar travels in an artefact of its own, uploaded only when
@@ -44,7 +46,9 @@ testing='.github/workflows/testing.yaml'
 detect_pin='257928b15e4e6a5cc5a888435be59b058055c4e1'
 detect_uses="lfreleng-actions/dependency-change-action@${detect_pin}  # v0.0.1"
 grype_pin='5c81b23afb2ea771b2d247807a12d90783328675'
-detect_job='repository-metadata'
+detect_job='dependency-change'
+# The condition on the detection job, as the literal workflow text.
+detect_if="inputs.sbom_enabled && inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed'"
 detect_step='Detect dependency changes'
 upload_step='Upload dependency-change sidecar'
 download_step='Download dependency-change sidecar'
@@ -254,10 +258,9 @@ for pair in "${maven}:maven" "${gradle}:gradle"; do
       # build crosses directory boundaries path_prefix cannot follow.
       '.with["path-prefix"]') want='.' ;;
       '.with["gerrit-refspec"]') want='${{ inputs.gerrit_refspec }}' ;;
-      # Only when a scan can consume the result: without the SBOM no
-      # Grype job runs, and the step must not be able to fail the
-      # metadata job for nothing.
-      '.if') want="inputs.sbom_enabled && inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed'" ;;
+      # The condition sits on the job; a step condition as well would
+      # let the two drift apart.
+      '.if') want='' ;;
     esac
     if [ "${got}" != "${want}" ]; then
       fail "${workflow}: '${detect_step}' has ${field} '${got}'," \
@@ -283,10 +286,39 @@ for pair in "${maven}:maven" "${gradle}:gradle"; do
   if [ "$(step_index build "${detect_step}" "${workflow}")" != '-1' ]; then
     fail "${workflow}: the build job must not run '${detect_step}'"
   fi
+  if [ "$(step_index repository-metadata "${detect_step}" "${workflow}")" \
+    != '-1' ]; then
+    fail "${workflow}: repository-metadata must not run '${detect_step}':" \
+      'the Grype job would then wait for it on every call'
+  fi
+
+  echo "${workflow}: the ${detect_job} job"
+  # Only when a scan can consume the result: without the SBOM no Grype
+  # job runs, and under 'always' the scan ignores the sidecar. On the
+  # job, so every other call skips it outright and the Grype job's
+  # wait for it ends at once.
+  got="$(JOB="${detect_job}" yq -r '.jobs[strenv(JOB)].if // ""' \
+    "${workflow}")"
+  if [ "${got}" != "${detect_if}" ]; then
+    fail "${workflow}: the ${detect_job} job runs if '${got}', expected" \
+      "'${detect_if}'"
+  fi
+  # Nothing from the project: no build, SBOM or setup action, only the
+  # runner hardening, the checkouts, the Gerrit submodule guard, the
+  # detection and its upload.
+  # shellcheck disable=SC2016  # yq expression, not shell
+  stray="$(JOB="${detect_job}" yq -r '.jobs[strenv(JOB)].steps[]
+    | select(((.uses // "") | test("^(lfreleng-actions/harden-runner-block-action|step-security/harden-runner|actions/checkout|lfreleng-actions/checkout-gerrit-change-action|lfreleng-actions/dependency-change-action|actions/upload-artifact)@") | not)
+      and .name != "Initialise Gerrit change submodules")
+    | .name' "${workflow}")"
+  if [ -n "${stray}" ]; then
+    fail "${workflow}: the ${detect_job} job runs other steps:" \
+      "$(tr '\n' ',' <<< "${stray}")"
+  fi
 
   echo "${workflow}: checkout depth"
-  # The parent of HEAD is the base on a pull request. 0 is the whole
-  # history, which holds it too; 1, or the default of 1, does not.
+  # The parent of HEAD is the base on a pull request: 2 holds it, as
+  # does 0, the whole history; 1, or the default of 1, does not.
   depths="$(JOB="${detect_job}" yq -r '.jobs[strenv(JOB)].steps[]
     | select((.uses // "") | test("^actions/checkout@"))
     | .with["fetch-depth"] // "unset"' "${workflow}")"
@@ -335,9 +367,15 @@ for pair in "${maven}:maven" "${gradle}:gradle"; do
     fail "${workflow}: ${detect_job}'s dependency_change_artifact_id is" \
       "'${got}', not the artifact-id output of '${upload_step}'"
   fi
-  if ! yq -e '.jobs.grype.needs | .. | select(. == "repository-metadata")' \
+  if ! JOB="${detect_job}" yq -e \
+    '.jobs.grype.needs | .. | select(. == strenv(JOB))' \
     "${workflow}" > /dev/null 2>&1; then
     fail "${workflow}: the grype job must need ${detect_job}"
+  fi
+  if yq -e '.jobs.grype.needs | .. | select(. == "repository-metadata")' \
+    "${workflow}" > /dev/null 2>&1; then
+    fail "${workflow}: the grype job must not need repository-metadata," \
+      'which runs on every call'
   fi
   if ! yq -e '.jobs.grype.needs | .. | select(. == "build")' \
     "${workflow}" > /dev/null 2>&1; then
@@ -362,8 +400,9 @@ for pair in "${maven}:maven" "${gradle}:gradle"; do
       got="$(step_field grype "${step}" "${field}" "${workflow}")"
       if [ "${step}" = "${download_step}" ]; then
         case "${field}" in
-          # Skipped when the metadata job uploaded nothing; an ID that
-          # resolves to no artefact fails the download, and the job.
+          # Skipped when the dependency-change job uploaded nothing; an
+          # ID that resolves to no artefact fails the download, and the
+          # job.
           '.if') want="${artifact_id} != ''" ;;
           # By the exact upload, never by a name another job could
           # reuse.

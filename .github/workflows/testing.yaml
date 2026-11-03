@@ -1032,7 +1032,7 @@ jobs:
         run: bash .github/scripts/wiring-check.sh
 
       # The Grype gate policy: its inputs, their validation, the
-      # detection step in repository-metadata, the checkout depth it
+      # dependency-change job and its condition, the checkout depth it
       # needs, the sidecar's route to the Grype job, the self-test
       # lanes above, and that gate-verdict-cases runs the two actions
       # with the lanes' own inputs. gate-check, gate-resolved-check
