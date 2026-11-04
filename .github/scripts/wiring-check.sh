@@ -728,20 +728,74 @@ extract "${maven}" build "${init_step}" "${init}"
 # download-artifact, and the actions the lanes pass a name to.
 # repository-metadata-action takes no name; it suffixes its upload
 # with a timestamp and a random part of its own, so it cannot collide.
+#
+# A download by artifact-ids resolves no name at all: it fetches the
+# one upload whose ID it was given, and download-artifact rejects a
+# name beside it. Such a step passes when the ID is an output of a job
+# in the same workflow that carries an upload-artifact step's
+# artifact-id, since that upload's name the loop checks in its turn;
+# an ID from anywhere else, or a name beside the ID, fails.
 echo 'Lanes: artefact names carry artifact_suffix'
-# The literal expression each name must end with.
+# The literal expressions each name must end with, and an ID must take.
 # shellcheck disable=SC2016
 suffix='${{ inputs.artifact_suffix }}'
+# shellcheck disable=SC2016
+needs_prefix='${{ needs.'
+# shellcheck disable=SC2016
+steps_prefix='${{ steps.'
+close=' }}'
 for workflow in "${maven}" "${merge}" "${gradle}"; do
   names="$(yq -o=json '.' "${workflow}" | jq -r '.jobs[].steps[]?
     | select((.uses // "")
       | test("^(actions/(upload|download)-artifact|lfreleng-actions/(maven-build-action|gradle-build-action|grype-scan-action))@"))
     | select(.with["artifact-upload"] != "false")
-    | "\(.name)\t\(.with.name // .with["artifact-name"] // "")"')"
+    | [.name, (.with.name // .with["artifact-name"] // ""),
+       (.with["artifact-ids"] // "")] | join("\u001f")')"
   count=0
-  while IFS=$'\t' read -r step name; do
+  # A unit separator, not a tab: read collapses a run of whitespace
+  # separators, which would shift the ID into an empty name.
+  while IFS=$'\x1f' read -r step name ids; do
     [ -n "${step}" ] || continue
     count=$((count + 1))
+    if [ -n "${ids}" ]; then
+      if [ -n "${name}" ]; then
+        fail "${workflow}: '${step}' names '${name}' beside artifact-ids," \
+          'which download-artifact rejects'
+      fi
+      case "${ids}" in
+        "${needs_prefix}"*.outputs.*"${close}") ;;
+        *)
+          fail "${workflow}: '${step}' downloads by '${ids}', not by" \
+            "the output of a job in this workflow"
+          continue ;;
+      esac
+      ref="${ids#"${needs_prefix}"}"
+      ref="${ref%"${close}"}"
+      job="${ref%%.outputs.*}"
+      output="${ref#*.outputs.}"
+      upload="$(JOB="${job}" OUTPUT="${output}" yq -r \
+        '.jobs[strenv(JOB)].outputs[strenv(OUTPUT)] // ""' "${workflow}")"
+      case "${upload}" in
+        "${steps_prefix}"*".outputs.artifact-id${close}") ;;
+        *)
+          fail "${workflow}: '${step}' downloads by ${job}'s ${output}," \
+            "which is '${upload:-unset}', not an upload's artifact-id"
+          continue ;;
+      esac
+      upload_id="${upload#"${steps_prefix}"}"
+      upload_id="${upload_id%".outputs.artifact-id${close}"}"
+      uses="$(JOB="${job}" ID="${upload_id}" yq -r \
+        '.jobs[strenv(JOB)].steps[] | select(.id == strenv(ID))
+        | .uses // ""' "${workflow}")"
+      case "${uses}" in
+        actions/upload-artifact@*) ;;
+        *)
+          fail "${workflow}: '${step}' downloads by the artifact-id of" \
+            "step '${upload_id}' in ${job}, which runs" \
+            "'${uses:-no action}', not upload-artifact" ;;
+      esac
+      continue
+    fi
     case "${name}" in
       *"${suffix}") ;;
       *) fail "${workflow}: '${step}' names '${name:-its default}'" \

@@ -58,12 +58,17 @@ wired. The job graph is:
 
 ```text
 gerrit-validate ─┬─ repository-metadata (informational)
+                 ├─ dependency-change (grype_gate_when: dependencies-changed)
                  └─ build ─ grype
 ```
 
 One job owns the built tree: every step that reads it runs inside
 `build`, so nothing is checked out, resolved or built twice. Only
-`grype`, which reads nothing but the SBOM document, runs downstream.
+`grype`, which reads nothing but the SBOM document, runs downstream,
+with the dependency-change sidecar when that job ran. The
+`dependency-change` job runs nothing from the project and only when
+the call asks for change-scoped gating with the SBOM on; any other
+call skips it, and `grype` then waits for `build` alone.
 
 `build` job (Maven):
 
@@ -1013,6 +1018,7 @@ this repository wires them together:
 | `junit-test-report-action`       | Verify              | JUnit XML rendering + check                                   |
 | `sbom-action`                    | All                 | CycloneDX SBOM generation (cyclonedx backend, resolved graph) |
 | `grype-scan-action`              | All                 | Vulnerability scan over the generated SBOM                    |
+| `dependency-change-action`       | Verify              | Dependency-file change signal for the opt-in Grype gate       |
 | `maven-xml-settings-action`      | Merge, release      | Nexus `settings.xml` synthesis                                |
 | `maven-snapshot-metadata-action` | Merge               | Seed and prune SNAPSHOT metadata around the deploy            |
 | `nexus-publish-action`           | Merge               | Upload the SNAPSHOT `m2repo` to Nexus                         |
@@ -1115,7 +1121,10 @@ the names it passes to `maven-build-action` and `grype-scan-action`
 its own, a timestamp and a random part, so it cannot collide and the
 lane leaves it alone. An empty suffix, the default, keeps every
 existing name, and `wiring-check.sh` fails on any lane-chosen name
-without the suffix.
+without the suffix. The Grype job's downloads name nothing: each
+fetches one upload by the `artifact-id` a job of the lane published,
+and the guard holds such a download to that output, whose upload it
+checks in its turn.
 
 A matrix of reusable workflow calls also hands its caller one call's
 outputs alone, so per-call evidence has to travel as artefacts. A call

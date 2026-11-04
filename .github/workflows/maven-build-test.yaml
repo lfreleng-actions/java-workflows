@@ -14,7 +14,12 @@
 # build job runs the tests (mvn install) and gates the rest; the tests
 # job renders a JUnit summary from the collected reports without
 # rebuilding. Dependency vulnerability scanning is provided by the
-# SBOM -> Grype leg; Nexus IQ CLM is a separate, dedicated lane.
+# SBOM -> Grype leg; Nexus IQ CLM is a separate, dedicated lane. With
+# grype_gate_when set to dependencies-changed, a dependency-change job
+# runs dependency-change-action, executing nothing from the project,
+# and the Grype gate arms only for a change that touched
+# a dependency file anywhere in the repository, or one it cannot
+# resolve.
 #
 # The cbom leg is informational and cannot fail the run; see the job
 # for why that is pinned rather than configurable.
@@ -182,6 +187,71 @@ on:
         required: false
         type: boolean
         default: false
+      # The gate policy, passed through to grype-scan-action. The
+      # defaults are the policy agreed for the families, not the
+      # action's own: 'declared' and only-fixed true relax what the
+      # action alone would block; see the README. With grype_gate_when
+      # set to dependencies-changed, the dependency-change job runs
+      # dependency-change-action over the whole repository and carries
+      # its sidecar to the Grype job in an artefact of its own; a
+      # result the action cannot resolve writes no sidecar, and the
+      # scan gates as it does on 'always'. gerrit-validate rejects a
+      # bad value before the build.
+      grype_gate_when:
+        description: >-
+          When Grype findings block the run: 'always', or
+          'dependencies-changed' to gate only a change that touched a
+          dependency file anywhere in the repository (the maven preset
+          of dependency-change-action, plus .mvn/jvm.config) and
+          report findings as warnings otherwise, except a finding
+          whose remediation window has run out, which gates even on
+          an unchanged chain. A change the detector cannot resolve
+          gates.
+        required: false
+        type: string
+        default: 'always'
+      grype_dependency_policy:
+        description: >-
+          Which findings gate: 'all', or 'declared' to gate only
+          packages the project declares, with inherited ones reported
+          as warnings unless they reach grype_transitive_fail_on.
+        required: false
+        type: string
+        default: 'declared'
+      grype_transitive_fail_on:
+        description: >-
+          Lowest severity at which an inherited package gates under
+          grype_dependency_policy 'declared': none, negligible, low,
+          medium, high or critical.
+        required: false
+        type: string
+        default: 'critical'
+      grype_only_fixed:
+        description: >-
+          Gate only on findings with a published fix version. A finding
+          nobody can act on is reported, not blocking.
+        required: false
+        type: boolean
+        default: true
+      grype_remediation_window_days:
+        description: >-
+          Bounds the leniency of a run grype_gate_when left unarmed: a
+          finding stays a warning for this many whole days after its
+          fix became available, then gates. Empty turns the window off.
+          No effect on 'always' runs.
+        required: false
+        type: string
+        default: ''
+      grype_remediation_window_start:
+        description: >-
+          YYYY-MM-DD floor for the remediation window clock, so an
+          existing backlog gets the full window when the window is
+          adopted. Empty starts each clock at the fix date, and a
+          fixable finding without one then gates at once; a start
+          date supplies the clock for such a finding instead.
+        required: false
+        type: string
+        default: ''
 
       # --- CBOM (informational) ---
       # A CBOM records which cryptographic algorithms, key sizes, modes
@@ -418,6 +488,22 @@ on:
           Number of files collected into the build artefact: jars,
           wars and ears, plus POMs for the m2repo shape; 0 for none.
         value: ${{ jobs.build.outputs.build_artifact_count }}
+      # grype-scan-action's own gate verdict, not the dependency-change
+      # signal: 'false' under grype_fail_on 'none' whatever changed,
+      # and 'true' on an unchanged chain once the remediation window
+      # has run out; empty when the scan did not run.
+      grype_gate_active:
+        description: >-
+          'true' when grype-scan-action could block this run, before
+          grype_permit_fail takes effect, under grype_fail_on,
+          grype_gate_when and the remediation window together; 'false'
+          when nothing could; empty when the scan did not run.
+        value: ${{ jobs.grype.outputs.gate_active }}
+      grype_gate_reason:
+        description: >-
+          One line from grype-scan-action saying why the gate is or is
+          not armed; empty when the scan did not run.
+        value: ${{ jobs.grype.outputs.gate_reason }}
 
 permissions: {}
 
@@ -448,6 +534,64 @@ jobs:
               "to 64 letters, digits, '.', '_' or '-'."
             exit 1
           fi
+      # grype-scan-action validates these itself, but only once the
+      # build has run. Each value is a fixed vocabulary or a simple
+      # form, so a typo fails here in seconds instead. grype_only_fixed
+      # is a boolean input, which GitHub types at the call. The
+      # annotations name the input and not the value, so a value
+      # cannot forge a workflow command.
+      - name: 'Validate Grype gate inputs'
+        shell: bash
+        env:
+          GATE_WHEN: ${{ inputs.grype_gate_when }}
+          DEPENDENCY_POLICY: ${{ inputs.grype_dependency_policy }}
+          TRANSITIVE_FAIL_ON: ${{ inputs.grype_transitive_fail_on }}
+          WINDOW_DAYS: ${{ inputs.grype_remediation_window_days }}
+          WINDOW_START: ${{ inputs.grype_remediation_window_start }}
+        run: |
+          set -euo pipefail
+          status=0
+          case "${GATE_WHEN}" in
+            always | dependencies-changed) ;;
+            *)
+              echo "::error::grype_gate_when must be 'always' or" \
+                "'dependencies-changed'."
+              status=1 ;;
+          esac
+          case "${DEPENDENCY_POLICY}" in
+            all | declared) ;;
+            *)
+              echo "::error::grype_dependency_policy must be 'all' or" \
+                "'declared'."
+              status=1 ;;
+          esac
+          case "${TRANSITIVE_FAIL_ON}" in
+            none | negligible | low | medium | high | critical) ;;
+            *)
+              echo "::error::grype_transitive_fail_on must be one of" \
+                "none, negligible, low, medium, high, critical."
+              status=1 ;;
+          esac
+          if [[ ! "${WINDOW_DAYS}" =~ ^[0-9]*$ ]]; then
+            echo "::error::grype_remediation_window_days must be empty" \
+              "or a whole number of days."
+            status=1
+          fi
+          # The form, and that it names a calendar date: 'date' reads
+          # 2026-02-30 as March 2nd, so compare its reading with the
+          # input. 'date' also accepts year 0000, which the action's
+          # ISO parser rejects, so refuse it here. Whether the date
+          # lies in the future is the action's call.
+          if [[ ! "${WINDOW_START}" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})?$ ]] \
+            || [ "${WINDOW_START%%-*}" = '0000' ] \
+            || { [ -n "${WINDOW_START}" ] \
+              && [ "$(date -u -d "${WINDOW_START}" +%F 2> /dev/null \
+                || true)" != "${WINDOW_START}" ]; }; then
+            echo "::error::grype_remediation_window_start must be empty" \
+              "or a calendar date as YYYY-MM-DD, from year 0001."
+            status=1
+          fi
+          exit "${status}"
       - name: 'Require Gerrit project, branch and URL'
         if: inputs.gerrit_refspec != ''
         shell: bash
@@ -559,6 +703,136 @@ jobs:
           artifact_upload: 'true'
           artifact_formats: 'json'
 
+  # A job of its own, not a step in repository-metadata or build. Not
+  # build: that job runs Maven plugins and the SBOM generator, which
+  # could replace or plant a sidecar before an upload from it; this
+  # job executes nothing from the project. Not repository-metadata:
+  # the Grype job must wait for whichever job detects, and with the
+  # condition on the job a call that does not detect, the default
+  # 'always' among them, skips it, so Grype waits for the build alone.
+  dependency-change:
+    name: 'Dependency Change'
+    needs: gerrit-validate
+    # Only when a scan can consume the result: without the SBOM no
+    # Grype job runs, and under 'always' the scan ignores the sidecar.
+    # yamllint disable-line rule:line-length
+    if: inputs.sbom_enabled && inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 10
+    outputs:
+      # The ID of the sidecar artefact this job uploaded, empty when it
+      # uploaded none. The Grype job downloads by this ID, not by name:
+      # a name binds to whichever upload used it last, and the build
+      # job runs project code that could upload one of the same name;
+      # an ID binds to this upload alone.
+      # yamllint disable-line rule:line-length
+      dependency_change_artifact_id: ${{ steps.upload-dependency-change.outputs.artifact-id }}
+    steps:
+      # One harden-runner step with the policy computed, as in
+      # repository-metadata; see the reasoning there.
+      - name: 'Load egress allow-list'
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        with:
+          config: ${{ inputs.harden_runner_allowlist }}
+          # yamllint disable-line rule:line-length
+          supplemental_config: ${{ inputs.harden_runner_supplemental_allowlist }}
+          # yamllint disable-line rule:line-length
+          supplemental_required: ${{ inputs.harden_runner_supplemental_allowlist != '' && 'true' || 'false' }}
+          # yamllint disable-line rule:line-length
+          supplemental_unpinned: ${{ inputs.harden_runner_supplemental_unpinned && 'true' || 'false' }}
+          extra_endpoints: ${{ inputs.harden_runner_extra_endpoints }}
+      - name: 'Harden runner'
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43  # v2.22.3
+        with:
+          # yamllint disable-line rule:line-length
+          egress-policy: ${{ inputs.harden_runner_egress == 'audit' && 'audit' || 'block' }}
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: 'Checkout Gerrit change'
+        if: inputs.gerrit_refspec != ''
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/checkout-gerrit-change-action@f0dd3d4dd4fceff1f56348152ecf0e040594f16a  # v1.2.1
+        with:
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          gerrit-project: ${{ inputs.gerrit_project }}
+          # yamllint disable-line rule:line-length
+          gerrit-url: ${{ inputs.gerrit_url != '' && inputs.gerrit_url || vars.GERRIT_URL }}
+          delay: '0s'
+          repository: ${{ inputs.repository || github.repository }}
+          ref: refs/heads/${{ inputs.gerrit_branch }}
+          submodules: ${{ inputs.checkout_submodules }}
+      # The same guard as every Gerrit checkout; see repository-metadata.
+      - name: 'Initialise Gerrit change submodules'
+        if: inputs.gerrit_refspec != '' && inputs.checkout_submodules
+        shell: bash
+        run: |
+          set -euo pipefail
+          git submodule sync
+          git submodule update --init
+      - name: 'Checkout repository'
+        if: inputs.gerrit_refspec == ''
+        # yamllint disable-line rule:line-length
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.ref }}
+          # The whole history: it holds the base dependency-change-action
+          # compares HEAD with, the parent of a pull request's merge
+          # commit or every commit a push carried since
+          # github.event.before. A depth of 1 would leave every pull
+          # request unresolved and gated, and 2 a push of more than one
+          # commit. checkout-gerrit-change-action fetches depth 2, the
+          # change and its parent, which is all a Gerrit call compares.
+          fetch-depth: 0
+          persist-credentials: false
+          submodules: ${{ inputs.checkout_submodules }}
+
+      # The action reads git objects only, never the working tree,
+      # deletes any sidecar at its output path before it starts, and
+      # writes dependency-change.json only when it can tell what the
+      # change touched; the step never fails on what it finds.
+      # Detection is repository-wide (path-prefix '.'), not scoped to
+      # path_prefix: a Maven parent chain crosses directory boundaries
+      # the prefix rule cannot follow, and over-matching costs one
+      # strict run where under-matching disarms the gate.
+      # .mvn/jvm.config joins the maven preset, since a -D property set
+      # there can select a dependency version. See the action's README
+      # for the preset's files, the base it picks per event, and the
+      # symbolic-link rule.
+      - name: 'Detect dependency changes'
+        id: dependency-change
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/dependency-change-action@257928b15e4e6a5cc5a888435be59b058055c4e1  # v0.0.1
+        with:
+          ecosystems: 'maven'
+          patterns: '.mvn/jvm.config'
+          path-prefix: '.'
+          gerrit-refspec: ${{ inputs.gerrit_refspec }}
+          output: 'dependency-change.json'
+
+      # The sidecar travels in an artefact of its own, never as a job
+      # output or in an artefact the build job writes: a file transfers
+      # unchanged, and the suffix keeps a matrix call's signal with
+      # that call's scan. An unresolved detection writes no sidecar and
+      # leaves manifest empty, so this step is skipped, the job output
+      # above stays empty, and the Grype job downloads nothing; the
+      # upload itself must not go quiet on a missing file.
+      - name: 'Upload dependency-change sidecar'
+        id: upload-dependency-change
+        if: steps.dependency-change.outputs.manifest != ''
+        # yamllint disable-line rule:line-length
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: dependency-change-maven${{ inputs.artifact_suffix }}
+          path: dependency-change.json
+          retention-days: 45
+          if-no-files-found: error
+
   build:
     name: 'Build'
     needs: gerrit-validate
@@ -569,6 +843,9 @@ jobs:
       # Read by the Grype job, which runs whenever an SBOM was uploaded,
       # including after a test failure.
       sbom_uploaded: ${{ steps.upload-sbom.outcome == 'success' }}
+      # The ID that upload returned, so the Grype job fetches that
+      # artefact and no other of the same name.
+      sbom_artifact_id: ${{ steps.upload-sbom.outputs.artifact-id }}
       # Surfaced so a caller's downstream job can locate the
       # publish-ready repository layout without re-deriving the path.
       m2repo_exists: ${{ steps.build.outputs.m2repo_exists }}
@@ -1127,7 +1404,10 @@ jobs:
           # to the newest match, so a shared 'sbom-files' had both
           # Grype jobs scan whichever lane happened to upload last.
           name: sbom-files-maven${{ inputs.artifact_suffix }}
-          # Glob matches whichever SBOM formats the generator produced
+          # Glob matches whichever SBOM formats the generator produced.
+          # The dependency-change sidecar does not travel here: this
+          # job ran the project's build plugins, which could have
+          # written one, so the dependency-change job carries its own.
           path: sbom-cyclonedx.*
           retention-days: 45
           # The Grype job reads this artifact, so a missing or misnamed
@@ -1247,14 +1527,21 @@ jobs:
   grype:
     name: 'Grype Audit SBOM'
     runs-on: ubuntu-latest
-    needs: 'build'
+    needs: [build, dependency-change]
     # Runs whenever the build job uploaded an SBOM, including after a
-    # test failure: the audit reads the document, not the build.
+    # test failure: the audit reads the document, not the build. A
+    # skipped dependency-change job, on every call that does not
+    # detect, adds no wait; a failed one does not stop the audit
+    # either: the sidecar is then absent and the scan gates, as on
+    # 'always'.
     # yamllint disable-line rule:line-length
     if: ${{ !cancelled() && needs.build.outputs.sbom_uploaded == 'true' && inputs.grype_enabled }}
     timeout-minutes: ${{ inputs.grype_timeout_minutes }}
     permissions:
       contents: read
+    outputs:
+      gate_active: ${{ steps.grype-audit.outputs.gate-active }}
+      gate_reason: ${{ steps.grype-audit.outputs.gate-reason }}
     steps:
       # One harden-runner step with the policy computed, rather than
       # two selected by condition: harden-runner declares a 'pre'
@@ -1285,25 +1572,65 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
+      # Both files the audit reads arrive by the ID their upload
+      # returned, never by name: a name resolves to the newest artefact
+      # carrying it, and the build job runs project code, which could
+      # upload one of its own. Each lands in a directory of its own,
+      # so nothing inside the SBOM artefact can pass for the sidecar.
+      # A download by ID takes no name, and without merge-multiple
+      # would nest the files under the artefact's; with it they land
+      # in the path directly, where the audit step below reads them.
       - name: 'Download SBOM artefact'
         # yamllint disable-line rule:line-length
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
-          name: sbom-files-maven${{ inputs.artifact_suffix }}
+          artifact-ids: ${{ needs.build.outputs.sbom_artifact_id }}
+          merge-multiple: true
+          path: sbom
+
+      # Only when the dependency-change job uploaded one, since a call
+      # that does not detect skips that job and an unresolved
+      # detection uploads none; an ID that resolves to no
+      # artefact fails this step, and with it the job, rather than
+      # scanning without the signal it was promised.
+      - name: 'Download dependency-change sidecar'
+        # yamllint disable-line rule:line-length
+        if: needs.dependency-change.outputs.dependency_change_artifact_id != ''
+        # yamllint disable-line rule:line-length
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          # yamllint disable-line rule:line-length
+          artifact-ids: ${{ needs.dependency-change.outputs.dependency_change_artifact_id }}
+          merge-multiple: true
+          path: dependency-change
 
       # The grype_permit_fail input (or, when unset, the NO_BLOCK_AUDIT_FAIL
       # repository variable) disables failure propagation so pull requests
       # can proceed when blocked by newly discovered CVEs in transitive
       # dependencies.
+      #
+      # The manifest path is passed whatever grype_gate_when says. The
+      # action reads it only under dependencies-changed, and a file the
+      # download did not bring (an unresolved detection, or 'always',
+      # where detection never ran) leaves the signal unresolved, which
+      # gates: the behaviour before the gate policy existed.
       - name: 'Grype audit SBOM'
         id: grype-audit
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/grype-scan-action@5c81b23afb2ea771b2d247807a12d90783328675  # v0.5.0
         with:
-          sbom: 'sbom-cyclonedx.json'
+          sbom: 'sbom/sbom-cyclonedx.json'
           fail-on: ${{ inputs.grype_fail_on }}
           # yamllint disable-line rule:line-length
           permit-fail: ${{ inputs.grype_permit_fail || vars.NO_BLOCK_AUDIT_FAIL == 'true' }}
+          gate-when: ${{ inputs.grype_gate_when }}
+          dependency-change-manifest: 'dependency-change/dependency-change.json'
+          dependency-policy: ${{ inputs.grype_dependency_policy }}
+          transitive-fail-on: ${{ inputs.grype_transitive_fail_on }}
+          only-fixed: ${{ inputs.grype_only_fixed }}
+          remediation-window-days: ${{ inputs.grype_remediation_window_days }}
+          # yamllint disable-line rule:line-length
+          remediation-window-start: ${{ inputs.grype_remediation_window_start }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           # The action's default name, with the suffix that keeps each
           # call's reports apart.
