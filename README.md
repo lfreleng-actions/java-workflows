@@ -443,8 +443,13 @@ paths, the metadata seeded and pruned, and the files published and
 failed. The `grype` job audits the SBOM for information and never fails
 the run: its policy inputs default to `grype-scan-action`'s own values
 and shape the report, while the scan keeps `permit-fail` on and the job
-continues on error. A bad policy value fails the input check before
-the build. The build and publish jobs add the `nexus_server` host to their
+continues on error. The lane's input check runs `grype-scan-action`
+before the build in the mode that checks its inputs and stops, with
+the same inputs the scan gets and nothing to scan, so a bad policy
+value fails in seconds by the action's own
+rules; as in the verify lanes, that the step makes no network request
+is the action's contract, which is why the job runs no harden-runner.
+The build and publish jobs add the `nexus_server` host to their
 egress allow-lists.
 
 The caller owns the triggers, the Gerrit comments, the wait for
@@ -712,15 +717,17 @@ checks, its coordinate check and its copy of `maven-build-action`'s
 placeholder expansion, the submodule wiring the fixtures cannot
 exercise, and that every artefact name the Maven lanes use carries
 `artifact_suffix`; `tests/test_grype_gate.py` holds both lanes to the
-Grype gate policy's wiring: that `gerrit-validate` validates through
-the action at the scan's pin with the scan's own policy expressions
+Grype gate policy's wiring: that each lane's input check,
+`gerrit-validate` in the verify lanes and the merge lane's own,
+validates through the action at the scan's pin with the scan's
+own expressions and fixed values
 and fetches nothing else, with the presets' shell check run as
 extracted, the detection inputs on the `repository-metadata` step, its pin, job
 output, checkout depth and position, the `grype` job's `needs`,
 condition and guarded verdict, the download of the SBOM alone by its
 upload's ID, the absence of the old detection job and sidecar, each
-new input's declaration and pass-through, the merge lane's input
-checks, the verdict outputs, the self-test calls, that no
+new input's declaration and pass-through, the verdict outputs, the
+self-test calls, that no
 symbolic link or submodule sits in this repository's tree, and that
 `gate-verdict-cases` runs both actions at the lanes' pins with the
 lanes' inputs and the expected verdict fixed per case, and that

@@ -9,13 +9,14 @@ dependency files, so these tests hold it in place:
 - the six grype_* policy inputs exist with the agreed defaults, and
   each reaches grype-scan-action under its own name, at the pin the
   lanes share;
-- gerrit-validate validates the policy inputs by running
+- each lane's validation job (gerrit-validate in the verify lanes,
+  validate in the merge lane) validates the Grype inputs by running
   grype-scan-action in validate-only mode, at the scan's pin, with
-  every policy expression the scan passes and nothing to scan, in a
-  job that fetches that one action and nothing else; its
-  grype_dependency_ecosystems check, and the merge lane's input check,
-  accept each allowed value and reject a typo, run as extracted from
-  the workflows;
+  every input the scan passes as the lane's own or as a fixed value,
+  as the same expression, and nothing to scan, in a job that fetches
+  that one action and nothing else; the verify lanes'
+  grype_dependency_ecosystems check accepts each allowed value and
+  rejects a typo, run as extracted from the workflows;
 - every repository-metadata-action call is at the v0.4.0 pin, and no
   workflow calls dependency-change-action directly, reads its
   sidecar, or keeps a dependency-change job;
@@ -109,14 +110,15 @@ OLD_WIRING = (
     "dependency-change-manifest",
 )
 OLD_JOB = "dependency-change"
-GRYPE_PIN = "413f5af7ba50b0a048ad0ff98e594dedbbb714b9"
+GRYPE_PIN = "f65dca2762823cfc8f376e32fee9baa6f3292696"
 GRYPE_ACTION = "lfreleng-actions/grype-scan-action"
 GRYPE_USES = f"{GRYPE_ACTION}@{GRYPE_PIN}"
-# The pin with its version comment, as each verify lane's text must
-# hold it: once on the validation step, once on the scan.
-GRYPE_LINE = f"uses: {GRYPE_USES}  # v0.6.0"
+# The pin with its version comment, as each lane's text must hold it:
+# once on the validation step, once on the scan.
+GRYPE_LINE = f"uses: {GRYPE_USES}  # v0.6.2"
 
 VALIDATE_JOB = "gerrit-validate"
+MERGE_VALIDATE_JOB = "validate"
 # The scan's inputs that are one grype_* input of the lane, passed
 # verbatim; the validation step must pass each with the same
 # expression. Read from the scan step, so an input added there and
@@ -134,6 +136,21 @@ VALIDATED_INPUTS = frozenset(
         "bypass-repository",
     }
 )
+# The merge lane's scan has no gate and no window, and holds
+# permit-fail at a fixed 'true', which the validator copies.
+MERGE_VALIDATED_INPUTS = frozenset(
+    {
+        "fail-on",
+        "permit-fail",
+        "only-fixed",
+        "dependency-policy",
+        "transitive-fail-on",
+        "bypass-repository",
+    }
+)
+# What the scan scans; validate-only needs neither, and the validator
+# passes neither.
+TARGET_INPUTS = frozenset({"sbom", "target"})
 # The one policy-adjacent input gerrit-validate still checks in shell:
 # an input of repository-metadata-action, not of grype-scan-action.
 ECOSYSTEMS_INPUT = "${{ inputs.grype_dependency_ecosystems }}"
@@ -169,6 +186,15 @@ CHECK_ASSERT = "Assert the step rejected the gate-when"
 GATE_WHEN_VALUES = ("always", "dependencies-changed")
 SUFFIX = "${{ inputs.artifact_suffix }}"
 MERGE_VALIDATE = "Validate Grype inputs"
+# Each lane's validation job, the step in it that runs grype-scan-action
+# in validate-only mode, and the scan inputs that must be among the
+# ones it mirrors.
+VALIDATORS: dict[str, tuple[str, str, frozenset[str]]] = {
+    MAVEN: (VALIDATE_JOB, GATE_VALIDATE, VALIDATED_INPUTS),
+    GRADLE: (VALIDATE_JOB, GATE_VALIDATE, VALIDATED_INPUTS),
+    MERGE: (MERGE_VALIDATE_JOB, MERGE_VALIDATE, MERGE_VALIDATED_INPUTS),
+}
+VALIDATED_LANES = (MAVEN, GRADLE, MERGE)
 
 # What each lane watches beyond the presets: a -D property in
 # jvm.config can select a Maven dependency version; any Gradle script
@@ -233,8 +259,6 @@ MERGE_INPUTS = (
     ("grype_bypass_repository", "string", "", "bypass-repository"),
 )
 
-SEVERITIES = ("negligible", "low", "medium", "high", "critical", "none")
-SEVERITY_FAILS = ("", "Medium", "moderate", "high,critical", "medium\n")
 ECOSYSTEM_PASSES = (
     "",
     "maven",
@@ -253,16 +277,6 @@ ECOSYSTEM_FAILS = (
     "maven;gradle",
     "maven\ngradle",
     "maven\n::warning::injected",
-)
-BYPASS_PASSES = ("", "lfreleng-actions/java-workflows", "a/b", "A.b_c-d/e.f")
-BYPASS_FAILS = (
-    "java-workflows",
-    "/java-workflows",
-    "lfreleng-actions/",
-    "a/b/c",
-    "a b/c",
-    "https://github.com/a/b",
-    "a/b\n::warning::injected",
 )
 
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -395,64 +409,98 @@ def policy_inputs(step: Step) -> dict[str, str]:
     }
 
 
+def mirrored_inputs(scan: Step) -> dict[str, str]:
+    """Return the scan's inputs the validation step must pass, verbatim.
+
+    Each input the scan passes as one grype_* input of the lane, or as
+    a fixed value with no expression in it, less the scan target. An
+    input built from another context (the token, the artefact name, the
+    metadata job's verdict) is the scan's alone: validate-only reads no
+    bypass issue and uploads nothing.
+    """
+    return {
+        name: text(value)
+        for name, value in with_of(scan).items()
+        if name not in TARGET_INPUTS
+        and (
+            POLICY_EXPRESSION.match(text(value)) is not None
+            or "${{" not in text(value)
+        )
+    }
+
+
 def uses_in(job: Job) -> list[str]:
     """Return the ``uses:`` of each action step of ``job``, in order."""
     return [uses_of(step) for step in steps_of(job) if uses_of(step)]
 
 
-class GateInputValidation(ContractCase):
-    """The gate input validation: grype-scan-action in validate-only mode.
+def validate_job_of(workflow: Workflow, lane: str) -> Job:
+    """Return the validation job of ``workflow``, the one ``lane`` has."""
+    return job_of(workflow, VALIDATORS[lane][0])
 
-    gerrit-validate runs the action at the scan's pin with
-    ``validate-only: 'true'``, every policy input the grype job's scan
-    passes as a plain expression of the lane's inputs, each with the
-    same expression, and nothing else: no ``sbom``, no ``target``. The
-    rules are then the action's own, and the two steps cannot drift.
-    The job fetches that one action and nothing else: no checkout and
-    no harden-runner, since validate-only makes no network request.
+
+def validator_of(workflow: Workflow, lane: str) -> Step:
+    """Return the validate-only step of ``workflow``, as ``lane`` names it."""
+    return step_of(validate_job_of(workflow, lane), VALIDATORS[lane][1])
+
+
+class GateInputValidation(ContractCase):
+    """The Grype input validation: grype-scan-action in validate-only mode.
+
+    Each lane's validation job runs the action at the scan's pin with
+    ``validate-only: 'true'`` and every input the grype job's scan
+    passes as a plain expression of the lane's inputs or as a fixed
+    value, each the same, and nothing else: no ``sbom``, no ``target``.
+    The rules are then the action's own, and the two steps cannot
+    drift. The job fetches that one action and nothing else: no
+    checkout and no harden-runner, since validate-only makes no
+    network request. In the verify lanes,
     ``grype_dependency_ecosystems`` stays a shell check, run here as
     extracted, as an input of repository-metadata-action.
     """
 
-    def check_validator(self, workflow: Workflow) -> None:
+    def check_validator(self, workflow: Workflow, lane: str) -> None:
         """Fail unless the validator mirrors the scan in validate-only mode."""
-        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        validator = validator_of(workflow, lane)
         scan = step_of(job_of(workflow, "grype"), GRYPE_STEP)
-        policy = policy_inputs(scan)
+        mirrored = mirrored_inputs(scan)
+        name = VALIDATORS[lane][1]
         self.assertLessEqual(
-            VALIDATED_INPUTS,
-            set(policy),
+            VALIDATORS[lane][2],
+            set(mirrored),
             f"'{GRYPE_STEP}' must pass each policy input as the lane's own",
         )
         self.assertEqual(
             uses_of(validator),
             uses_of(scan),
-            f"'{GATE_VALIDATE}' and '{GRYPE_STEP}' must share one pin",
+            f"'{name}' and '{GRYPE_STEP}' must share one pin",
         )
         self.assertEqual(
             uses_of(validator),
             GRYPE_USES,
-            f"'{GATE_VALIDATE}' must run grype-scan-action at {GRYPE_PIN}",
+            f"'{name}' must run grype-scan-action at {GRYPE_PIN}",
         )
         self.assertEqual(
             with_of(validator),
-            {"validate-only": "true", **policy},
-            f"'{GATE_VALIDATE}' must pass validate-only 'true' and the"
-            f" scan's policy expressions, and nothing else",
+            {"validate-only": "true", **mirrored},
+            f"'{name}' must pass validate-only 'true' and the scan's"
+            " expressions and fixed values, and nothing else",
         )
 
-    def check_job_fetches_one_action(self, workflow: Workflow) -> None:
+    def check_job_fetches_one_action(
+        self, workflow: Workflow, lane: str
+    ) -> None:
         """Fail unless the validator is the job's only action step."""
         self.assertEqual(
-            uses_in(job_of(workflow, VALIDATE_JOB)),
+            uses_in(validate_job_of(workflow, lane)),
             [GRYPE_USES],
-            f"{VALIDATE_JOB} must run no action but the validator: no"
-            " checkout, no harden-runner",
+            f"{VALIDATORS[lane][0]} must run no action but the validator:"
+            " no checkout, no harden-runner",
         )
 
-    def check_no_shell_validator(self, workflow: Workflow) -> None:
+    def check_no_shell_validator(self, workflow: Workflow, lane: str) -> None:
         """Fail unless no run: step reads a grype_* input but ecosystems."""
-        for step in steps_of(job_of(workflow, VALIDATE_JOB)):
+        for step in steps_of(validate_job_of(workflow, lane)):
             if not step.get("run"):
                 continue
             read = [
@@ -465,8 +513,8 @@ class GateInputValidation(ContractCase):
                 [ECOSYSTEMS_INPUT]
                 if step.get("name") == ECOSYSTEMS_VALIDATE
                 else [],
-                f"{VALIDATE_JOB}: '{text(step.get('name'))}' must not check"
-                " a grype_* policy input in shell",
+                f"{VALIDATORS[lane][0]}: '{text(step.get('name'))}' must"
+                " not check a grype_* policy input in shell",
             )
 
     def check_ecosystems_step(self, workflow: Workflow) -> None:
@@ -498,12 +546,15 @@ class GateInputValidation(ContractCase):
         return run_script(script, {"ECOSYSTEMS": ecosystems})
 
     def test_the_steps_run_on_every_call(self) -> None:
-        """Neither validation step has a condition."""
-        for lane in LANES:
-            for name in (GATE_VALIDATE, ECOSYSTEMS_VALIDATE):
+        """No validation step has a condition."""
+        for lane in VALIDATED_LANES:
+            names = [VALIDATORS[lane][1]]
+            if lane in LANES:
+                names.append(ECOSYSTEMS_VALIDATE)
+            for name in names:
                 with self.subTest(lane=lane, step=name):
                     step = step_of(
-                        job_of(load_workflow(lane), VALIDATE_JOB), name
+                        validate_job_of(load_workflow(lane), lane), name
                     )
                     self.assertEqual(
                         text(step.get("if")),
@@ -513,21 +564,21 @@ class GateInputValidation(ContractCase):
 
     def test_the_validator_mirrors_the_scan(self) -> None:
         """Each lane validates through the action with the scan's inputs."""
-        for lane in LANES:
+        for lane in VALIDATED_LANES:
             with self.subTest(lane=lane):
-                self.check_validator(load_workflow(lane))
+                self.check_validator(load_workflow(lane), lane)
 
     def test_the_job_fetches_one_action(self) -> None:
-        """Each lane's gerrit-validate runs no action but the validator."""
-        for lane in LANES:
+        """Each lane's validation job runs no action but the validator."""
+        for lane in VALIDATED_LANES:
             with self.subTest(lane=lane):
-                self.check_job_fetches_one_action(load_workflow(lane))
+                self.check_job_fetches_one_action(load_workflow(lane), lane)
 
     def test_no_shell_validator_remains(self) -> None:
-        """No run: step of gerrit-validate checks a policy input."""
-        for lane in LANES:
+        """No run: step of a validation job checks a policy input."""
+        for lane in VALIDATED_LANES:
             with self.subTest(lane=lane):
-                self.check_no_shell_validator(load_workflow(lane))
+                self.check_no_shell_validator(load_workflow(lane), lane)
 
     def test_the_ecosystems_step_reads_its_input(self) -> None:
         """The ecosystems check reads grype_dependency_ecosystems alone."""
@@ -537,7 +588,7 @@ class GateInputValidation(ContractCase):
 
     def test_the_pin_appears_twice_with_its_comment(self) -> None:
         """Each lane's text holds the pinned uses: line twice."""
-        for lane in LANES:
+        for lane in VALIDATED_LANES:
             with self.subTest(lane=lane):
                 self.check_pin_text(read_text(lane), lane)
 
@@ -574,32 +625,55 @@ class GateInputValidation(ContractCase):
     def test_a_drifted_expression_fails(self) -> None:
         """A validator passing gate-when from another input fails."""
         workflow = mutated(load_workflow(MAVEN))
-        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        validator = validator_of(workflow, MAVEN)
         with_of(validator)["gate-when"] = (
             "${{ inputs.grype_dependency_policy }}"
         )
-        self.assert_check_fails(self.check_validator, workflow)
+        self.assert_check_fails(self.check_validator, workflow, MAVEN)
+
+    def test_a_drifted_merge_expression_fails(self) -> None:
+        """A merge validator passing fail-on from another input fails."""
+        workflow = mutated(load_workflow(MERGE))
+        validator = validator_of(workflow, MERGE)
+        with_of(validator)["fail-on"] = (
+            "${{ inputs.grype_transitive_fail_on }}"
+        )
+        self.assert_check_fails(self.check_validator, workflow, MERGE)
 
     def test_a_missing_validate_only_fails(self) -> None:
         """A validator without validate-only, a real scan, fails."""
         workflow = mutated(load_workflow(GRADLE))
-        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        validator = validator_of(workflow, GRADLE)
         del with_of(validator)["validate-only"]
-        self.assert_check_fails(self.check_validator, workflow)
+        self.assert_check_fails(self.check_validator, workflow, GRADLE)
+
+    def test_a_merge_validator_without_validate_only_fails(self) -> None:
+        """A merge validator without validate-only, a real scan, fails."""
+        workflow = mutated(load_workflow(MERGE))
+        validator = validator_of(workflow, MERGE)
+        del with_of(validator)["validate-only"]
+        self.assert_check_fails(self.check_validator, workflow, MERGE)
 
     def test_a_bare_boolean_validate_only_fails(self) -> None:
         """A validate-only written as YAML true, not the string, fails."""
         workflow = mutated(load_workflow(MAVEN))
-        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        validator = validator_of(workflow, MAVEN)
         with_of(validator)["validate-only"] = True
-        self.assert_check_fails(self.check_validator, workflow)
+        self.assert_check_fails(self.check_validator, workflow, MAVEN)
 
     def test_differing_pins_fail(self) -> None:
         """A validator at another commit than the scan fails."""
         workflow = mutated(load_workflow(GRADLE))
-        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        validator = validator_of(workflow, GRADLE)
         validator["uses"] = f"{GRYPE_ACTION}@{'0' * 40}"
-        self.assert_check_fails(self.check_validator, workflow)
+        self.assert_check_fails(self.check_validator, workflow, GRADLE)
+
+    def test_differing_merge_pins_fail(self) -> None:
+        """A merge validator at another commit than the scan fails."""
+        workflow = mutated(load_workflow(MERGE))
+        validator = validator_of(workflow, MERGE)
+        validator["uses"] = f"{GRYPE_ACTION}@{'0' * 40}"
+        self.assert_check_fails(self.check_validator, workflow, MERGE)
 
     def test_a_scan_input_the_validator_lacks_fails(self) -> None:
         """A policy input added to the scan alone fails."""
@@ -608,56 +682,101 @@ class GateInputValidation(ContractCase):
         with_of(scan)["declared-source"] = (
             "${{ inputs.grype_declared_source }}"
         )
-        self.assert_check_fails(self.check_validator, workflow)
+        self.assert_check_fails(self.check_validator, workflow, MAVEN)
+
+    def test_a_fixed_scan_input_the_validator_lacks_fails(self) -> None:
+        """A fixed value added to the scan alone fails."""
+        workflow = mutated(load_workflow(MERGE))
+        scan = step_of(job_of(workflow, "grype"), GRYPE_STEP)
+        with_of(scan)["gate-when"] = "always"
+        self.assert_check_fails(self.check_validator, workflow, MERGE)
 
     def test_a_scan_dropping_a_policy_input_fails(self) -> None:
         """A scan no longer passing a policy input as the lane's fails."""
         workflow = mutated(load_workflow(GRADLE))
         scan = step_of(job_of(workflow, "grype"), GRYPE_STEP)
-        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        validator = validator_of(workflow, GRADLE)
         with_of(scan)["fail-on"] = "medium"
         del with_of(validator)["fail-on"]
-        self.assert_check_fails(self.check_validator, workflow)
+        self.assert_check_fails(self.check_validator, workflow, GRADLE)
+
+    def test_a_merge_scan_dropping_permit_fail_fails(self) -> None:
+        """A merge scan no longer passing permit-fail fails."""
+        workflow = mutated(load_workflow(MERGE))
+        scan = step_of(job_of(workflow, "grype"), GRYPE_STEP)
+        validator = validator_of(workflow, MERGE)
+        del with_of(scan)["permit-fail"]
+        del with_of(validator)["permit-fail"]
+        self.assert_check_fails(self.check_validator, workflow, MERGE)
 
     def test_an_sbom_passed_to_the_validator_fails(self) -> None:
         """A validator given something to scan fails."""
         workflow = mutated(load_workflow(MAVEN))
-        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        validator = validator_of(workflow, MAVEN)
         with_of(validator)["sbom"] = f"{SBOM_DIR}/sbom-cyclonedx.json"
-        self.assert_check_fails(self.check_validator, workflow)
+        self.assert_check_fails(self.check_validator, workflow, MAVEN)
+
+    def test_a_target_passed_to_the_validator_fails(self) -> None:
+        """A validator given a target to scan fails."""
+        workflow = mutated(load_workflow(MERGE))
+        validator = validator_of(workflow, MERGE)
+        with_of(validator)["target"] = "dir:."
+        self.assert_check_fails(self.check_validator, workflow, MERGE)
+
+    def test_a_token_passed_to_the_validator_fails(self) -> None:
+        """A validator given the scan's token, built from secrets, fails."""
+        workflow = mutated(load_workflow(MERGE))
+        validator = validator_of(workflow, MERGE)
+        with_of(validator)["github-token"] = "${{ secrets.GITHUB_TOKEN }}"
+        self.assert_check_fails(self.check_validator, workflow, MERGE)
 
     def test_a_checkout_in_the_job_fails(self) -> None:
-        """A gerrit-validate that checks out fails."""
-        workflow = mutated(load_workflow(GRADLE))
-        steps_of(job_of(workflow, VALIDATE_JOB)).insert(
-            0,
-            {"name": "Checkout", "uses": f"{CHECKOUT_ACTIONS[0]}@{'0' * 40}"},
-        )
-        self.assert_check_fails(self.check_job_fetches_one_action, workflow)
+        """A validation job that checks out fails."""
+        for lane in (GRADLE, MERGE):
+            with self.subTest(lane=lane):
+                workflow = mutated(load_workflow(lane))
+                steps_of(validate_job_of(workflow, lane)).insert(
+                    0,
+                    {
+                        "name": "Checkout",
+                        "uses": f"{CHECKOUT_ACTIONS[0]}@{'0' * 40}",
+                    },
+                )
+                self.assert_check_fails(
+                    self.check_job_fetches_one_action, workflow, lane
+                )
 
     def test_a_harden_runner_in_the_job_fails(self) -> None:
-        """A gerrit-validate under harden-runner fails."""
-        workflow = mutated(load_workflow(MAVEN))
-        steps_of(job_of(workflow, VALIDATE_JOB)).insert(
-            0,
-            {
-                "name": "Harden runner",
-                "uses": f"step-security/harden-runner@{'0' * 40}",
-            },
-        )
-        self.assert_check_fails(self.check_job_fetches_one_action, workflow)
+        """A validation job under harden-runner fails."""
+        for lane in (MAVEN, MERGE):
+            with self.subTest(lane=lane):
+                workflow = mutated(load_workflow(lane))
+                steps_of(validate_job_of(workflow, lane)).insert(
+                    0,
+                    {
+                        "name": "Harden runner",
+                        "uses": f"step-security/harden-runner@{'0' * 40}",
+                    },
+                )
+                self.assert_check_fails(
+                    self.check_job_fetches_one_action, workflow, lane
+                )
 
     def test_a_shell_policy_check_fails(self) -> None:
         """A run: step reading a policy input fails."""
-        workflow = mutated(load_workflow(GRADLE))
-        steps_of(job_of(workflow, VALIDATE_JOB)).append(
-            {
-                "name": "Validate grype_fail_on",
-                "env": {"FAIL_ON": "${{ inputs.grype_fail_on }}"},
-                "run": "true",
-            }
-        )
-        self.assert_check_fails(self.check_no_shell_validator, workflow)
+        for lane in (GRADLE, MERGE):
+            with self.subTest(lane=lane):
+                workflow = mutated(load_workflow(lane))
+                steps_of(validate_job_of(workflow, lane)).append(
+                    {
+                        "name": "Validate grype_fail_on",
+                        "env": {"FAIL_ON": "${{ inputs.grype_fail_on }}"},
+                        "run": "true",
+                    }
+                )
+                self.assert_check_fails(
+                    self.check_no_shell_validator, workflow, lane
+                )
 
     def test_an_ecosystems_step_reading_more_fails(self) -> None:
         """An ecosystems check reading a policy input too fails."""
@@ -665,17 +784,23 @@ class GateInputValidation(ContractCase):
         step = step_of(job_of(workflow, VALIDATE_JOB), ECOSYSTEMS_VALIDATE)
         section(step, "env")["GATE_WHEN"] = "${{ inputs.grype_gate_when }}"
         self.assert_check_fails(self.check_ecosystems_step, workflow)
-        self.assert_check_fails(self.check_no_shell_validator, workflow)
+        self.assert_check_fails(self.check_no_shell_validator, workflow, MAVEN)
 
     def test_one_pinned_line_fails(self) -> None:
         """A lane with the pin on the scan alone fails."""
-        content = read_text(MAVEN).replace(GRYPE_LINE, "", 1)
-        self.assert_check_fails(self.check_pin_text, content, MAVEN)
+        for lane in (MAVEN, MERGE):
+            with self.subTest(lane=lane):
+                content = read_text(lane).replace(GRYPE_LINE, "", 1)
+                self.assert_check_fails(self.check_pin_text, content, lane)
 
     def test_a_third_reference_fails(self) -> None:
         """A lane with a third grype-scan-action reference fails."""
-        content = read_text(GRADLE) + f"\n# uses: {GRYPE_ACTION}@{'0' * 40}\n"
-        self.assert_check_fails(self.check_pin_text, content, GRADLE)
+        for lane in (GRADLE, MERGE):
+            with self.subTest(lane=lane):
+                content = (
+                    read_text(lane) + f"\n# uses: {GRYPE_ACTION}@{'0' * 40}\n"
+                )
+                self.assert_check_fails(self.check_pin_text, content, lane)
 
 
 class GateValidateCheck(ContractCase):
@@ -695,7 +820,7 @@ class GateValidateCheck(ContractCase):
     def defaults_of(self, lane: str) -> dict[str, str]:
         """Return each validated input's lane default, by action input."""
         workflow = load_workflow(lane)
-        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        validator = validator_of(workflow, lane)
         inputs = call_inputs(workflow)
         defaults: dict[str, str] = {}
         for name, expression in policy_inputs(validator).items():
@@ -1454,88 +1579,6 @@ class TuningInputs(ContractCase):
         step = step_of(job_of(workflow, "grype"), GRYPE_STEP)
         with_of(step)["permit-fail"] = "false"
         self.assert_check_fails(self.check_merge_inputs, workflow)
-
-
-class MergeInputValidation(ContractCase):
-    """The merge lane's Grype input validation, run as extracted."""
-
-    @property
-    def script(self) -> str:
-        """The validation step's script, extracted from the merge lane."""
-        return run_of(load_workflow(MERGE), "validate", MERGE_VALIDATE)
-
-    def validate(
-        self,
-        fail_on: str = "medium",
-        policy: str = "all",
-        transitive: str = "none",
-        bypass: str = "",
-    ) -> Verdict:
-        """Run the step with one value set and the rest at their defaults."""
-        return run_script(
-            self.script,
-            {
-                "FAIL_ON": fail_on,
-                "DEPENDENCY_POLICY": policy,
-                "TRANSITIVE_FAIL_ON": transitive,
-                "BYPASS_REPOSITORY": bypass,
-            },
-        )
-
-    def test_the_step_runs_on_every_call(self) -> None:
-        """The validation step has no condition."""
-        step = step_of(
-            job_of(load_workflow(MERGE), "validate"), MERGE_VALIDATE
-        )
-        self.assertEqual(text(step.get("if")), "", "no condition")
-
-    @needs_runner_tools
-    def test_defaults_pass(self) -> None:
-        """The defaults pass."""
-        self.assert_passes(self.validate(), "defaults")
-
-    @needs_runner_tools
-    def test_severities(self) -> None:
-        """Both severity inputs take a severity or none, and nothing else."""
-        for field in ("fail_on", "transitive"):
-            for value in SEVERITIES:
-                with self.subTest(field=field, value=value):
-                    self.assert_passes(
-                        self.validate(**{field: value}), f"{field} '{value}'"
-                    )
-            for value in SEVERITY_FAILS:
-                with self.subTest(field=field, value=value):
-                    self.assert_fails(
-                        self.validate(**{field: value}),
-                        f"{field} '{value}' rejected",
-                    )
-
-    @needs_runner_tools
-    def test_dependency_policy(self) -> None:
-        """grype_dependency_policy takes its two values and nothing else."""
-        for value in ("all", "declared"):
-            with self.subTest(value=value):
-                self.assert_passes(self.validate(policy=value), value)
-        for value in ("", "direct", "Declared", "all declared"):
-            with self.subTest(value=value):
-                self.assert_fails(
-                    self.validate(policy=value), f"'{value}' rejected"
-                )
-
-    @needs_runner_tools
-    def test_bypass_repository(self) -> None:
-        """grype_bypass_repository takes owner/name, or nothing."""
-        for value in BYPASS_PASSES:
-            with self.subTest(value=value):
-                self.assert_passes(self.validate(bypass=value), value)
-        for value in BYPASS_FAILS:
-            with self.subTest(value=value):
-                verdict = self.validate(bypass=value)
-                self.assert_fails(verdict, f"'{value}' rejected")
-                self.assertFalse(
-                    verdict.warned(),
-                    "a line break started a workflow command",
-                )
 
 
 class GateVerdictOutputs(ContractCase):

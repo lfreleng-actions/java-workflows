@@ -362,12 +362,11 @@ nor turn it into a negative Gerrit vote.
 
 The repository-metadata, build, publish and grype jobs run under
 harden-runner, as the verify lane's jobs do. `validate` does without,
-like the verify lane's `gerrit-validate`: it runs one shell check that
-makes no network call, with no checkout, token or credential. (The
-verify lane's job also runs `grype-scan-action` in validate-only mode,
-which GitHub fetches with the workflow; that it makes no network
-request of its own is the action's contract, tested in its own
-repository.) The build
+like the verify lane's `gerrit-validate`: its shell checks make no
+network call, with no checkout, token or credential, and its one
+action, `grype-scan-action` in validate-only mode, GitHub fetches with
+the workflow; that it makes no network request of its own is the
+action's contract, tested in its own repository. The build
 and publish jobs each add the `nexus_server` host and port to the
 central allow-list: `fetch` reads metadata from it in the build job,
 and the publish job writes to it.
