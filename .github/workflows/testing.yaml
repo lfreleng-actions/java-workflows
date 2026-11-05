@@ -540,15 +540,16 @@ jobs:
   # the detector resolves by its own rules: HEAD is the run's commit,
   # the whole-history checkout holds the base, the target branch's
   # tip, and no symbolic link or submodule anywhere in the repository
-  # can leave it undecided, which grype-gate-check.sh enforces. So a
-  # sidecar always reaches the Grype job here, and gate-resolved-check
-  # holds the lane to what any resolved run must satisfy: a sidecar
-  # whose base is the commit's parent and whose changed flag the
-  # lane's grype_gate_active follows. Which flag the pull request's
-  # own diff earns is not re-derived here; gate-verdict-cases below
-  # proves each value on a change built for it. The Gradle fixture
-  # carries no wrapper, so the lane pins the Gradle it provisions; the
-  # version matches the current line in java-maven-versions.yaml.
+  # can leave it undecided, which tests/test_grype_gate.py enforces.
+  # So a sidecar always reaches the Grype job here, and
+  # gate-resolved-check holds the lane to what any resolved run must
+  # satisfy: a sidecar whose base is the commit's parent and whose
+  # changed flag the lane's grype_gate_active follows. Which flag the
+  # pull request's own diff earns is not re-derived here;
+  # gate-verdict-cases below proves each value on a change built for
+  # it. The Gradle fixture carries no wrapper, so the lane pins the
+  # Gradle it provisions; the version matches the current line in
+  # java-maven-versions.yaml.
   maven-gate-resolved:
     name: 'Maven Build/Test (Grype gate resolved)'
     permissions:
@@ -994,11 +995,14 @@ jobs:
             "${WANT_NAME}" "${WANT_SHAPE}" ${EXPECT}
 
   # Exercises what the fixtures cannot: the guard steps' rejection
-  # paths, the Gerrit submodule initialisation, and the submodule
-  # wiring of every checkout in both lanes. It is the structural guard;
-  # submodule-check below is the behavioural one, and needs a lane run.
-  # The guard scripts run as extracted from the workflows on this
-  # branch, so a change to either shows up here.
+  # paths, the Gerrit submodule initialisation, the submodule wiring
+  # of every checkout in both lanes, and the Grype gate policy's
+  # wiring (tests/test_wiring.py and tests/test_grype_gate.py). It is
+  # the structural guard; submodule-check below is the behavioural
+  # one, and needs a lane run. The guard scripts run as extracted from
+  # the workflows on this branch, so a change to either shows up here.
+  # Each structural rule also runs against a copy of the workflow with
+  # that one thing wrong, so a rule that stops rejecting fails here.
   wiring-check:
     name: 'Wiring Check'
     runs-on: ubuntu-latest
@@ -1027,19 +1031,21 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 'Check the guards and the submodule wiring'
-        shell: bash
-        run: bash .github/scripts/wiring-check.sh
+      # The locked interpreter and PyYAML, so the suite reads the
+      # workflows as the runner does, without the host's yq.
+      - name: 'Set up uv'
+        # yamllint disable-line rule:line-length
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
 
-      # The Grype gate policy: its inputs, their validation, the
-      # dependency-change job and its condition, the checkout depth it
-      # needs, the sidecar's route to the Grype job, the self-test
-      # lanes above, and that gate-verdict-cases runs the two actions
-      # with the lanes' own inputs. gate-check, gate-resolved-check
-      # and gate-verdict-cases prove the verdicts.
-      - name: 'Check the Grype gate wiring'
+      # The Grype gate policy's tests cover its inputs, their
+      # validation, the dependency-change job and its condition, the
+      # checkout depth it needs, the sidecar's route to the Grype job,
+      # the self-test lanes above, and that gate-verdict-cases runs
+      # the two actions with the lanes' own inputs. gate-check,
+      # gate-resolved-check and gate-verdict-cases prove the verdicts.
+      - name: 'Run the contract tests'
         shell: bash
-        run: bash .github/scripts/grype-gate-check.sh
+        run: uv run --locked python -B -m unittest discover -s tests -v
 
   # Proves each lane's SBOM comes from the resolved dependency graph.
   # Without this the self-test stays green whatever the SBOM contains:

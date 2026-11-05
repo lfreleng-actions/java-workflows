@@ -138,6 +138,18 @@ repos:
     rev: a11caebebdbf797e1e96611123db279b334a7675  # frozen: 1.40.2
     hooks:
       - id: basedpyright
+        # The hook runs in its own environment, without the project's
+        # dependencies; give it the stubs for the tests' one import,
+        # pinned to the version uv.lock holds, or it falls back to
+        # its bundled yaml stubs, under which Loader.dispose() is
+        # untyped and strict mode fails. The stubs alone resolve the
+        # types; pyyaml itself stays out because pre-commit.ci caps a
+        # hook environment at 250 MiB and basedpyright plus pyyaml
+        # exceeds it. Without the package, basedpyright warns that
+        # the yaml import has no source (reportMissingModuleSource);
+        # a warning does not fail the hook.
+        additional_dependencies:
+          - types-PyYAML==6.0.12.20261103
 
   - repo: https://github.com/lfreleng-actions/gha-workflow-linter
     rev: 00aec232d3fd85436fff24dfeaad23921c5db1cb  # frozen: v1.10.1

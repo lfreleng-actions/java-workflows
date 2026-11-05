@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 The Linux Foundation
+
+# The contract tests under tests/ are the only Python here. They hold
+# the reusable workflows to their wiring and run the guard steps they
+# extract from them; nothing is packaged.
+
+[project]
+name = "java-workflows"
+version = "0.0.0"
+description = "Contract tests for the reusable Java workflows"
+requires-python = ">=3.11"
+dependencies = [
+    "pyyaml>=6.0.2",
+]
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.40.2",
+    "mypy>=1.19.1",
+    "ruff>=0.17.3",
+    "types-pyyaml>=6.0.12",
+]
+
+[tool.uv]
+package = false
+# 'uv run --locked' in CI installs the tests' one dependency alone; the
+# type checkers come through the pre-commit hooks or 'uv run --group dev'.
+default-groups = []
+
+[tool.ruff]
+target-version = "py311"
+line-length = 79
+src = [".", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "ANN",   # flake8-annotations
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "D",     # pydocstyle
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "I",     # isort
+    "ISC",   # flake8-implicit-str-concat
+    "N",     # pep8-naming
+    "PIE",   # flake8-pie
+    "PL",    # pylint
+    "PTH",   # flake8-use-pathlib
+    "RET",   # flake8-return
+    "RUF",   # ruff-specific rules
+    "S",     # flake8-bandit
+    "SIM",   # flake8-simplify
+    "UP",    # pyupgrade
+    "W",     # pycodestyle warnings
+]
+ignore = [
+    "D105",    # magic methods need no docstring
+    "D107",    # __init__ needs no docstring
+    "PLR0913", # the guard runners take one argument per environment variable
+    "PLR0917", # and pass them by position
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+    "PLR0904", # one test class per concern holds many small methods
+    "PLR2004", # the expected counts and indices are the contract
+    "S101",    # assert narrows a type after assertIsNotNone
+    "S603",    # the tests run the extracted steps through bash by design
+    "S607",    # and git, bash and prek from PATH, as the runner does
+]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["tests"]
+strict = true
+warn_unreachable = true
+
+[tool.basedpyright]
+include = ["tests"]
+pythonVersion = "3.11"
+typeCheckingMode = "strict"

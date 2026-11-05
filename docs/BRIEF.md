@@ -378,7 +378,7 @@ and the publish job writes to it.
    the deploy step's names, `MAVEN_ARGS`, and the `SNAPSHOT_METADATA_*`
    variables `maven-snapshot-metadata-action` removes from the fetch
    are refused whether or not the SBOM runs. `sbom-action`'s own names
-   are refused when it does. `wiring-check.sh` fails when the POM
+   are refused when it does. `tests/test_wiring.py` fails when the POM
    guard drifts from the verify lane's, and tests the environment
    guard on its own, with and without the SBOM.
 2. Check out the branch head (D-2) that `validate` resolved, with
@@ -423,7 +423,7 @@ and the publish job writes to it.
    `${GITHUB_WORKSPACE}` in the options and parameters before Maven
    sees them, so a step before `fetch` expands the same ones, with a
    verbatim copy of that action's function, for `fetch` and the SBOM.
-   `wiring-check.sh` compares the copy with the script vendored from
+   `tests/test_wiring.py` compares the copy with the script vendored from
    the pinned action, and fails when the pin moves without it.
    `fetch` runs Maven as the deploy does: from the workspace root, with
    `-f` naming `<path_prefix>/<pom>`. Maven finds `.mvn` from the POM's
@@ -458,7 +458,7 @@ and the publish job writes to it.
    its metadata, so it would publish from `buildNumber` 1 over the
    published copy. `check_coordinates` is on by default; the lane sets
    it anyway, so a change of default cannot turn it off, and
-   `wiring-check.sh` holds it on.
+   `tests/test_wiring.py` holds it on.
 10. Check the deploy landed in the `m2repo`. A POM that sets
     `altSnapshotDeploymentRepository` or `altDeploymentRepository` in
     the deploy plugin's `<configuration>` still wins over the command
@@ -684,7 +684,7 @@ with the lane's pin and `prune` settings, against the fixture's
 reactor: `fetch`, then a planted tree holding a fixture module and
 `org.lfreleng.test:extra`. `prune` must fail on that tree, and pass
 on the same tree once the extra coordinate goes, so the failure is
-that coordinate's. `wiring-check.sh` fails when the job's pin or
+that coordinate's. `tests/test_wiring.py` fails when the job's pin or
 `check_coordinates` drifts from the lane's.
 
 Whether the `buildNumber` carries on from published metadata, and
@@ -1120,7 +1120,7 @@ the names it passes to `maven-build-action` and `grype-scan-action`
 `repository-metadata-action` names its own upload with a suffix of
 its own, a timestamp and a random part, so it cannot collide and the
 lane leaves it alone. An empty suffix, the default, keeps every
-existing name, and `wiring-check.sh` fails on any lane-chosen name
+existing name, and `tests/test_wiring.py` fails on any lane-chosen name
 without the suffix. The Grype job's downloads name nothing: each
 fetches one upload by the `artifact-id` a job of the lane published,
 and the guard holds such a download to that output, whose upload it
@@ -1226,9 +1226,11 @@ fixture declares the submodule directory as an input of its `test`
 task, so Gradle cannot reuse a result recorded under another checkout.
 
 The Gerrit path needs more than the fixtures show. A `wiring-check`
-job, the structural guard beside that behavioural one, runs
-`.github/scripts/wiring-check.sh` over this
-branch's workflows. It extracts the POM, environment and
+job, the structural guard beside that behavioural one, runs the
+`unittest` suite under `tests/` (`tests/test_wiring.py` and
+`tests/test_grype_gate.py`) over this branch's workflows, each rule
+also against a copy of the workflow with that one thing wrong, which
+it must reject. It extracts the POM, environment and
 metadata-location guards and runs their accept and reject paths,
 including a line break that must not start a workflow command and
 names Unicode case mapping turns into reserved ones. It requires
@@ -1327,6 +1329,6 @@ request.
 2. Wire the ONAP `cps` Gerrit verify/merge workflows onto these reusable
    workflows.
 3. Drop the workflows' "Initialise Gerrit change submodules" steps
-   and their `wiring-check.sh` rule, now that
+   and their `tests/test_wiring.py` rule, now that
    `checkout-gerrit-change-action` v1.1.1 initialises the submodules a
    change adds.
