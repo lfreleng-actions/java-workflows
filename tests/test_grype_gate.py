@@ -550,7 +550,6 @@ class GateInputValidation(ContractCase):
                         f"grype_remediation_window_start '{value}' rejected",
                     )
 
-    @unittest.expectedFailure
     @needs_runner_tools
     def test_fail_on(self) -> None:
         """grype_fail_on takes a severity or none, and nothing else."""
@@ -568,7 +567,6 @@ class GateInputValidation(ContractCase):
                         f"grype_fail_on '{value}' rejected",
                     )
 
-    @unittest.expectedFailure
     @needs_runner_tools
     def test_dependency_ecosystems(self) -> None:
         """grype_dependency_ecosystems takes known presets, or nothing."""
@@ -586,7 +584,6 @@ class GateInputValidation(ContractCase):
                         f"grype_dependency_ecosystems '{value}' rejected",
                     )
 
-    @unittest.expectedFailure
     @needs_runner_tools
     def test_bypass_repository(self) -> None:
         """grype_bypass_repository takes owner/name, or nothing."""
@@ -604,7 +601,6 @@ class GateInputValidation(ContractCase):
                         f"grype_bypass_repository '{value}' rejected",
                     )
 
-    @unittest.expectedFailure
     @needs_runner_tools
     def test_no_line_break_starts_a_workflow_command(self) -> None:
         """An injected line break never reaches the log as a command."""
@@ -741,21 +737,18 @@ class MetadataDetection(ContractCase):
             f"{path} still has a {OLD_JOB} job",
         )
 
-    @unittest.expectedFailure
     def test_the_pin_appears_once_with_its_comment(self) -> None:
         """Each workflow calling the action holds the v0.4.0 pin, once."""
         for path in (*LANES, MERGE, TESTING):
             with self.subTest(path=path):
                 self.check_pin_in_text(path)
 
-    @unittest.expectedFailure
     def test_the_step_detects_with_the_lanes_inputs(self) -> None:
         """Each lane's metadata step detects with the lane's inputs."""
         for lane in LANES:
             with self.subTest(lane=lane):
                 self.check_step(load_workflow(lane), PRESETS[lane])
 
-    @unittest.expectedFailure
     def test_the_job_publishes_the_verdict(self) -> None:
         """Each lane's metadata job publishes dependencies_changed."""
         for lane in LANES:
@@ -774,7 +767,6 @@ class MetadataDetection(ContractCase):
             with self.subTest(lane=lane):
                 self.check_order(load_workflow(lane))
 
-    @unittest.expectedFailure
     def test_the_old_wiring_is_gone(self) -> None:
         """No workflow calls the detector directly or reads its sidecar."""
         for path in (*LANES, MERGE, TESTING):
@@ -801,7 +793,6 @@ class MetadataDetection(ContractCase):
         with_of(step)["dependency_change"] = "true"
         self.assert_check_fails(self.check_step, workflow, "maven")
 
-    @unittest.expectedFailure
     def test_a_missing_gerrit_refspec_fails(self) -> None:
         """A step not told about the Gerrit checkout fails the check."""
         workflow = mutated(load_workflow(GRADLE))
@@ -991,7 +982,6 @@ class GrypeConsumer(ContractCase):
             f"the grype job downloads: {downloads}",
         )
 
-    @unittest.expectedFailure
     def test_the_grype_needs(self) -> None:
         """Each lane's Grype job needs build and repository-metadata."""
         for lane in LANES:
@@ -1004,7 +994,6 @@ class GrypeConsumer(ContractCase):
             with self.subTest(lane=lane):
                 self.check_condition(load_workflow(lane))
 
-    @unittest.expectedFailure
     def test_the_guarded_verdict(self) -> None:
         """Each lane's scanner reads the verdict through the guard."""
         for lane in LANES:
@@ -1023,7 +1012,6 @@ class GrypeConsumer(ContractCase):
             with self.subTest(lane=lane):
                 self.check_download(load_workflow(lane))
 
-    @unittest.expectedFailure
     def test_the_sbom_is_the_only_download(self) -> None:
         """No lane's Grype job downloads anything but the SBOM."""
         for lane in LANES:
@@ -1173,19 +1161,16 @@ class TuningInputs(ContractCase):
         self.assertIs(grype.get("continue-on-error"), True)
         self.assertEqual(uses_of(step_of(grype, GRYPE_STEP)), GRYPE_USES)
 
-    @unittest.expectedFailure
     def test_the_verify_inputs(self) -> None:
         """Each verify lane declares and passes its new inputs."""
         for lane in LANES:
             with self.subTest(lane=lane):
                 self.check_verify_inputs(load_workflow(lane))
 
-    @unittest.expectedFailure
     def test_the_merge_inputs(self) -> None:
         """The merge lane declares and passes its policy inputs."""
         self.check_merge_inputs(load_workflow(MERGE))
 
-    @unittest.expectedFailure
     def test_a_dropped_bypass_fails(self) -> None:
         """A scanner not told the bypass repository fails the check."""
         workflow = mutated(load_workflow(GRADLE))
@@ -1194,7 +1179,6 @@ class TuningInputs(ContractCase):
         ]
         self.assert_check_fails(self.check_verify_inputs, workflow)
 
-    @unittest.expectedFailure
     def test_a_defaulted_ecosystem_fails(self) -> None:
         """An ecosystems input with a non-empty default fails the check."""
         workflow = mutated(load_workflow(MAVEN))
@@ -1203,7 +1187,6 @@ class TuningInputs(ContractCase):
         )
         self.assert_check_fails(self.check_verify_inputs, workflow)
 
-    @unittest.expectedFailure
     def test_a_missing_patterns_input_fails(self) -> None:
         """A lane without grype_dependency_patterns fails the check."""
         workflow = mutated(load_workflow(GRADLE))
@@ -1217,7 +1200,6 @@ class TuningInputs(ContractCase):
         with_of(step)["fail-on"] = "medium"
         self.assert_check_fails(self.check_merge_inputs, workflow)
 
-    @unittest.expectedFailure
     def test_a_changed_merge_default_fails(self) -> None:
         """A merge policy default other than the action's fails."""
         workflow = mutated(load_workflow(MERGE))
@@ -1260,7 +1242,6 @@ class MergeInputValidation(ContractCase):
             },
         )
 
-    @unittest.expectedFailure
     def test_the_step_runs_on_every_call(self) -> None:
         """The validation step has no condition."""
         step = step_of(
@@ -1268,13 +1249,11 @@ class MergeInputValidation(ContractCase):
         )
         self.assertEqual(text(step.get("if")), "", "no condition")
 
-    @unittest.expectedFailure
     @needs_runner_tools
     def test_defaults_pass(self) -> None:
         """The defaults pass."""
         self.assert_passes(self.validate(), "defaults")
 
-    @unittest.expectedFailure
     @needs_runner_tools
     def test_severities(self) -> None:
         """Both severity inputs take a severity or none, and nothing else."""
@@ -1291,7 +1270,6 @@ class MergeInputValidation(ContractCase):
                         f"{field} '{value}' rejected",
                     )
 
-    @unittest.expectedFailure
     @needs_runner_tools
     def test_dependency_policy(self) -> None:
         """grype_dependency_policy takes its two values and nothing else."""
@@ -1304,7 +1282,6 @@ class MergeInputValidation(ContractCase):
                     self.validate(policy=value), f"'{value}' rejected"
                 )
 
-    @unittest.expectedFailure
     @needs_runner_tools
     def test_bypass_repository(self) -> None:
         """grype_bypass_repository takes owner/name, or nothing."""
@@ -1485,7 +1462,6 @@ class PolicyLanes(ContractCase):
                     " fixture",
                 )
 
-    @unittest.expectedFailure
     def test_each_lane_has_a_reader(self) -> None:
         """A check job reads each policy lane's verdict."""
         self.check_readers(load_workflow(TESTING))
@@ -1723,7 +1699,6 @@ class GateVerdictCases(ContractCase):
         """The job needs each resolved lane."""
         self.check_needs(load_workflow(TESTING))
 
-    @unittest.expectedFailure
     def test_the_detector_pin_appears_in_the_text(self) -> None:
         """testing.yaml holds the pinned uses: line with its comment."""
         self.assertIn(
@@ -1732,17 +1707,14 @@ class GateVerdictCases(ContractCase):
             f"{TESTING}: no step runs {META_LINE}",
         )
 
-    @unittest.expectedFailure
     def test_the_detector(self) -> None:
         """The detector runs at the pin with the matrix inputs."""
         self.check_detector(load_workflow(TESTING))
 
-    @unittest.expectedFailure
     def test_the_matrix(self) -> None:
         """The matrix carries the lanes' inputs and each case's verdict."""
         self.check_matrix(load_workflow(TESTING))
 
-    @unittest.expectedFailure
     def test_the_scanner(self) -> None:
         """The scanner runs at the pin with the lanes' policy."""
         self.check_scanner(load_workflow(TESTING))
@@ -1769,7 +1741,6 @@ class GateVerdictCases(ContractCase):
         job_of(testing, CASES_JOB)["needs"] = resolved_lane(testing, "maven")
         self.assert_check_fails(self.check_needs, testing)
 
-    @unittest.expectedFailure
     def test_a_detector_without_a_base_fails(self) -> None:
         """A detector left to find its own base fails the check."""
         testing = mutated(load_workflow(TESTING))
@@ -1784,7 +1755,6 @@ class GateVerdictCases(ContractCase):
         with_of(step)["dependency_ecosystems"] = "${{ matrix.lane }}"
         self.assert_check_fails(self.check_detector, testing)
 
-    @unittest.expectedFailure
     def test_a_scanner_reading_a_sidecar_fails(self) -> None:
         """A scanner reading a sidecar, not the step output, fails."""
         testing = mutated(load_workflow(TESTING))
