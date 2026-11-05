@@ -40,7 +40,11 @@ dependency files, so these tests hold it in place:
 - testing.yaml's gate-verdict-cases job runs repository-metadata-action
   and grype-scan-action at the lanes' pins with the lanes' own inputs,
   on a known change per lane and case, with the verdict each case
-  expects fixed in the matrix.
+  expects fixed in the matrix;
+- testing.yaml's gate-validate-check job runs the validation step at
+  the lanes' pin with the lanes' defaults and a gate-when the action
+  does not know, as the lanes' job does, with no checkout and no
+  harden-runner, and expects it to fail.
 
 Each structural check is a method taking the workflow it judges; the
 positive tests hand it the real workflows, the negative tests a copy
@@ -105,12 +109,12 @@ OLD_WIRING = (
     "dependency-change-manifest",
 )
 OLD_JOB = "dependency-change"
-GRYPE_PIN = "5c81b23afb2ea771b2d247807a12d90783328675"
+GRYPE_PIN = "413f5af7ba50b0a048ad0ff98e594dedbbb714b9"
 GRYPE_ACTION = "lfreleng-actions/grype-scan-action"
 GRYPE_USES = f"{GRYPE_ACTION}@{GRYPE_PIN}"
 # The pin with its version comment, as each verify lane's text must
 # hold it: once on the validation step, once on the scan.
-GRYPE_LINE = f"uses: {GRYPE_USES}  # v0.5.0"
+GRYPE_LINE = f"uses: {GRYPE_USES}  # v0.6.0"
 
 VALIDATE_JOB = "gerrit-validate"
 # The scan's inputs that are one grype_* input of the lane, passed
@@ -160,6 +164,9 @@ GRYPE_STEP = "Grype audit SBOM"
 # Where the SBOM download lands, and where the audit step reads it.
 SBOM_DIR = "sbom"
 CASES_JOB = "gate-verdict-cases"
+CHECK_JOB = "gate-validate-check"
+CHECK_ASSERT = "Assert the step rejected the gate-when"
+GATE_WHEN_VALUES = ("always", "dependencies-changed")
 SUFFIX = "${{ inputs.artifact_suffix }}"
 MERGE_VALIDATE = "Validate Grype inputs"
 
@@ -490,7 +497,6 @@ class GateInputValidation(ContractCase):
         script = run_of(load_workflow(lane), VALIDATE_JOB, ECOSYSTEMS_VALIDATE)
         return run_script(script, {"ECOSYSTEMS": ecosystems})
 
-    @unittest.expectedFailure
     def test_the_steps_run_on_every_call(self) -> None:
         """Neither validation step has a condition."""
         for lane in LANES:
@@ -505,35 +511,30 @@ class GateInputValidation(ContractCase):
                         f"{lane}: '{name}' must run on every call",
                     )
 
-    @unittest.expectedFailure
     def test_the_validator_mirrors_the_scan(self) -> None:
         """Each lane validates through the action with the scan's inputs."""
         for lane in LANES:
             with self.subTest(lane=lane):
                 self.check_validator(load_workflow(lane))
 
-    @unittest.expectedFailure
     def test_the_job_fetches_one_action(self) -> None:
         """Each lane's gerrit-validate runs no action but the validator."""
         for lane in LANES:
             with self.subTest(lane=lane):
                 self.check_job_fetches_one_action(load_workflow(lane))
 
-    @unittest.expectedFailure
     def test_no_shell_validator_remains(self) -> None:
         """No run: step of gerrit-validate checks a policy input."""
         for lane in LANES:
             with self.subTest(lane=lane):
                 self.check_no_shell_validator(load_workflow(lane))
 
-    @unittest.expectedFailure
     def test_the_ecosystems_step_reads_its_input(self) -> None:
         """The ecosystems check reads grype_dependency_ecosystems alone."""
         for lane in LANES:
             with self.subTest(lane=lane):
                 self.check_ecosystems_step(load_workflow(lane))
 
-    @unittest.expectedFailure
     def test_the_pin_appears_twice_with_its_comment(self) -> None:
         """Each lane's text holds the pinned uses: line twice."""
         for lane in LANES:
@@ -541,7 +542,6 @@ class GateInputValidation(ContractCase):
                 self.check_pin_text(read_text(lane), lane)
 
     @needs_runner_tools
-    @unittest.expectedFailure
     def test_dependency_ecosystems(self) -> None:
         """grype_dependency_ecosystems takes known presets, or nothing."""
         for lane in LANES:
@@ -559,7 +559,6 @@ class GateInputValidation(ContractCase):
                     )
 
     @needs_runner_tools
-    @unittest.expectedFailure
     def test_no_line_break_starts_a_workflow_command(self) -> None:
         """An injected line break never reaches the log as a command."""
         for lane in LANES:
@@ -581,7 +580,6 @@ class GateInputValidation(ContractCase):
         )
         self.assert_check_fails(self.check_validator, workflow)
 
-    @unittest.expectedFailure
     def test_a_missing_validate_only_fails(self) -> None:
         """A validator without validate-only, a real scan, fails."""
         workflow = mutated(load_workflow(GRADLE))
@@ -612,7 +610,6 @@ class GateInputValidation(ContractCase):
         )
         self.assert_check_fails(self.check_validator, workflow)
 
-    @unittest.expectedFailure
     def test_a_scan_dropping_a_policy_input_fails(self) -> None:
         """A scan no longer passing a policy input as the lane's fails."""
         workflow = mutated(load_workflow(GRADLE))
@@ -662,7 +659,6 @@ class GateInputValidation(ContractCase):
         )
         self.assert_check_fails(self.check_no_shell_validator, workflow)
 
-    @unittest.expectedFailure
     def test_an_ecosystems_step_reading_more_fails(self) -> None:
         """An ecosystems check reading a policy input too fails."""
         workflow = mutated(load_workflow(MAVEN))
@@ -680,6 +676,190 @@ class GateInputValidation(ContractCase):
         """A lane with a third grype-scan-action reference fails."""
         content = read_text(GRADLE) + f"\n# uses: {GRYPE_ACTION}@{'0' * 40}\n"
         self.assert_check_fails(self.check_pin_text, content, GRADLE)
+
+
+class GateValidateCheck(ContractCase):
+    """testing.yaml's validate-only rejection.
+
+    The job runs the lanes' validation step itself, at the lanes' pin
+    with each lane input's default as a literal and a gate-when the
+    action does not know, and asserts the step failed: a bad policy
+    value fails in seconds. Like the lanes' job it runs that one
+    action, with no checkout and no harden-runner; that validate-only
+    makes no network request is the action's own contract, tested in
+    its repository, which this job asserts nothing about. Each lane's
+    defaults are read from the lane, so a default that moves fails
+    here until the case follows.
+    """
+
+    def defaults_of(self, lane: str) -> dict[str, str]:
+        """Return each validated input's lane default, by action input."""
+        workflow = load_workflow(lane)
+        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        inputs = call_inputs(workflow)
+        defaults: dict[str, str] = {}
+        for name, expression in policy_inputs(validator).items():
+            lane_input = expression[len("${{ inputs.") : -len(" }}")]
+            defaults[name] = text(section(inputs, lane_input).get("default"))
+        return defaults
+
+    def check_job_exists(self, testing: Workflow) -> None:
+        """Fail unless the check job is there, with no permission."""
+        self.assertIn(CHECK_JOB, jobs_of(testing), f"no {CHECK_JOB} job")
+        self.assertEqual(
+            job_of(testing, CHECK_JOB).get("permissions"),
+            {},
+            f"{CHECK_JOB} needs no permission",
+        )
+
+    def check_job_fetches_one_action(self, testing: Workflow) -> None:
+        """Fail unless the validator is the job's only action step."""
+        self.assertEqual(
+            uses_in(job_of(testing, CHECK_JOB)),
+            [GRYPE_USES],
+            f"{CHECK_JOB} must run no action but the validator, as the"
+            f" lanes' {VALIDATE_JOB} does: no checkout, no harden-runner",
+        )
+
+    def check_validator(self, testing: Workflow, lane: str) -> None:
+        """Fail unless the step passes the lane's defaults, as literals."""
+        step = step_of(job_of(testing, CHECK_JOB), GATE_VALIDATE)
+        self.assertEqual(uses_of(step), GRYPE_USES, f"'{GATE_VALIDATE}' uses")
+        self.assertIs(
+            step.get("continue-on-error"),
+            True,
+            f"'{GATE_VALIDATE}' must continue on error, for the rejection",
+        )
+        passed = {name: text(value) for name, value in with_of(step).items()}
+        gate_when = passed.pop("gate-when", None)
+        self.assertIsNotNone(gate_when, f"{CHECK_JOB} must pass gate-when")
+        assert gate_when is not None
+        self.assertNotIn(
+            gate_when,
+            GATE_WHEN_VALUES,
+            f"{CHECK_JOB} must pass a gate-when the action does not know",
+        )
+        self.assertNotIn(
+            "${{",
+            gate_when,
+            f"{CHECK_JOB} must pass gate-when as a literal",
+        )
+        want = {"validate-only": "true", **self.defaults_of(lane)}
+        del want["gate-when"]
+        self.assertEqual(
+            passed,
+            want,
+            f"{CHECK_JOB}'s '{GATE_VALIDATE}' must pass {lane}'s defaults",
+        )
+
+    def check_assertion(self, testing: Workflow) -> None:
+        """Fail unless a step after the validator reads its outcome."""
+        job = job_of(testing, CHECK_JOB)
+        validator = step_of(job, GATE_VALIDATE)
+        verdict = step_of(job, CHECK_ASSERT)
+        steps = steps_of(job)
+        self.assertLess(
+            steps.index(validator),
+            steps.index(verdict),
+            f"'{CHECK_ASSERT}' must follow '{GATE_VALIDATE}'",
+        )
+        self.assertNotIn(
+            "continue-on-error",
+            verdict,
+            f"'{CHECK_ASSERT}' must fail the job",
+        )
+        self.assertIn(
+            f"${{{{ steps.{text(validator.get('id'))}.outcome }}}}",
+            [text(value) for value in scalars(verdict.get("env"))],
+            f"'{CHECK_ASSERT}' must read the validator's outcome",
+        )
+
+    def test_the_job_exists(self) -> None:
+        """testing.yaml holds the check job."""
+        self.check_job_exists(load_workflow(TESTING))
+
+    def test_the_job_fetches_one_action(self) -> None:
+        """The job runs no action but the validator."""
+        self.check_job_fetches_one_action(load_workflow(TESTING))
+
+    def test_the_step_passes_each_lanes_defaults(self) -> None:
+        """The step passes each lane's defaults; so the lanes agree."""
+        for lane in LANES:
+            with self.subTest(lane=lane):
+                self.check_validator(load_workflow(TESTING), lane)
+
+    def test_the_verdict_is_asserted(self) -> None:
+        """A step after the validator judges its outcome."""
+        self.check_assertion(load_workflow(TESTING))
+
+    def test_a_permission_fails(self) -> None:
+        """A job granted a permission fails the check."""
+        testing = mutated(load_workflow(TESTING))
+        job_of(testing, CHECK_JOB)["permissions"] = {"contents": "read"}
+        self.assert_check_fails(self.check_job_exists, testing)
+
+    def test_a_harden_runner_in_the_job_fails(self) -> None:
+        """A job under harden-runner fails the check."""
+        testing = mutated(load_workflow(TESTING))
+        steps_of(job_of(testing, CHECK_JOB)).insert(
+            0,
+            {
+                "name": "Harden runner",
+                "uses": f"step-security/harden-runner@{'0' * 40}",
+            },
+        )
+        self.assert_check_fails(self.check_job_fetches_one_action, testing)
+
+    def test_a_checkout_fails(self) -> None:
+        """A job that checks out fails the check."""
+        testing = mutated(load_workflow(TESTING))
+        steps_of(job_of(testing, CHECK_JOB)).insert(
+            0,
+            {"name": "Checkout", "uses": f"{CHECKOUT_ACTIONS[0]}@{'0' * 40}"},
+        )
+        self.assert_check_fails(self.check_job_fetches_one_action, testing)
+
+    def test_a_default_that_moved_fails(self) -> None:
+        """A step passing another value than the lane's default fails."""
+        testing = mutated(load_workflow(TESTING))
+        step = step_of(job_of(testing, CHECK_JOB), GATE_VALIDATE)
+        with_of(step)["dependency-policy"] = "all"
+        self.assert_check_fails(self.check_validator, testing, MAVEN)
+
+    def test_a_step_that_stops_the_job_fails(self) -> None:
+        """A step without continue-on-error fails the check."""
+        testing = mutated(load_workflow(TESTING))
+        step = step_of(job_of(testing, CHECK_JOB), GATE_VALIDATE)
+        del step["continue-on-error"]
+        self.assert_check_fails(self.check_validator, testing, GRADLE)
+
+    def test_a_valid_gate_when_fails(self) -> None:
+        """A step passing a gate-when the action accepts fails the check."""
+        testing = mutated(load_workflow(TESTING))
+        step = step_of(job_of(testing, CHECK_JOB), GATE_VALIDATE)
+        with_of(step)["gate-when"] = "dependencies-changed"
+        self.assert_check_fails(self.check_validator, testing, MAVEN)
+
+    def test_a_gate_when_expression_fails(self) -> None:
+        """A step passing gate-when as an expression fails the check."""
+        testing = mutated(load_workflow(TESTING))
+        step = step_of(job_of(testing, CHECK_JOB), GATE_VALIDATE)
+        with_of(step)["gate-when"] = "${{ matrix.gate_when }}"
+        self.assert_check_fails(self.check_validator, testing, GRADLE)
+
+    def test_an_unread_outcome_fails(self) -> None:
+        """An assertion step that reads no outcome fails the check."""
+        testing = mutated(load_workflow(TESTING))
+        verdict = step_of(job_of(testing, CHECK_JOB), CHECK_ASSERT)
+        section(verdict, "env")["OUTCOME"] = "failure"
+        self.assert_check_fails(self.check_assertion, testing)
+
+    def test_an_assertion_that_cannot_fail_fails(self) -> None:
+        """An assertion step with continue-on-error fails the check."""
+        testing = mutated(load_workflow(TESTING))
+        verdict = step_of(job_of(testing, CHECK_JOB), CHECK_ASSERT)
+        verdict["continue-on-error"] = True
+        self.assert_check_fails(self.check_assertion, testing)
 
 
 def lane_patterns(preset: str) -> list[str]:
