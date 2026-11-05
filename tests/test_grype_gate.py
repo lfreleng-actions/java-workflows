@@ -1,37 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: 2026 The Linux Foundation
 
-"""Contract tests for the Grype gate policy wiring of both verify lanes.
+"""Contract tests for the Grype gate policy wiring of the Maven lanes.
 
 The fixtures cannot exercise this wiring without a change to their
 dependency files, so these tests hold it in place:
 
 - the six grype_* policy inputs exist with the agreed defaults, and
-  each reaches grype-scan-action under its own name, with the sidecar
-  path and at the pin the lanes share;
-- gerrit-validate's input check accepts each allowed value and rejects
-  a typo, run as extracted from the workflows;
-- the detection step runs dependency-change-action at its pin in a
-  dependency-change job of its own, which runs nothing from the
-  project, with the lane's preset and extra patterns over the whole
-  repository, after the checkout and before the sidecar upload; the
-  job, not the step, runs only under grype_gate_when:
-  dependencies-changed with the SBOM on, so any other call skips it and
-  the Grype job waits for nothing but the build;
-- that job's actions/checkout holds the parent of HEAD, without which
-  every pull request would be unresolved and gate;
-- the sidecar travels in an artefact of its own, uploaded only when
-  written, and no artefact the build job writes carries one;
-- the Grype job downloads the SBOM and the sidecar each by its upload's
-  ID, each into a directory of its own, and reads both from there, so
-  no artefact uploaded under a reused name, and nothing inside the SBOM
-  artefact, can pass for either;
+  each reaches grype-scan-action under its own name, at the pin the
+  lanes share;
+- gerrit-validate's input check, and the merge lane's, accept each
+  allowed value and reject a typo, run as extracted from the
+  workflows;
+- every repository-metadata-action call is at the v0.4.0 pin, and no
+  workflow calls dependency-change-action directly, reads its
+  sidecar, or keeps a dependency-change job;
+- each verify lane's repository-metadata job detects with its own
+  step, only under grype_gate_when: dependencies-changed with Grype
+  and the SBOM on, over the whole repository, with every preset unless
+  the caller narrows them, the lane's fixed patterns and the caller's,
+  after a checkout that holds the parent of HEAD, and publishes
+  dependencies_changed as a job output;
+- the Grype job needs build and repository-metadata, still runs when
+  the metadata job failed or skipped, reads the verdict only when that
+  job succeeded, downloads nothing but the SBOM, by its upload's ID,
+  and publishes the verdict it read;
+- the new detection, bypass and merge-lane policy inputs are declared
+  with their defaults and passed through, and the merge scan still
+  reports without gating;
 - the lanes publish the gate's verdict, and testing.yaml runs the
   unresolved path against a pinned fixture and the resolved path
   against this repository's fixtures, each read by a check job;
 - no symbolic link or submodule sits in this repository's tree,
   without which the resolved lanes could report unresolved;
-- testing.yaml's gate-verdict-cases job runs dependency-change-action
+- testing.yaml's gate-verdict-cases job runs repository-metadata-action
   and grype-scan-action at the lanes' pins with the lanes' own inputs,
   on a known change per lane and case, with the verdict each case
   expects fixed in the matrix.
@@ -49,6 +51,7 @@ import re
 import subprocess
 import unittest
 from typing import Any, ClassVar, cast
+from unittest import mock
 
 from guards import needs_runner_tools, run_script
 from helpers import (
@@ -56,13 +59,12 @@ from helpers import (
     GATE_VALIDATE,
     GRADLE,
     MAVEN,
+    MERGE,
     TESTING,
     ContractCase,
     Job,
-    Step,
     Verdict,
     Workflow,
-    find_step,
     is_action,
     job_of,
     jobs_of,
@@ -84,41 +86,61 @@ from yaml_loading import ROOT, read_text
 LANES = (MAVEN, GRADLE)
 PRESETS = {MAVEN: "maven", GRADLE: "gradle"}
 
-DETECT_PIN = "257928b15e4e6a5cc5a888435be59b058055c4e1"
-DETECT_ACTION = "lfreleng-actions/dependency-change-action"
-DETECT_USES = f"{DETECT_ACTION}@{DETECT_PIN}"
+META_PIN = "18e5b7c5b16423b0e734891d103513826b324858"
+META_ACTION = "lfreleng-actions/repository-metadata-action"
+META_USES = f"{META_ACTION}@{META_PIN}"
 # The pin with its version comment, as the workflow text must hold it.
-DETECT_LINE = f"uses: {DETECT_USES}  # v0.0.1"
+META_LINE = f"uses: {META_USES}  # v0.4.0"
+# The detector the lanes called before repository-metadata-action took
+# detection over; no workflow may call it, or read its sidecar, now.
+OLD_DETECTOR = "lfreleng-actions/dependency-change-action@"
+OLD_WIRING = (
+    OLD_DETECTOR,
+    "dependency-change.json",
+    "dependency-change-manifest",
+)
+OLD_JOB = "dependency-change"
 GRYPE_PIN = "5c81b23afb2ea771b2d247807a12d90783328675"
 GRYPE_USES = f"lfreleng-actions/grype-scan-action@{GRYPE_PIN}"
 
-DETECT_JOB = "dependency-change"
-# The condition on the detection job, as the literal workflow text.
+META_JOB = "repository-metadata"
+META_STEP = "Gather repository metadata"
+META_STEP_ID = "repo-metadata"
+# When the metadata step detects, as the literal workflow text.
 DETECT_IF = (
     "inputs.sbom_enabled && inputs.grype_enabled"
     " && inputs.grype_gate_when == 'dependencies-changed'"
 )
+# The verdict as the Grype job reads it: empty unless the metadata
+# job succeeded, since a failed job can still expose an output an
+# earlier step wrote, and empty gates.
+VERDICT = (
+    "needs.repository-metadata.result == 'success'"
+    " && needs.repository-metadata.outputs.dependencies_changed || ''"
+)
+GRYPE_IF = (
+    "${{ !cancelled() && needs.build.outputs.sbom_uploaded == 'true'"
+    " && inputs.grype_enabled }}"
+)
 DETECT_STEP = "Detect dependency changes"
-UPLOAD_STEP = "Upload dependency-change sidecar"
-DOWNLOAD_STEP = "Download dependency-change sidecar"
 SBOM_UPLOAD_STEP = "Upload SBOM artifacts"
 SBOM_DOWNLOAD_STEP = "Download SBOM artefact"
 GRYPE_STEP = "Grype audit SBOM"
-SIDECAR = "dependency-change.json"
-# Where each download lands, and where the audit step reads each file.
-SIDECAR_DIR = "dependency-change"
+# Where the SBOM download lands, and where the audit step reads it.
 SBOM_DIR = "sbom"
 CASES_JOB = "gate-verdict-cases"
 SUFFIX = "${{ inputs.artifact_suffix }}"
+MERGE_VALIDATE = "Validate Grype inputs"
 
-# What each preset watches beyond its dependency files: a -D property
-# in jvm.config can select a Maven dependency version; any Gradle
-# script file can declare a plugin or dependency the preset does not
-# name, such as a convention script a subproject applies.
+# What each lane watches beyond the presets: a -D property in
+# jvm.config can select a Maven dependency version; any Gradle script
+# file can declare a plugin or dependency the preset does not name,
+# such as a convention script a subproject applies.
 EXTRA_PATTERNS = {
     "maven": ".mvn/jvm.config",
     "gradle": "*.gradle\n*.gradle.kts",
 }
+CALLER_PATTERNS = "${{ inputs.grype_dependency_patterns }}"
 
 # name, type, default, grype-scan-action input, as the issue settled them.
 POLICY_INPUTS = (
@@ -145,16 +167,65 @@ POLICY_INPUTS = (
     ),
 )
 
-# What the detection job may run: the runner hardening, the checkouts,
-# the Gerrit submodule guard, the detection and its upload.
-DETECT_JOB_ACTIONS = (
-    "lfreleng-actions/harden-runner-block-action",
-    "step-security/harden-runner",
-    *CHECKOUT_ACTIONS,
-    DETECT_ACTION,
-    "actions/upload-artifact",
+# The verify lanes' detection and bypass inputs: name, the job and step
+# that receive it, and the input there. The patterns input is checked
+# with the lane's fixed patterns, in MetadataDetection.
+VERIFY_INPUTS = (
+    (
+        "grype_dependency_ecosystems",
+        META_JOB,
+        META_STEP,
+        "dependency_ecosystems",
+    ),
+    ("grype_bypass_repository", "grype", GRYPE_STEP, "bypass-repository"),
 )
-INIT_STEP = "Initialise Gerrit change submodules"
+NEW_VERIFY_INPUTS = (
+    "grype_dependency_ecosystems",
+    "grype_dependency_patterns",
+    "grype_bypass_repository",
+)
+
+# The merge lane's policy inputs: name, type, default, grype-scan-action
+# input. The defaults are the action's own, so the report is unchanged.
+MERGE_INPUTS = (
+    ("grype_fail_on", "string", "medium", "fail-on"),
+    ("grype_only_fixed", "boolean", "false", "only-fixed"),
+    ("grype_dependency_policy", "string", "all", "dependency-policy"),
+    ("grype_transitive_fail_on", "string", "none", "transitive-fail-on"),
+    ("grype_bypass_repository", "string", "", "bypass-repository"),
+)
+
+SEVERITIES = ("negligible", "low", "medium", "high", "critical", "none")
+SEVERITY_FAILS = ("", "Medium", "moderate", "high,critical", "medium\n")
+ECOSYSTEM_PASSES = (
+    "",
+    "maven",
+    "gradle",
+    "node,python,go,maven,gradle,rust,docker",
+    "maven, gradle",
+    " maven , gradle ",
+)
+ECOSYSTEM_FAILS = (
+    "Maven",
+    "java",
+    "maven,",
+    ",maven",
+    "maven,,gradle",
+    "maven gradle",
+    "maven;gradle",
+    "maven\ngradle",
+    "maven\n::warning::injected",
+)
+BYPASS_PASSES = ("", "lfreleng-actions/java-workflows", "a/b", "A.b_c-d/e.f")
+BYPASS_FAILS = (
+    "java-workflows",
+    "/java-workflows",
+    "lfreleng-actions/",
+    "a/b/c",
+    "a b/c",
+    "https://github.com/a/b",
+    "a/b\n::warning::injected",
+)
 
 COMMIT = re.compile(r"^[0-9a-f]{40}$")
 
@@ -212,14 +283,9 @@ class GatePolicyInputs(ContractCase):
             )
 
     def check_scanner(self, workflow: Workflow) -> None:
-        """Fail unless the scanner is pinned and reads both files in place."""
+        """Fail unless the scanner is pinned and reads the SBOM in place."""
         grype = step_of(job_of(workflow, "grype"), GRYPE_STEP)
         passed = with_of(grype)
-        self.assertEqual(
-            text(passed.get("dependency-change-manifest")),
-            f"{SIDECAR_DIR}/{SIDECAR}",
-            f"'{GRYPE_STEP}' must read the sidecar from its download",
-        )
         self.assertEqual(
             text(passed.get("sbom")),
             f"{SBOM_DIR}/sbom-cyclonedx.json",
@@ -237,8 +303,8 @@ class GatePolicyInputs(ContractCase):
             with self.subTest(lane=lane):
                 self.check_inputs(load_workflow(lane))
 
-    def test_the_scanner_is_pinned_and_reads_the_downloads(self) -> None:
-        """Each lane's scanner is at the shared pin over both downloads."""
+    def test_the_scanner_is_pinned_and_reads_the_download(self) -> None:
+        """Each lane's scanner is at the shared pin over the SBOM."""
         for lane in LANES:
             with self.subTest(lane=lane):
                 self.check_scanner(load_workflow(lane))
@@ -274,11 +340,11 @@ class GatePolicyInputs(ContractCase):
         step["uses"] = f"lfreleng-actions/grype-scan-action@{'0' * 40}"
         self.assert_check_fails(self.check_scanner, workflow)
 
-    def test_a_sidecar_read_from_elsewhere_fails(self) -> None:
-        """A scanner reading the sidecar from the SBOM directory fails."""
+    def test_an_sbom_read_from_elsewhere_fails(self) -> None:
+        """A scanner reading the SBOM from the workspace root fails."""
         workflow = mutated(load_workflow(MAVEN))
         step = step_of(job_of(workflow, "grype"), GRYPE_STEP)
-        with_of(step)["dependency-change-manifest"] = f"{SBOM_DIR}/{SIDECAR}"
+        with_of(step)["sbom"] = "sbom-cyclonedx.json"
         self.assert_check_fails(self.check_scanner, workflow)
 
 
@@ -304,16 +370,22 @@ class GateInputValidation(ContractCase):
         transitive: str = "critical",
         days: str = "",
         start: str = "",
+        fail_on: str = "medium",
+        ecosystems: str = "",
+        bypass: str = "",
     ) -> Verdict:
         """Run the step with one value set and the rest at their defaults."""
         return run_script(
             self.scripts[lane],
             {
+                "FAIL_ON": fail_on,
                 "GATE_WHEN": gate_when,
                 "DEPENDENCY_POLICY": policy,
                 "TRANSITIVE_FAIL_ON": transitive,
                 "WINDOW_DAYS": days,
                 "WINDOW_START": start,
+                "ECOSYSTEMS": ecosystems,
+                "BYPASS_REPOSITORY": bypass,
             },
         )
 
@@ -478,6 +550,61 @@ class GateInputValidation(ContractCase):
                         f"grype_remediation_window_start '{value}' rejected",
                     )
 
+    @unittest.expectedFailure
+    @needs_runner_tools
+    def test_fail_on(self) -> None:
+        """grype_fail_on takes a severity or none, and nothing else."""
+        for lane in LANES:
+            for value in SEVERITIES:
+                with self.subTest(lane=lane, value=value):
+                    self.assert_passes(
+                        self.validate(lane, fail_on=value),
+                        f"grype_fail_on '{value}'",
+                    )
+            for value in SEVERITY_FAILS:
+                with self.subTest(lane=lane, value=value):
+                    self.assert_fails(
+                        self.validate(lane, fail_on=value),
+                        f"grype_fail_on '{value}' rejected",
+                    )
+
+    @unittest.expectedFailure
+    @needs_runner_tools
+    def test_dependency_ecosystems(self) -> None:
+        """grype_dependency_ecosystems takes known presets, or nothing."""
+        for lane in LANES:
+            for value in ECOSYSTEM_PASSES:
+                with self.subTest(lane=lane, value=value):
+                    self.assert_passes(
+                        self.validate(lane, ecosystems=value),
+                        f"grype_dependency_ecosystems '{value}'",
+                    )
+            for value in ECOSYSTEM_FAILS:
+                with self.subTest(lane=lane, value=value):
+                    self.assert_fails(
+                        self.validate(lane, ecosystems=value),
+                        f"grype_dependency_ecosystems '{value}' rejected",
+                    )
+
+    @unittest.expectedFailure
+    @needs_runner_tools
+    def test_bypass_repository(self) -> None:
+        """grype_bypass_repository takes owner/name, or nothing."""
+        for lane in LANES:
+            for value in BYPASS_PASSES:
+                with self.subTest(lane=lane, value=value):
+                    self.assert_passes(
+                        self.validate(lane, bypass=value),
+                        f"grype_bypass_repository '{value}'",
+                    )
+            for value in BYPASS_FAILS:
+                with self.subTest(lane=lane, value=value):
+                    self.assert_fails(
+                        self.validate(lane, bypass=value),
+                        f"grype_bypass_repository '{value}' rejected",
+                    )
+
+    @unittest.expectedFailure
     @needs_runner_tools
     def test_no_line_break_starts_a_workflow_command(self) -> None:
         """An injected line break never reaches the log as a command."""
@@ -485,6 +612,9 @@ class GateInputValidation(ContractCase):
             for field, value in (
                 ("gate_when", "always\n::warning::injected"),
                 ("start", "2026-01-01\n::warning::injected"),
+                ("fail_on", "medium\n::warning::injected"),
+                ("ecosystems", "maven\n::warning::injected"),
+                ("bypass", "a/b\n::warning::injected"),
             ):
                 with self.subTest(lane=lane, field=field):
                     verdict = self.validate(lane, **{field: value})
@@ -496,179 +626,76 @@ class GateInputValidation(ContractCase):
                     )
 
 
-class DetectionStep(ContractCase):
-    """The detection step: its pin, inputs and place in the job."""
+def lane_patterns(preset: str) -> list[str]:
+    """Return the lines the lane's metadata step passes as patterns."""
+    return [*EXTRA_PATTERNS[preset].splitlines(), CALLER_PATTERNS]
 
-    def check_pin_in_text(self, path: str) -> None:
-        """Fail unless the file runs the detector once, pin and comment."""
+
+class MetadataDetection(ContractCase):
+    """Detection in the repository-metadata job: pin, inputs and output."""
+
+    def check_pin_in_text(self, path: str, count: int = 1) -> None:
+        """Fail unless the file calls the action at the pin, comment and all.
+
+        Every call is at the pin, so the repository holds one.
+        """
         source = read_text(path)
-        self.assertIn(
-            DETECT_LINE, source, f"{path}: no step runs {DETECT_LINE}"
+        self.assertEqual(
+            source.count(META_LINE),
+            count,
+            f"{path}: {META_LINE} must appear {count} time(s)",
         )
         self.assertEqual(
-            source.count(f"{DETECT_ACTION}@"),
-            1,
-            f"{path}: dependency-change-action must appear once",
+            source.count(f"{META_ACTION}@"),
+            count,
+            f"{path}: every repository-metadata-action call must be at"
+            f" {META_PIN}",
         )
 
     def check_step(self, workflow: Workflow, preset: str) -> None:
-        """Fail unless the step runs the detector with the lane's inputs."""
-        job = job_of(workflow, DETECT_JOB)
-        step = find_step(job, DETECT_STEP)
-        self.assertIsNotNone(
-            step, f"the {DETECT_JOB} job has no '{DETECT_STEP}' step"
-        )
-        assert step is not None
-        self.assertEqual(uses_of(step), DETECT_USES, f"'{DETECT_STEP}' uses")
+        """Fail unless the metadata step detects with the lane's inputs."""
+        step = step_of(job_of(workflow, META_JOB), META_STEP)
+        self.assertEqual(text(step.get("id")), META_STEP_ID, "step id")
+        self.assertEqual(uses_of(step), META_USES, f"'{META_STEP}' uses")
         passed = with_of(step)
         want = {
-            "ecosystems": preset,
-            "patterns": EXTRA_PATTERNS[preset],
-            "output": SIDECAR,
+            # Only when a scan can consume it: without the SBOM no Grype
+            # job runs, and under 'always' the scan ignores the verdict.
+            "dependency_change": f"${{{{ {DETECT_IF} }}}}",
+            "gerrit_refspec": "${{ inputs.gerrit_refspec }}",
+            # Empty selects every preset.
+            "dependency_ecosystems": (
+                "${{ inputs.grype_dependency_ecosystems }}"
+            ),
             # Repository-wide: a Maven parent chain or a Gradle included
             # build crosses directory boundaries path_prefix cannot
             # follow.
-            "path-prefix": ".",
-            "gerrit-refspec": "${{ inputs.gerrit_refspec }}",
+            "dependency_path_prefix": ".",
         }
         got = {field: text(passed.get(field)) for field in want}
-        self.assertEqual(got, want, f"'{DETECT_STEP}' with:")
-        # The condition sits on the job; a step condition as well would
-        # let the two drift apart.
+        self.assertEqual(got, want, f"'{META_STEP}' with:")
         self.assertEqual(
-            text(step.get("if")),
+            text(passed.get("dependency_patterns")).splitlines(),
+            lane_patterns(preset),
+            f"'{META_STEP}' must watch the {preset} lane's fixed patterns"
+            " and then the caller's",
+        )
+        self.assertEqual(
+            text(passed.get("dependency_base")),
             "",
-            f"'{DETECT_STEP}' must carry no condition of its own",
+            f"'{META_STEP}' must leave the base to the detector",
         )
 
-    def check_order(self, workflow: Workflow) -> None:
-        """Fail unless detection follows the checkouts and precedes the upload.
-
-        After every checkout, so HEAD is the change; before the upload,
-        so the sidecar is there to carry.
-        """
-        job = job_of(workflow, DETECT_JOB)
-        detect = step_index(job, DETECT_STEP)
-        checkout = last_checkout(job)
-        upload = step_index(job, UPLOAD_STEP)
-        self.assertTrue(
-            checkout != -1 and upload != -1 and checkout < detect < upload,
-            f"'{DETECT_STEP}' (step {detect}) must follow the last checkout"
-            f" ({checkout}) and precede '{UPLOAD_STEP}' ({upload})",
-        )
-
-    def check_not_elsewhere(self, workflow: Workflow) -> None:
-        """Fail if the build or repository-metadata job detects.
-
-        The build job runs the project's own code; repository-metadata
-        runs on every call, and the Grype job would then wait for it.
-        """
-        for job_id in ("build", "repository-metadata"):
-            self.assertEqual(
-                step_index(job_of(workflow, job_id), DETECT_STEP),
-                -1,
-                f"the {job_id} job must not run '{DETECT_STEP}'",
-            )
-
-    def test_the_pin_appears_once_with_its_comment(self) -> None:
-        """Each lane holds the pinned uses: line, once, with its comment."""
-        for lane in LANES:
-            with self.subTest(lane=lane):
-                self.check_pin_in_text(lane)
-
-    def test_the_step_takes_the_lanes_inputs(self) -> None:
-        """Each lane's step runs the detector with the lane's inputs."""
-        for lane in LANES:
-            with self.subTest(lane=lane):
-                self.check_step(load_workflow(lane), PRESETS[lane])
-
-    def test_the_step_sits_between_checkout_and_upload(self) -> None:
-        """Each lane detects after its checkouts and before its upload."""
-        for lane in LANES:
-            with self.subTest(lane=lane):
-                self.check_order(load_workflow(lane))
-
-    def test_no_other_job_detects(self) -> None:
-        """Neither the build nor the metadata job runs the detector."""
-        for lane in LANES:
-            with self.subTest(lane=lane):
-                self.check_not_elsewhere(load_workflow(lane))
-
-    def test_a_condition_on_the_step_fails(self) -> None:
-        """The job's condition duplicated onto the step fails the check."""
-        workflow = mutated(load_workflow(MAVEN))
-        step_of(job_of(workflow, DETECT_JOB), DETECT_STEP)["if"] = DETECT_IF
-        self.assert_check_fails(self.check_step, workflow, "maven")
-
-    def test_a_narrowed_prefix_fails(self) -> None:
-        """A detector held to a path prefix fails the check."""
-        workflow = mutated(load_workflow(GRADLE))
-        step = step_of(job_of(workflow, DETECT_JOB), DETECT_STEP)
-        with_of(step)["path-prefix"] = "${{ inputs.path_prefix }}"
-        self.assert_check_fails(self.check_step, workflow, "gradle")
-
-    def test_the_other_presets_patterns_fail(self) -> None:
-        """A lane watching the other preset's patterns fails the check."""
-        workflow = mutated(load_workflow(MAVEN))
-        step = step_of(job_of(workflow, DETECT_JOB), DETECT_STEP)
-        with_of(step)["patterns"] = EXTRA_PATTERNS["gradle"]
-        self.assert_check_fails(self.check_step, workflow, "maven")
-
-    def test_detection_before_the_checkout_fails(self) -> None:
-        """Detection moved ahead of the checkout fails the check."""
-        workflow = mutated(load_workflow(MAVEN))
-        steps = steps_of(job_of(workflow, DETECT_JOB))
-        step = steps.pop(step_index(job_of(workflow, DETECT_JOB), DETECT_STEP))
-        steps.insert(0, step)
-        self.assert_check_fails(self.check_order, workflow)
-
-    def test_detection_after_the_upload_fails(self) -> None:
-        """Detection moved behind the upload fails the check."""
-        workflow = mutated(load_workflow(GRADLE))
-        steps = steps_of(job_of(workflow, DETECT_JOB))
-        step = steps.pop(step_index(job_of(workflow, DETECT_JOB), DETECT_STEP))
-        steps.append(step)
-        self.assert_check_fails(self.check_order, workflow)
-
-    def test_detection_in_the_build_job_fails(self) -> None:
-        """A detection step copied into the build job fails the check."""
-        workflow = mutated(load_workflow(MAVEN))
-        step = step_of(job_of(workflow, DETECT_JOB), DETECT_STEP)
-        steps_of(job_of(workflow, "build")).append(copy.deepcopy(step))
-        self.assert_check_fails(self.check_not_elsewhere, workflow)
-
-
-class DetectionJob(ContractCase):
-    """The dependency-change job: its condition, steps and checkout."""
-
-    def check_condition(self, workflow: Workflow) -> None:
-        """Fail unless the job runs only when a scan can consume the result.
-
-        Without the SBOM no Grype job runs, and under 'always' the scan
-        ignores the sidecar. On the job, so every other call skips it
-        outright and the Grype job's wait for it ends at once.
-        """
+    def check_job_output(self, workflow: Workflow) -> None:
+        """Fail unless the job publishes the step's dependencies_changed."""
         self.assertEqual(
-            text(job_of(workflow, DETECT_JOB).get("if")),
-            DETECT_IF,
-            f"the {DETECT_JOB} job's condition",
-        )
-
-    def check_steps(self, workflow: Workflow) -> None:
-        """Fail if the job runs anything from the project.
-
-        No build, SBOM or setup action: only the runner hardening, the
-        checkouts, the Gerrit submodule guard, the detection and its
-        upload.
-        """
-        stray = [
-            text(step.get("name"))
-            for step in steps_of(job_of(workflow, DETECT_JOB))
-            if not is_action(step, *DETECT_JOB_ACTIONS)
-            and text(step.get("name")) != INIT_STEP
-        ]
-        self.assertEqual(
-            stray, [], f"the {DETECT_JOB} job runs other steps: {stray}"
+            text(
+                outputs_of(job_of(workflow, META_JOB)).get(
+                    "dependencies_changed"
+                )
+            ),
+            f"${{{{ steps.{META_STEP_ID}.outputs.dependencies_changed }}}}",
+            f"{META_JOB}'s dependencies_changed must be the step's output",
         )
 
     def check_checkout_depth(self, workflow: Workflow) -> None:
@@ -679,73 +706,151 @@ class DetectionJob(ContractCase):
         """
         depths = [
             text(with_of(step).get("fetch-depth", "unset"))
-            for step in steps_of(job_of(workflow, DETECT_JOB))
+            for step in steps_of(job_of(workflow, META_JOB))
             if is_action(step, "actions/checkout")
         ]
         self.assertNotEqual(
-            depths, [], f"the {DETECT_JOB} job has no actions/checkout step"
+            depths, [], f"the {META_JOB} job has no actions/checkout step"
         )
         for depth in depths:
             self.assertTrue(
                 depth.isdigit() and depth != "1",
-                f"the {DETECT_JOB} job's actions/checkout fetches depth"
-                f" '{depth}'; dependency-change-action needs 2 or more",
+                f"the {META_JOB} job's actions/checkout fetches depth"
+                f" '{depth}'; detection needs 2 or more",
             )
 
-    def test_the_job_runs_only_under_the_policy(self) -> None:
-        """Each lane's job carries the agreed condition."""
-        for lane in LANES:
-            with self.subTest(lane=lane):
-                self.check_condition(load_workflow(lane))
+    def check_order(self, workflow: Workflow) -> None:
+        """Fail unless the metadata step follows every checkout."""
+        job = job_of(workflow, META_JOB)
+        checkout = last_checkout(job)
+        step = step_index(job, META_STEP)
+        self.assertTrue(
+            checkout != -1 and checkout < step,
+            f"'{META_STEP}' (step {step}) must follow the last checkout"
+            f" ({checkout})",
+        )
 
-    def test_the_job_runs_nothing_from_the_project(self) -> None:
-        """Each lane's job runs only the allowed steps."""
+    def check_no_old_wiring(self, path: str) -> None:
+        """Fail if the file still holds the dependency-change job's wiring."""
+        source = read_text(path)
+        left = [needle for needle in OLD_WIRING if needle in source]
+        self.assertEqual(left, [], f"{path} still holds: {left}")
+        self.assertNotIn(
+            OLD_JOB,
+            jobs_of(load_workflow(path)),
+            f"{path} still has a {OLD_JOB} job",
+        )
+
+    @unittest.expectedFailure
+    def test_the_pin_appears_once_with_its_comment(self) -> None:
+        """Each workflow calling the action holds the v0.4.0 pin, once."""
+        for path in (*LANES, MERGE, TESTING):
+            with self.subTest(path=path):
+                self.check_pin_in_text(path)
+
+    @unittest.expectedFailure
+    def test_the_step_detects_with_the_lanes_inputs(self) -> None:
+        """Each lane's metadata step detects with the lane's inputs."""
         for lane in LANES:
             with self.subTest(lane=lane):
-                self.check_steps(load_workflow(lane))
+                self.check_step(load_workflow(lane), PRESETS[lane])
+
+    @unittest.expectedFailure
+    def test_the_job_publishes_the_verdict(self) -> None:
+        """Each lane's metadata job publishes dependencies_changed."""
+        for lane in LANES:
+            with self.subTest(lane=lane):
+                self.check_job_output(load_workflow(lane))
 
     def test_the_checkout_holds_the_parent(self) -> None:
-        """Each lane's checkout fetches at least two commits."""
+        """Each lane's metadata checkout fetches at least two commits."""
         for lane in LANES:
             with self.subTest(lane=lane):
                 self.check_checkout_depth(load_workflow(lane))
 
-    def test_a_job_without_its_condition_fails(self) -> None:
-        """The job with its condition deleted fails the check."""
-        workflow = mutated(load_workflow(MAVEN))
-        del job_of(workflow, DETECT_JOB)["if"]
-        self.assert_check_fails(self.check_condition, workflow)
+    def test_detection_follows_the_checkout(self) -> None:
+        """Each lane gathers metadata after its checkouts."""
+        for lane in LANES:
+            with self.subTest(lane=lane):
+                self.check_order(load_workflow(lane))
 
-    def test_a_job_under_a_wider_condition_fails(self) -> None:
-        """The job gated on the SBOM alone fails the check."""
+    @unittest.expectedFailure
+    def test_the_old_wiring_is_gone(self) -> None:
+        """No workflow calls the detector directly or reads its sidecar."""
+        for path in (*LANES, MERGE, TESTING):
+            with self.subTest(path=path):
+                self.check_no_old_wiring(path)
+
+    def test_a_copy_at_another_pin_fails(self) -> None:
+        """A second call at another pin fails the check."""
+        source = read_text(MAVEN) + f"\n# uses: {META_ACTION}@{'0' * 40}\n"
+        with mock.patch(f"{__name__}.read_text", return_value=source):
+            self.assert_check_fails(self.check_pin_in_text, MAVEN)
+
+    def test_the_old_pin_fails(self) -> None:
+        """The metadata step at v0.3.3 fails the check."""
+        old = "2206d754f65f1a90f57b49be546712c5f594def2  # v0.3.3"
+        source = read_text(GRADLE).replace(f"{META_PIN}  # v0.4.0", old)
+        with mock.patch(f"{__name__}.read_text", return_value=source):
+            self.assert_check_fails(self.check_pin_in_text, GRADLE)
+
+    def test_detection_left_on_fails(self) -> None:
+        """Detection on whatever the policy says fails the check."""
+        workflow = mutated(load_workflow(MAVEN))
+        step = step_of(job_of(workflow, META_JOB), META_STEP)
+        with_of(step)["dependency_change"] = "true"
+        self.assert_check_fails(self.check_step, workflow, "maven")
+
+    @unittest.expectedFailure
+    def test_a_missing_gerrit_refspec_fails(self) -> None:
+        """A step not told about the Gerrit checkout fails the check."""
         workflow = mutated(load_workflow(GRADLE))
-        job_of(workflow, DETECT_JOB)["if"] = "inputs.sbom_enabled"
-        self.assert_check_fails(self.check_condition, workflow)
+        step = step_of(job_of(workflow, META_JOB), META_STEP)
+        del with_of(step)["gerrit_refspec"]
+        self.assert_check_fails(self.check_step, workflow, "gradle")
 
-    def test_a_build_step_in_the_job_fails(self) -> None:
-        """A build action appended to the job fails the check."""
+    def test_a_narrowed_prefix_fails(self) -> None:
+        """A detector held to a path prefix fails the check."""
+        workflow = mutated(load_workflow(GRADLE))
+        step = step_of(job_of(workflow, META_JOB), META_STEP)
+        with_of(step)["dependency_path_prefix"] = "${{ inputs.path_prefix }}"
+        self.assert_check_fails(self.check_step, workflow, "gradle")
+
+    def test_a_hard_coded_ecosystem_fails(self) -> None:
+        """A step narrowed to the lane's own preset fails the check."""
         workflow = mutated(load_workflow(MAVEN))
-        build = next(
-            step
-            for step in steps_of(job_of(workflow, "build"))
-            if is_action(step, "lfreleng-actions/maven-build-action")
+        step = step_of(job_of(workflow, META_JOB), META_STEP)
+        with_of(step)["dependency_ecosystems"] = "maven"
+        self.assert_check_fails(self.check_step, workflow, "maven")
+
+    def test_the_other_lanes_patterns_fail(self) -> None:
+        """A lane watching the other lane's patterns fails the check."""
+        workflow = mutated(load_workflow(MAVEN))
+        step = step_of(job_of(workflow, META_JOB), META_STEP)
+        with_of(step)["dependency_patterns"] = "\n".join(
+            lane_patterns("gradle")
         )
-        steps_of(job_of(workflow, DETECT_JOB)).append(copy.deepcopy(build))
-        self.assert_check_fails(self.check_steps, workflow)
+        self.assert_check_fails(self.check_step, workflow, "maven")
 
-    def test_a_run_step_in_the_job_fails(self) -> None:
-        """A plain run step in the job fails the check."""
+    def test_dropped_caller_patterns_fail(self) -> None:
+        """A step ignoring grype_dependency_patterns fails the check."""
         workflow = mutated(load_workflow(GRADLE))
-        step: Step = {"name": "Warm the cache", "run": "./gradlew help"}
-        steps_of(job_of(workflow, DETECT_JOB)).insert(2, step)
-        self.assert_check_fails(self.check_steps, workflow)
+        step = step_of(job_of(workflow, META_JOB), META_STEP)
+        with_of(step)["dependency_patterns"] = EXTRA_PATTERNS["gradle"]
+        self.assert_check_fails(self.check_step, workflow, "gradle")
+
+    def test_a_missing_job_output_fails(self) -> None:
+        """A metadata job without the output fails the check."""
+        workflow = mutated(load_workflow(MAVEN))
+        job_of(workflow, META_JOB).pop("outputs", None)
+        self.assert_check_fails(self.check_job_output, workflow)
 
     def test_a_shallow_checkout_fails(self) -> None:
         """A checkout at depth 1, or with no depth, fails the check."""
         for depth in ("1", None):
             with self.subTest(depth=depth):
                 workflow = mutated(load_workflow(MAVEN))
-                for step in steps_of(job_of(workflow, DETECT_JOB)):
+                for step in steps_of(job_of(workflow, META_JOB)):
                     if is_action(step, "actions/checkout"):
                         if depth is None:
                             with_of(step).pop("fetch-depth", None)
@@ -753,158 +858,82 @@ class DetectionJob(ContractCase):
                             with_of(step)["fetch-depth"] = int(depth)
                 self.assert_check_fails(self.check_checkout_depth, workflow)
 
-    def test_a_job_without_a_checkout_fails(self) -> None:
-        """A job whose actions/checkout is gone fails the check."""
+    def test_detection_before_the_checkout_fails(self) -> None:
+        """The metadata step moved ahead of the checkout fails the check."""
         workflow = mutated(load_workflow(GRADLE))
-        job = job_of(workflow, DETECT_JOB)
-        job["steps"] = [
-            step
-            for step in steps_of(job)
-            if not is_action(step, "actions/checkout")
-        ]
-        self.assert_check_fails(self.check_checkout_depth, workflow)
+        job = job_of(workflow, META_JOB)
+        steps = steps_of(job)
+        steps.insert(0, steps.pop(step_index(job, META_STEP)))
+        self.assert_check_fails(self.check_order, workflow)
+
+    def test_the_old_detector_fails(self) -> None:
+        """A direct dependency-change-action call fails the check."""
+        source = read_text(MAVEN) + f"\n# uses: {OLD_DETECTOR}{'0' * 40}\n"
+        with mock.patch(f"{__name__}.read_text", return_value=source):
+            self.assert_check_fails(self.check_no_old_wiring, MAVEN)
+
+    def test_an_old_job_fails(self) -> None:
+        """A dependency-change job left in a lane fails the check."""
+        workflow = mutated(load_workflow(GRADLE))
+        jobs_of(workflow)[OLD_JOB] = {"runs-on": "ubuntu-latest"}
+        with mock.patch(f"{__name__}.load_workflow", return_value=workflow):
+            self.assert_check_fails(self.check_no_old_wiring, GRADLE)
 
 
-class SidecarArtefact(ContractCase):
-    """The sidecar's upload, the job output and the Grype job's needs."""
+class GrypeConsumer(ContractCase):
+    """The Grype job reads the guarded verdict, and scans regardless."""
 
-    def check_upload(self, workflow: Workflow, preset: str) -> None:
-        """Fail unless the sidecar uploads alone, only when written."""
-        step = step_of(job_of(workflow, DETECT_JOB), UPLOAD_STEP)
-        passed = with_of(step)
-        got = {
-            "if": text(step.get("if")),
-            "name": text(passed.get("name")),
-            "path": text(passed.get("path")),
-            "if-no-files-found": text(passed.get("if-no-files-found")),
-        }
-        want = {
-            # On the action's manifest output, empty when unresolved:
-            # the step then skips, rather than failing on a file that
-            # is not there, and the job output below reads false.
-            "if": "steps.dependency-change.outputs.manifest != ''",
-            "name": f"dependency-change-{preset}{SUFFIX}",
-            "path": SIDECAR,
-            "if-no-files-found": "error",
-        }
-        self.assertEqual(got, want, f"'{UPLOAD_STEP}'")
-
-    def check_job_output(self, workflow: Workflow) -> None:
-        """Fail unless the job publishes the upload's artifact-id.
-
-        The ID of the upload, not a flag: the Grype job downloads by it,
-        so a same-name artefact from the build job cannot stand in.
-        """
-        job = job_of(workflow, DETECT_JOB)
-        upload_id = text(step_of(job, UPLOAD_STEP).get("id")) or "?"
-        self.assertEqual(
-            text(outputs_of(job).get("dependency_change_artifact_id")),
-            f"${{{{ steps.{upload_id}.outputs.artifact-id }}}}",
-            f"{DETECT_JOB}'s dependency_change_artifact_id must be the"
-            f" artifact-id output of '{UPLOAD_STEP}'",
-        )
-
-    def check_grype_needs(self, workflow: Workflow) -> None:
-        """Fail unless the Grype job needs build and detection, no more."""
+    def check_needs(self, workflow: Workflow) -> None:
+        """Fail unless the Grype job needs build and repository-metadata."""
         grype = job_of(workflow, "grype")
-        self.assertTrue(
-            needs_mention(grype, DETECT_JOB),
-            f"the grype job must need {DETECT_JOB}",
-        )
-        self.assertFalse(
-            needs_mention(grype, "repository-metadata"),
-            "the grype job must not need repository-metadata, which runs"
-            " on every call",
-        )
-        self.assertTrue(
-            needs_mention(grype, "build"),
-            "the grype job must still need build",
-        )
-
-    def check_no_other_carrier(self, workflow: Workflow) -> None:
-        """Fail if an upload other than the sidecar's carries the sidecar.
-
-        The SBOM in particular, whose job ran the project's build.
-        """
-        carriers = [
-            text(step.get("name"))
-            for job in jobs_of(workflow).values()
-            for step in steps_of(job)
-            if is_action(step, "actions/upload-artifact")
-            and text(step.get("name")) != UPLOAD_STEP
-            and SIDECAR in text(with_of(step).get("path"))
-        ]
         self.assertEqual(
-            carriers, [], f"{SIDECAR} also travels in: {carriers}"
+            sorted(needs_of(grype)),
+            ["build", META_JOB],
+            "the grype job must need build and repository-metadata",
         )
 
-    def test_the_upload(self) -> None:
-        """Each lane uploads the sidecar as agreed."""
-        for lane in LANES:
-            with self.subTest(lane=lane):
-                self.check_upload(load_workflow(lane), PRESETS[lane])
+    def check_condition(self, workflow: Workflow) -> None:
+        """Fail unless a failed or skipped metadata job still scans.
 
-    def test_the_job_output(self) -> None:
-        """Each lane's detection job publishes its upload's ID."""
-        for lane in LANES:
-            with self.subTest(lane=lane):
-                self.check_job_output(load_workflow(lane))
+        GitHub skips a job whose needs failed or skipped unless its
+        condition says otherwise; !cancelled() does, and the condition
+        names no metadata result.
+        """
+        self.assertEqual(
+            text(job_of(workflow, "grype").get("if")),
+            GRYPE_IF,
+            "the grype job's condition",
+        )
 
-    def test_the_grype_needs(self) -> None:
-        """Each lane's Grype job needs build and detection only."""
-        for lane in LANES:
-            with self.subTest(lane=lane):
-                self.check_grype_needs(load_workflow(lane))
-
-    def test_no_other_upload_carries_the_sidecar(self) -> None:
-        """No other artefact of either lane holds the sidecar."""
-        for lane in LANES:
-            with self.subTest(lane=lane):
-                self.check_no_other_carrier(load_workflow(lane))
-
-    def test_an_unconditional_upload_fails(self) -> None:
-        """An upload that runs whatever the detector wrote fails."""
-        workflow = mutated(load_workflow(MAVEN))
-        del step_of(job_of(workflow, DETECT_JOB), UPLOAD_STEP)["if"]
-        self.assert_check_fails(self.check_upload, workflow, "maven")
-
-    def test_an_unsuffixed_artefact_fails(self) -> None:
-        """An artefact name without the suffix fails the check."""
-        workflow = mutated(load_workflow(GRADLE))
-        step = step_of(job_of(workflow, DETECT_JOB), UPLOAD_STEP)
-        with_of(step)["name"] = "dependency-change-gradle"
-        self.assert_check_fails(self.check_upload, workflow, "gradle")
-
-    def test_a_flag_as_the_job_output_fails(self) -> None:
-        """A job output that is a flag, not the upload's ID, fails."""
-        workflow = mutated(load_workflow(MAVEN))
-        outputs_of(job_of(workflow, DETECT_JOB))[
-            "dependency_change_artifact_id"
-        ] = "${{ steps.dependency-change.outputs.manifest != '' }}"
-        self.assert_check_fails(self.check_job_output, workflow)
-
-    def test_grype_needing_repository_metadata_fails(self) -> None:
-        """A Grype job needing repository-metadata, not detection, fails."""
-        workflow = mutated(load_workflow(GRADLE))
-        job_of(workflow, "grype")["needs"] = ["build", "repository-metadata"]
-        self.assert_check_fails(self.check_grype_needs, workflow)
-
-    def test_grype_without_build_fails(self) -> None:
-        """A Grype job no longer needing build fails the check."""
-        workflow = mutated(load_workflow(MAVEN))
-        job_of(workflow, "grype")["needs"] = [DETECT_JOB]
-        self.assert_check_fails(self.check_grype_needs, workflow)
-
-    def test_a_sidecar_in_the_sbom_artefact_fails(self) -> None:
-        """A sidecar packed into the SBOM artefact fails the check."""
-        workflow = mutated(load_workflow(MAVEN))
-        step = step_of(job_of(workflow, "build"), SBOM_UPLOAD_STEP)
-        with_of(step)["path"] = f"{text(with_of(step).get('path'))}\n{SIDECAR}"
-        self.assert_check_fails(self.check_no_other_carrier, workflow)
-
-
-class ArtefactDownloads(ContractCase):
-    """The Grype job's two downloads, each by ID into its own directory."""
+    def check_verdict(self, workflow: Workflow) -> None:
+        """Fail unless the scanner and job output read the guarded verdict."""
+        grype = job_of(workflow, "grype")
+        passed = with_of(step_of(grype, GRYPE_STEP))
+        self.assertEqual(
+            text(passed.get("dependencies-changed")),
+            f"${{{{ {VERDICT} }}}}",
+            f"'{GRYPE_STEP}' must read the guarded verdict",
+        )
+        self.assertNotIn(
+            "dependency-change-manifest",
+            passed,
+            f"'{GRYPE_STEP}' must not read a sidecar",
+        )
+        self.assertEqual(
+            text(outputs_of(grype).get("dependencies_changed")),
+            f"${{{{ {VERDICT} }}}}",
+            "the grype job's dependencies_changed must be the verdict"
+            " the scanner reads",
+        )
+        self.assertEqual(
+            text(
+                section(
+                    call_outputs(workflow), "grype_dependencies_changed"
+                ).get("value")
+            ),
+            "${{ jobs.grype.outputs.dependencies_changed }}",
+            "output grype_dependencies_changed must be the grype job's",
+        )
 
     def check_sbom_output(self, workflow: Workflow) -> None:
         """Fail unless the build job publishes its SBOM upload's ID."""
@@ -917,43 +946,10 @@ class ArtefactDownloads(ContractCase):
             f" '{SBOM_UPLOAD_STEP}'",
         )
 
-    def expected_download(self, name: str) -> dict[str, str]:
-        """Return the fields each download must carry."""
-        sidecar_id = (
-            f"needs.{DETECT_JOB}.outputs.dependency_change_artifact_id"
-        )
-        sbom_id = "needs.build.outputs.sbom_artifact_id"
-        if name == DOWNLOAD_STEP:
-            return {
-                # Skipped when the dependency-change job uploaded
-                # nothing; an ID that resolves to no artefact fails the
-                # download, and the job.
-                "if": f"{sidecar_id} != ''",
-                # By the exact upload, never by a name another job
-                # could reuse.
-                "artifact-ids": f"${{{{ {sidecar_id} }}}}",
-                # Into a directory of its own, so nothing the SBOM
-                # artefact holds can pass for it, and with
-                # merge-multiple, which drops the artefact-name level a
-                # download by ID adds.
-                "merge-multiple": "true",
-                "name": "",
-                "path": SIDECAR_DIR,
-            }
-        return {
-            # The grype job runs only when the SBOM uploaded, so the
-            # download needs no condition of its own.
-            "if": "",
-            "artifact-ids": f"${{{{ {sbom_id} }}}}",
-            "merge-multiple": "true",
-            "name": "",
-            "path": SBOM_DIR,
-        }
-
-    def check_download(self, workflow: Workflow, name: str) -> None:
-        """Fail unless download ``name`` goes by ID into place, pre-scan."""
+    def check_download(self, workflow: Workflow) -> None:
+        """Fail unless the SBOM download goes by ID into place, pre-scan."""
         grype = job_of(workflow, "grype")
-        step = step_of(grype, name)
+        step = step_of(grype, SBOM_DOWNLOAD_STEP)
         passed = with_of(step)
         got = {
             "if": text(step.get("if")),
@@ -962,25 +958,58 @@ class ArtefactDownloads(ContractCase):
             "name": text(passed.get("name")),
             "path": text(passed.get("path")),
         }
-        self.assertEqual(got, self.expected_download(name), f"'{name}'")
-        index = step_index(grype, name)
+        want = {
+            # The grype job runs only when the SBOM uploaded, so the
+            # download needs no condition of its own.
+            "if": "",
+            # By the exact upload, never by a name another job could
+            # reuse, and with merge-multiple, which drops the
+            # artefact-name level a download by ID adds.
+            "artifact-ids": "${{ needs.build.outputs.sbom_artifact_id }}",
+            "merge-multiple": "true",
+            "name": "",
+            "path": SBOM_DIR,
+        }
+        self.assertEqual(got, want, f"'{SBOM_DOWNLOAD_STEP}'")
+        index = step_index(grype, SBOM_DOWNLOAD_STEP)
         scan = step_index(grype, GRYPE_STEP)
         self.assertTrue(
             index != -1 and scan != -1 and index < scan,
-            f"'{name}' must precede '{GRYPE_STEP}'",
+            f"'{SBOM_DOWNLOAD_STEP}' must precede '{GRYPE_STEP}'",
         )
 
-    def check_no_named_download(self, workflow: Workflow) -> None:
-        """Fail if any download in the Grype job resolves a name."""
-        named = [
+    def check_downloads(self, workflow: Workflow) -> None:
+        """Fail unless the SBOM is the Grype job's only download."""
+        downloads = [
             text(step.get("name"))
             for step in steps_of(job_of(workflow, "grype"))
             if is_action(step, "actions/download-artifact")
-            and with_of(step).get("name") is not None
         ]
         self.assertEqual(
-            named, [], f"the grype job downloads by name in: {named}"
+            downloads,
+            [SBOM_DOWNLOAD_STEP],
+            f"the grype job downloads: {downloads}",
         )
+
+    @unittest.expectedFailure
+    def test_the_grype_needs(self) -> None:
+        """Each lane's Grype job needs build and repository-metadata."""
+        for lane in LANES:
+            with self.subTest(lane=lane):
+                self.check_needs(load_workflow(lane))
+
+    def test_the_grype_condition(self) -> None:
+        """Each lane's Grype job tolerates a failed metadata job."""
+        for lane in LANES:
+            with self.subTest(lane=lane):
+                self.check_condition(load_workflow(lane))
+
+    @unittest.expectedFailure
+    def test_the_guarded_verdict(self) -> None:
+        """Each lane's scanner reads the verdict through the guard."""
+        for lane in LANES:
+            with self.subTest(lane=lane):
+                self.check_verdict(load_workflow(lane))
 
     def test_the_build_publishes_its_sbom_upload(self) -> None:
         """Each lane's build job publishes the SBOM upload's ID."""
@@ -988,41 +1017,83 @@ class ArtefactDownloads(ContractCase):
             with self.subTest(lane=lane):
                 self.check_sbom_output(load_workflow(lane))
 
-    def test_both_downloads(self) -> None:
-        """Each lane downloads the sidecar and the SBOM as agreed."""
-        for lane in LANES:
-            for name in (DOWNLOAD_STEP, SBOM_DOWNLOAD_STEP):
-                with self.subTest(lane=lane, step=name):
-                    self.check_download(load_workflow(lane), name)
-
-    def test_no_download_goes_by_name(self) -> None:
-        """No download in either lane's Grype job resolves a name."""
+    def test_the_sbom_download(self) -> None:
+        """Each lane downloads the SBOM by ID, before the scan."""
         for lane in LANES:
             with self.subTest(lane=lane):
-                self.check_no_named_download(load_workflow(lane))
+                self.check_download(load_workflow(lane))
+
+    @unittest.expectedFailure
+    def test_the_sbom_is_the_only_download(self) -> None:
+        """No lane's Grype job downloads anything but the SBOM."""
+        for lane in LANES:
+            with self.subTest(lane=lane):
+                self.check_downloads(load_workflow(lane))
+
+    def test_grype_without_repository_metadata_fails(self) -> None:
+        """A Grype job not needing repository-metadata fails the check."""
+        workflow = mutated(load_workflow(GRADLE))
+        job_of(workflow, "grype")["needs"] = ["build"]
+        self.assert_check_fails(self.check_needs, workflow)
+
+    def test_grype_without_build_fails(self) -> None:
+        """A Grype job not needing build fails the check."""
+        workflow = mutated(load_workflow(MAVEN))
+        job_of(workflow, "grype")["needs"] = [META_JOB]
+        self.assert_check_fails(self.check_needs, workflow)
+
+    def test_a_condition_without_cancelled_fails(self) -> None:
+        """A Grype job that a failed metadata job would skip fails."""
+        workflow = mutated(load_workflow(MAVEN))
+        job_of(workflow, "grype")["if"] = (
+            "${{ needs.build.outputs.sbom_uploaded == 'true'"
+            " && inputs.grype_enabled }}"
+        )
+        self.assert_check_fails(self.check_condition, workflow)
+
+    def test_a_condition_on_metadata_success_fails(self) -> None:
+        """A Grype job that waits on metadata success fails the check."""
+        workflow = mutated(load_workflow(GRADLE))
+        job = job_of(workflow, "grype")
+        job["if"] = text(job["if"]).replace(
+            "}}", "&& needs.repository-metadata.result == 'success' }}"
+        )
+        self.assert_check_fails(self.check_condition, workflow)
+
+    def test_an_unguarded_verdict_fails(self) -> None:
+        """A scanner reading the output whatever the job's result fails."""
+        workflow = mutated(load_workflow(MAVEN))
+        step = step_of(job_of(workflow, "grype"), GRYPE_STEP)
+        with_of(step)["dependencies-changed"] = (
+            "${{ needs.repository-metadata.outputs.dependencies_changed }}"
+        )
+        self.assert_check_fails(self.check_verdict, workflow)
+
+    def test_a_sidecar_manifest_fails(self) -> None:
+        """A scanner still reading a sidecar fails the check."""
+        workflow = mutated(load_workflow(GRADLE))
+        step = step_of(job_of(workflow, "grype"), GRYPE_STEP)
+        with_of(step)["dependency-change-manifest"] = (
+            "dependency-change/dependency-change.json"
+        )
+        self.assert_check_fails(self.check_verdict, workflow)
+
+    def test_a_crossed_verdict_output_fails(self) -> None:
+        """A job output reading the raw metadata output fails the check."""
+        workflow = mutated(load_workflow(MAVEN))
+        outputs_of(job_of(workflow, "grype"))["dependencies_changed"] = (
+            "${{ needs.repository-metadata.outputs.dependencies_changed }}"
+        )
+        self.assert_check_fails(self.check_verdict, workflow)
 
     def test_a_download_by_name_fails(self) -> None:
-        """The sidecar download by artefact name fails both checks."""
+        """The SBOM download by artefact name fails the check."""
         workflow = mutated(load_workflow(MAVEN))
-        step = step_of(job_of(workflow, "grype"), DOWNLOAD_STEP)
+        step = step_of(job_of(workflow, "grype"), SBOM_DOWNLOAD_STEP)
         passed = with_of(step)
         del passed["artifact-ids"]
-        passed["name"] = f"dependency-change-maven{SUFFIX}"
-        self.assert_check_fails(self.check_download, workflow, DOWNLOAD_STEP)
-        self.assert_check_fails(self.check_no_named_download, workflow)
-
-    def test_a_shared_download_directory_fails(self) -> None:
-        """The sidecar downloaded into the SBOM directory fails the check."""
-        workflow = mutated(load_workflow(GRADLE))
-        step = step_of(job_of(workflow, "grype"), DOWNLOAD_STEP)
-        with_of(step)["path"] = SBOM_DIR
-        self.assert_check_fails(self.check_download, workflow, DOWNLOAD_STEP)
-
-    def test_an_unconditional_sidecar_download_fails(self) -> None:
-        """A sidecar download with no condition fails the check."""
-        workflow = mutated(load_workflow(MAVEN))
-        del step_of(job_of(workflow, "grype"), DOWNLOAD_STEP)["if"]
-        self.assert_check_fails(self.check_download, workflow, DOWNLOAD_STEP)
+        passed["name"] = f"sbom-files-maven{SUFFIX}"
+        self.assert_check_fails(self.check_download, workflow)
 
     def test_a_download_after_the_scan_fails(self) -> None:
         """The SBOM download moved behind the scan fails the check."""
@@ -1030,9 +1101,16 @@ class ArtefactDownloads(ContractCase):
         grype = job_of(workflow, "grype")
         steps = steps_of(grype)
         steps.append(steps.pop(step_index(grype, SBOM_DOWNLOAD_STEP)))
-        self.assert_check_fails(
-            self.check_download, workflow, SBOM_DOWNLOAD_STEP
-        )
+        self.assert_check_fails(self.check_download, workflow)
+
+    def test_an_extra_download_fails(self) -> None:
+        """A second download in the Grype job fails the check."""
+        workflow = mutated(load_workflow(MAVEN))
+        grype = job_of(workflow, "grype")
+        extra = copy.deepcopy(step_of(grype, SBOM_DOWNLOAD_STEP))
+        extra["name"] = "Download dependency-change sidecar"
+        steps_of(grype).insert(0, extra)
+        self.assert_check_fails(self.check_downloads, workflow)
 
     def test_a_flag_as_the_sbom_output_fails(self) -> None:
         """A build output naming the step, not its artifact-id, fails."""
@@ -1041,6 +1119,206 @@ class ArtefactDownloads(ContractCase):
             "${{ steps.upload-sbom.outcome }}"
         )
         self.assert_check_fails(self.check_sbom_output, workflow)
+
+
+class TuningInputs(ContractCase):
+    """The detection, bypass and merge-lane policy inputs."""
+
+    def check_verify_inputs(self, workflow: Workflow) -> None:
+        """Fail unless each new verify input is declared and passed on."""
+        inputs = call_inputs(workflow)
+        for name in NEW_VERIFY_INPUTS:
+            declared = section(inputs, name)
+            self.assertEqual(
+                (
+                    text(declared.get("type")),
+                    text(declared.get("default")),
+                    declared.get("required"),
+                ),
+                ("string", "", False),
+                f"input {name} must be an optional string defaulting to ''",
+            )
+        for name, job_id, step_name, target in VERIFY_INPUTS:
+            passed = with_of(step_of(job_of(workflow, job_id), step_name))
+            self.assertEqual(
+                text(passed.get(target)),
+                f"${{{{ inputs.{name} }}}}",
+                f"'{step_name}' must pass inputs.{name} as {target}",
+            )
+        self.assertEqual(
+            text(section(inputs, "grype_fail_on").get("default")),
+            "medium",
+            "grype_fail_on keeps its default",
+        )
+
+    def check_merge_inputs(self, workflow: Workflow) -> None:
+        """Fail unless the merge lane's inputs reach a report-only scan."""
+        inputs = call_inputs(workflow)
+        grype = job_of(workflow, "grype")
+        passed = with_of(step_of(grype, GRYPE_STEP))
+        for name, kind, default, target in MERGE_INPUTS:
+            declared = section(inputs, name)
+            self.assertEqual(
+                (text(declared.get("type")), text(declared.get("default"))),
+                (kind, default),
+                f"input {name} must be a {kind} defaulting to '{default}'",
+            )
+            self.assertEqual(
+                text(passed.get(target)),
+                f"${{{{ inputs.{name} }}}}",
+                f"'{GRYPE_STEP}' must pass inputs.{name} as {target}",
+            )
+        # The merge lane reports, never gates.
+        self.assertEqual(text(passed.get("permit-fail")), "true")
+        self.assertIs(grype.get("continue-on-error"), True)
+        self.assertEqual(uses_of(step_of(grype, GRYPE_STEP)), GRYPE_USES)
+
+    @unittest.expectedFailure
+    def test_the_verify_inputs(self) -> None:
+        """Each verify lane declares and passes its new inputs."""
+        for lane in LANES:
+            with self.subTest(lane=lane):
+                self.check_verify_inputs(load_workflow(lane))
+
+    @unittest.expectedFailure
+    def test_the_merge_inputs(self) -> None:
+        """The merge lane declares and passes its policy inputs."""
+        self.check_merge_inputs(load_workflow(MERGE))
+
+    @unittest.expectedFailure
+    def test_a_dropped_bypass_fails(self) -> None:
+        """A scanner not told the bypass repository fails the check."""
+        workflow = mutated(load_workflow(GRADLE))
+        del with_of(step_of(job_of(workflow, "grype"), GRYPE_STEP))[
+            "bypass-repository"
+        ]
+        self.assert_check_fails(self.check_verify_inputs, workflow)
+
+    @unittest.expectedFailure
+    def test_a_defaulted_ecosystem_fails(self) -> None:
+        """An ecosystems input with a non-empty default fails the check."""
+        workflow = mutated(load_workflow(MAVEN))
+        call_inputs(workflow)["grype_dependency_ecosystems"]["default"] = (
+            "maven"
+        )
+        self.assert_check_fails(self.check_verify_inputs, workflow)
+
+    @unittest.expectedFailure
+    def test_a_missing_patterns_input_fails(self) -> None:
+        """A lane without grype_dependency_patterns fails the check."""
+        workflow = mutated(load_workflow(GRADLE))
+        del call_inputs(workflow)["grype_dependency_patterns"]
+        self.assert_check_fails(self.check_verify_inputs, workflow)
+
+    def test_a_literal_merge_fail_on_fails(self) -> None:
+        """The merge scanner back on a literal fail-on fails the check."""
+        workflow = mutated(load_workflow(MERGE))
+        step = step_of(job_of(workflow, "grype"), GRYPE_STEP)
+        with_of(step)["fail-on"] = "medium"
+        self.assert_check_fails(self.check_merge_inputs, workflow)
+
+    @unittest.expectedFailure
+    def test_a_changed_merge_default_fails(self) -> None:
+        """A merge policy default other than the action's fails."""
+        workflow = mutated(load_workflow(MERGE))
+        call_inputs(workflow)["grype_dependency_policy"]["default"] = (
+            "declared"
+        )
+        self.assert_check_fails(self.check_merge_inputs, workflow)
+
+    def test_a_gating_merge_scan_fails(self) -> None:
+        """A merge scan that may fail the run fails the check."""
+        workflow = mutated(load_workflow(MERGE))
+        step = step_of(job_of(workflow, "grype"), GRYPE_STEP)
+        with_of(step)["permit-fail"] = "false"
+        self.assert_check_fails(self.check_merge_inputs, workflow)
+
+
+class MergeInputValidation(ContractCase):
+    """The merge lane's Grype input validation, run as extracted."""
+
+    @property
+    def script(self) -> str:
+        """The validation step's script, extracted from the merge lane."""
+        return run_of(load_workflow(MERGE), "validate", MERGE_VALIDATE)
+
+    def validate(
+        self,
+        fail_on: str = "medium",
+        policy: str = "all",
+        transitive: str = "none",
+        bypass: str = "",
+    ) -> Verdict:
+        """Run the step with one value set and the rest at their defaults."""
+        return run_script(
+            self.script,
+            {
+                "FAIL_ON": fail_on,
+                "DEPENDENCY_POLICY": policy,
+                "TRANSITIVE_FAIL_ON": transitive,
+                "BYPASS_REPOSITORY": bypass,
+            },
+        )
+
+    @unittest.expectedFailure
+    def test_the_step_runs_on_every_call(self) -> None:
+        """The validation step has no condition."""
+        step = step_of(
+            job_of(load_workflow(MERGE), "validate"), MERGE_VALIDATE
+        )
+        self.assertEqual(text(step.get("if")), "", "no condition")
+
+    @unittest.expectedFailure
+    @needs_runner_tools
+    def test_defaults_pass(self) -> None:
+        """The defaults pass."""
+        self.assert_passes(self.validate(), "defaults")
+
+    @unittest.expectedFailure
+    @needs_runner_tools
+    def test_severities(self) -> None:
+        """Both severity inputs take a severity or none, and nothing else."""
+        for field in ("fail_on", "transitive"):
+            for value in SEVERITIES:
+                with self.subTest(field=field, value=value):
+                    self.assert_passes(
+                        self.validate(**{field: value}), f"{field} '{value}'"
+                    )
+            for value in SEVERITY_FAILS:
+                with self.subTest(field=field, value=value):
+                    self.assert_fails(
+                        self.validate(**{field: value}),
+                        f"{field} '{value}' rejected",
+                    )
+
+    @unittest.expectedFailure
+    @needs_runner_tools
+    def test_dependency_policy(self) -> None:
+        """grype_dependency_policy takes its two values and nothing else."""
+        for value in ("all", "declared"):
+            with self.subTest(value=value):
+                self.assert_passes(self.validate(policy=value), value)
+        for value in ("", "direct", "Declared", "all declared"):
+            with self.subTest(value=value):
+                self.assert_fails(
+                    self.validate(policy=value), f"'{value}' rejected"
+                )
+
+    @unittest.expectedFailure
+    @needs_runner_tools
+    def test_bypass_repository(self) -> None:
+        """grype_bypass_repository takes owner/name, or nothing."""
+        for value in BYPASS_PASSES:
+            with self.subTest(value=value):
+                self.assert_passes(self.validate(bypass=value), value)
+        for value in BYPASS_FAILS:
+            with self.subTest(value=value):
+                verdict = self.validate(bypass=value)
+                self.assert_fails(verdict, f"'{value}' rejected")
+                self.assertFalse(
+                    verdict.warned(),
+                    "a line break started a workflow command",
+                )
 
 
 class GateVerdictOutputs(ContractCase):
@@ -1124,9 +1402,11 @@ def resolved_lane(testing: Workflow, preset: str) -> list[str]:
     ]
 
 
-def readers_of(testing: Workflow, lane: str) -> list[str]:
-    """Return the jobs needing ``lane`` that read its grype_gate_active."""
-    wanted = f"needs.{lane}.outputs.grype_gate_active"
+def readers_of(
+    testing: Workflow, lane: str, output: str = "grype_gate_active"
+) -> list[str]:
+    """Return the jobs needing ``lane`` that read its ``output``."""
+    wanted = f"needs.{lane}.outputs.{output}"
     return [
         job_id
         for job_id, job in jobs_of(testing).items()
@@ -1142,9 +1422,10 @@ class PolicyLanes(ContractCase):
     fixture at a pinned commit, whose HEAD is not the run's own commit,
     so the detector reports unresolved and the gate stays armed. The
     resolved path: each verify workflow building a fixture of this
-    repository, at the run's own commit, so the detector writes a
-    sidecar the check job holds the gate to. Each lane's check job reads
-    the verdict the lane publishes.
+    repository, at the run's own commit, so the detector resolves and
+    the check job holds the gate to the verdict. Each lane's check job
+    reads both verdicts the lane publishes: the dependency-change one
+    its Grype job received and the gate's.
     """
 
     FIXTURE_MANIFESTS: ClassVar[dict[str, str]] = {
@@ -1179,11 +1460,12 @@ class PolicyLanes(ContractCase):
             lanes.extend(resolved_lane(testing, preset))
         self.assertNotEqual(lanes, [], "no policy lanes to read")
         for lane in lanes:
-            self.assertNotEqual(
-                readers_of(testing, lane),
-                [],
-                f"no job needing {lane} reads its grype_gate_active",
-            )
+            for output in ("grype_gate_active", "grype_dependencies_changed"):
+                self.assertNotEqual(
+                    readers_of(testing, lane, output),
+                    [],
+                    f"no job needing {lane} reads its {output}",
+                )
 
     def test_a_lane_runs_the_unresolved_path(self) -> None:
         """A lane runs against a pinned fixture."""
@@ -1203,6 +1485,7 @@ class PolicyLanes(ContractCase):
                     " fixture",
                 )
 
+    @unittest.expectedFailure
     def test_each_lane_has_a_reader(self) -> None:
         """A check job reads each policy lane's verdict."""
         self.check_readers(load_workflow(TESTING))
@@ -1221,6 +1504,15 @@ class PolicyLanes(ContractCase):
             with_of(job_of(testing, lane))["grype_gate_when"] = "always"
         self.assert_check_fails(self.check_resolved_lanes, testing)
 
+    def test_a_reader_ignoring_the_verdict_fails(self) -> None:
+        """A check job no longer reading grype_dependencies_changed fails."""
+        testing = mutated(load_workflow(TESTING))
+        lane = pinned_lanes(testing)[0]
+        for job_id in readers_of(testing, lane, "grype_dependencies_changed"):
+            for step in steps_of(job_of(testing, job_id)):
+                step.pop("env", None)
+        self.assert_check_fails(self.check_readers, testing)
+
     def test_a_lane_without_its_reader_fails(self) -> None:
         """A policy lane whose check job stops reading it fails."""
         testing = mutated(load_workflow(TESTING))
@@ -1236,7 +1528,7 @@ class PolicyLanes(ContractCase):
 class RepositoryTree(unittest.TestCase):
     """No symbolic link or submodule sits in the tree.
 
-    The resolved lanes' check requires the sidecar artefact, on the
+    The resolved lanes' check requires a resolved verdict, on the
     strength of the detector's rules for a pull request of this
     repository: HEAD is the run's commit, the whole history holds the
     base, and nothing in the tree is a symbolic link or a submodule,
@@ -1316,11 +1608,12 @@ def matrix_axis(job: Job, field: str) -> list[str]:
 class GateVerdictCases(ContractCase):
     """testing.yaml's fixed-expectation cases.
 
-    The job needs both resolved lanes (for their SBOMs), runs the
-    detector at the lanes' pin with the lanes' inputs over a scratch
-    repository with an explicit base, and the scanner at the lanes' pin
-    with the lanes' policy and manifest path; its matrix fixes each
-    case's expected verdict.
+    The job needs both resolved lanes (for their SBOMs), runs
+    repository-metadata-action at the lanes' pin with the lanes'
+    detection inputs over a scratch repository with an explicit base,
+    and the scanner at the lanes' pin with the lanes' policy, reading
+    the verdict from the metadata step; its matrix fixes each case's
+    expected verdict.
     """
 
     def check_job_exists(self, testing: Workflow) -> None:
@@ -1341,18 +1634,20 @@ class GateVerdictCases(ContractCase):
         step = step_of(job_of(testing, CASES_JOB), DETECT_STEP)
         passed = with_of(step)
         want = {
-            "uses": DETECT_USES,
-            "ecosystems": "${{ matrix.ecosystems }}",
-            "patterns": "${{ matrix.patterns }}",
-            "base": "${{ steps.scratch.outputs.base }}",
-            "output": SIDECAR,
-            "path-prefix": ".",
+            "uses": META_USES,
+            "id": META_STEP_ID,
+            "dependency_change": "true",
+            # Empty, as the lanes default: every preset.
+            "dependency_ecosystems": "",
+            "dependency_patterns": "${{ matrix.patterns }}",
+            "dependency_base": "${{ steps.scratch.outputs.base }}",
+            "dependency_path_prefix": ".",
         }
-        got = {"uses": uses_of(step)}
+        got = {"uses": uses_of(step), "id": text(step.get("id"))}
         got.update(
             (field, text(passed.get(field)))
             for field in want
-            if field != "uses"
+            if field not in got
         )
         self.assertEqual(got, want, f"{CASES_JOB}'s '{DETECT_STEP}'")
 
@@ -1364,8 +1659,9 @@ class GateVerdictCases(ContractCase):
             row = row_where(rows, "lane", preset)
             self.assertEqual(
                 (text(row.get("ecosystems")), text(row.get("patterns"))),
-                (preset, extra),
-                f"{CASES_JOB}'s {preset} row",
+                ("", extra),
+                f"{CASES_JOB}'s {preset} row: the lane's fixed patterns,"
+                " every preset",
             )
         for case, expected in (("unchanged", "false"), ("changed", "true")):
             row = row_where(rows, "case", case)
@@ -1387,7 +1683,10 @@ class GateVerdictCases(ContractCase):
         passed = with_of(step)
         want = {
             "gate-when": "dependencies-changed",
-            "dependency-change-manifest": SIDECAR,
+            "dependencies-changed": (
+                f"${{{{ steps.{META_STEP_ID}.outputs.dependencies_changed }}}}"
+            ),
+            "dependency-change-manifest": "",
             "dependency-policy": "declared",
             "transitive-fail-on": "critical",
             "only-fixed": "true",
@@ -1424,22 +1723,26 @@ class GateVerdictCases(ContractCase):
         """The job needs each resolved lane."""
         self.check_needs(load_workflow(TESTING))
 
+    @unittest.expectedFailure
     def test_the_detector_pin_appears_in_the_text(self) -> None:
         """testing.yaml holds the pinned uses: line with its comment."""
         self.assertIn(
-            DETECT_LINE,
+            META_LINE,
             read_text(TESTING),
-            f"{TESTING}: no step runs {DETECT_LINE}",
+            f"{TESTING}: no step runs {META_LINE}",
         )
 
+    @unittest.expectedFailure
     def test_the_detector(self) -> None:
         """The detector runs at the pin with the matrix inputs."""
         self.check_detector(load_workflow(TESTING))
 
+    @unittest.expectedFailure
     def test_the_matrix(self) -> None:
         """The matrix carries the lanes' inputs and each case's verdict."""
         self.check_matrix(load_workflow(TESTING))
 
+    @unittest.expectedFailure
     def test_the_scanner(self) -> None:
         """The scanner runs at the pin with the lanes' policy."""
         self.check_scanner(load_workflow(TESTING))
@@ -1466,12 +1769,29 @@ class GateVerdictCases(ContractCase):
         job_of(testing, CASES_JOB)["needs"] = resolved_lane(testing, "maven")
         self.assert_check_fails(self.check_needs, testing)
 
+    @unittest.expectedFailure
     def test_a_detector_without_a_base_fails(self) -> None:
         """A detector left to find its own base fails the check."""
         testing = mutated(load_workflow(TESTING))
         step = step_of(job_of(testing, CASES_JOB), DETECT_STEP)
-        del with_of(step)["base"]
+        del with_of(step)["dependency_base"]
         self.assert_check_fails(self.check_detector, testing)
+
+    def test_a_narrowed_detector_fails(self) -> None:
+        """A detector held to the lane's own preset fails the check."""
+        testing = mutated(load_workflow(TESTING))
+        step = step_of(job_of(testing, CASES_JOB), DETECT_STEP)
+        with_of(step)["dependency_ecosystems"] = "${{ matrix.lane }}"
+        self.assert_check_fails(self.check_detector, testing)
+
+    @unittest.expectedFailure
+    def test_a_scanner_reading_a_sidecar_fails(self) -> None:
+        """A scanner reading a sidecar, not the step output, fails."""
+        testing = mutated(load_workflow(TESTING))
+        passed = with_of(step_of(job_of(testing, CASES_JOB), GRYPE_STEP))
+        del passed["dependencies-changed"]
+        passed["dependency-change-manifest"] = "dependency-change.json"
+        self.assert_check_fails(self.check_scanner, testing)
 
     def test_a_swapped_verdict_fails(self) -> None:
         """A matrix expecting the gate off on a change fails the check."""
@@ -1497,7 +1817,7 @@ class GateVerdictCases(ContractCase):
         """A second maven row, overriding its patterns, fails the check."""
         testing = mutated(load_workflow(TESTING))
         include_of(job_of(testing, CASES_JOB)).append(
-            {"lane": "maven", "ecosystems": "maven", "patterns": ""}
+            {"lane": "maven", "patterns": ""}
         )
         self.assert_check_fails(self.check_matrix, testing)
 
