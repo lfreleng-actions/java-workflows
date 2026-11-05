@@ -241,11 +241,16 @@ date has no clock of its own: with a start date set, that date starts
 it; with none, the finding gates at once, since a missing date must not
 buy unlimited time. Both inputs default to empty, as in the action, and
 do nothing on `always` runs. The lanes check every policy input in
-`gerrit-validate`, so a typo fails in seconds rather than after the
-build, as are `grype_fail_on`, the detection presets and the bypass
-repository; whether a start date lies in the future is the action's
-call, and a bad `grype_dependency_patterns` entry fails the
-`repository-metadata` job by the detector's own grammar.
+`gerrit-validate` by running `grype-scan-action` in the mode that
+checks its inputs and stops, with the same inputs the scan gets and
+nothing to scan, so a typo fails in seconds rather than after the
+build, by the action's own rules. That the step installs no Grype,
+fetches no database and makes no network request is the action's
+contract, tested in its own repository, which is why the job runs no
+harden-runner. The detection presets get a shell check of their own
+there, as an input of `repository-metadata-action`, and a bad
+`grype_dependency_patterns` entry fails the `repository-metadata` job
+by the detector's own grammar.
 `grype_bypass_repository` names the repository whose approved `BYPASS:`
 issues `grype-scan-action` honours; set it to share one bypass list
 across repositories.
@@ -694,7 +699,12 @@ base, asserts the `dependencies_changed`, `dependency_change_reason`
 and `dependency_change_base` outputs it expects, then runs
 `grype-scan-action` with the
 lane's policy over the resolved lane's SBOM and asserts `gate-active`
-is `false` for the unchanged case and `true` for the changed one. A
+is `false` for the unchanged case and `true` for the changed one.
+`gate-validate-check` runs the lanes' validation step itself, at the
+lanes' pin with the lanes' defaults and a `grype_gate_when` the action
+does not know, as the lanes' job runs it, and asserts the step fails:
+a typo fails in seconds. It proves nothing about the network, which
+is the action's own contract. A
 `wiring-check` job runs the `unittest` suite under `tests/` with
 `uv run --locked python -B -m unittest discover -s tests -v`.
 `tests/test_wiring.py` tests the guard steps, the merge lane's input
@@ -702,8 +712,10 @@ checks, its coordinate check and its copy of `maven-build-action`'s
 placeholder expansion, the submodule wiring the fixtures cannot
 exercise, and that every artefact name the Maven lanes use carries
 `artifact_suffix`; `tests/test_grype_gate.py` holds both lanes to the
-Grype gate policy's wiring: each input's `gerrit-validate` rejection,
-the detection inputs on the `repository-metadata` step, its pin, job
+Grype gate policy's wiring: that `gerrit-validate` validates through
+the action at the scan's pin with the scan's own policy expressions
+and fetches nothing else, with the presets' shell check run as
+extracted, the detection inputs on the `repository-metadata` step, its pin, job
 output, checkout depth and position, the `grype` job's `needs`,
 condition and guarded verdict, the download of the SBOM alone by its
 upload's ID, the absence of the old detection job and sidecar, each
@@ -711,10 +723,13 @@ new input's declaration and pass-through, the merge lane's input
 checks, the verdict outputs, the self-test calls, that no
 symbolic link or submodule sits in this repository's tree, and that
 `gate-verdict-cases` runs both actions at the lanes' pins with the
-lanes' inputs and the expected verdict fixed per case. Each structural
-rule also runs against a copy of the workflow with that one thing
-wrong, and must reject it, so a rule that stops rejecting fails the
-suite. A lookup by step name or `id` fails when a job carries two, and a
+lanes' inputs and the expected verdict fixed per case, and that
+`gate-validate-check` passes the lanes' defaults with a `gate-when`
+the action rejects, runs that one action, and judges the outcome.
+Each structural rule also runs against a copy of the workflow with
+that one thing wrong, and must reject it, so a rule that stops
+rejecting fails the suite. A lookup by step name or `id` fails when a
+job carries two, and a
 key written twice fails the parse, a bare `on` and a quoted `"on"`
 counting as one key, so a second, drifted copy cannot hide behind a
 first that matches. Each workflow is also read with PyYAML's
@@ -726,12 +741,11 @@ a lookup by name; `tests/test_helpers.py` holds each lookup to that.
 Run it locally with the same command; `uv` installs the locked
 interpreter and PyYAML from `uv.lock`. The structural tests need nothing
 more. The tests that run a guard extracted from a workflow need what
-`ubuntu-latest` has and stock macOS lacks: GNU `date -d`, which the
-Grype gate's input checks read the window start with; bash 4 or
-later, which the merge lane's input check lower-cases with; and `jq`,
-which the environment guards read their JSON with. `tests/guards.py`
-lists the three with the guard each serves. On a host without one of
-them, stock macOS or a Linux machine for one, the suite skips those
+`ubuntu-latest` has and stock macOS lacks: bash 4 or later, which the
+merge lane's input check lower-cases with, and `jq`, which the
+environment guards read their JSON with. `tests/guards.py` lists the
+two with the guard each serves. On a host without one of them, stock
+macOS or a Linux machine for one, the suite skips those
 tests and names the missing tool, and on the `ubuntu-latest` runner,
 known by `GITHUB_ACTIONS` and `RUNNER_OS`, it skips nothing. The suite
 takes git and bash for granted, as every test in this organisation

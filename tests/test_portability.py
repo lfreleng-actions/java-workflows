@@ -5,8 +5,8 @@
 
 The structural tests need Python and PyYAML alone. The tests that run a
 guard extracted from the workflows need what ``ubuntu-latest`` has and
-stock macOS lacks, GNU ``date -d``, bash 4 and ``jq``, and are skipped
-by name where any is absent. These tests hold the probe behind that
+stock macOS lacks, bash 4 and ``jq``, and are skipped by name where
+either is absent. These tests hold the probe behind that
 skip to its word, by standing in each host's tools on ``PATH``, and
 hold the Linux runner itself to skipping nothing. A developer's Linux
 host is not that runner and gets the same skips macOS does. Git and
@@ -46,18 +46,17 @@ def linux_runner(environ: Mapping[str, str]) -> bool:
 
 def stub_path(
     scratch: str,
-    date: str = "echo 2026-01-01",
     bash: str = "printf 4",
     absent: tuple[str, ...] = (),
 ) -> str:
     """Stub the runner's tools into ``scratch`` and return it as PATH.
 
-    ``jq`` gets a ``/bin/sh`` stub that exits zero, ``date`` and
-    ``bash`` the given bodies, and the names in ``absent`` none,
-    created here at run time. The path holds ``scratch`` alone, so a
-    tool without a stub is missing.
+    ``jq`` gets a ``/bin/sh`` stub that exits zero, ``bash`` the given
+    body, and the names in ``absent`` none, created here at run time.
+    The path holds ``scratch`` alone, so a tool without a stub is
+    missing.
     """
-    bodies = {"date": date, "bash": bash, "jq": "exit 0"}
+    bodies = {"bash": bash, "jq": "exit 0"}
     for name, body in bodies.items():
         if name in absent:
             continue
@@ -100,8 +99,8 @@ class RunnerTools(unittest.TestCase):
         self.assertFalse(linux_runner({}))
         self.assertFalse(linux_runner({"RUNNER_OS": "Linux"}))
 
-    def test_gnu_tools_are_found(self) -> None:
-        """Every tool present, date reading -d and bash at 4, misses none."""
+    def test_the_tools_are_found(self) -> None:
+        """Every tool present, bash at 4, misses none."""
         with tempfile.TemporaryDirectory() as scratch:
             path = stub_path(scratch)
             self.assertEqual(missing_runner_tools(path), [])
@@ -111,30 +110,6 @@ class RunnerTools(unittest.TestCase):
         with tempfile.TemporaryDirectory() as scratch:
             path = stub_path(scratch, absent=("jq",))
             self.assertEqual(missing_runner_tools(path), ["jq (not on PATH)"])
-
-    def test_a_missing_date_is_named_as_gnu_date(self) -> None:
-        """A date absent is named as GNU date, the one thing needed of it."""
-        with tempfile.TemporaryDirectory() as scratch:
-            path = stub_path(scratch, absent=("date",))
-            self.assertEqual(
-                missing_runner_tools(path), ["GNU date (date -d)"]
-            )
-
-    def test_bsd_date_is_named(self) -> None:
-        """A date refusing -d, as BSD date does, is named GNU date."""
-        with tempfile.TemporaryDirectory() as scratch:
-            path = stub_path(scratch, date="exit 1", bash="printf 5")
-            self.assertEqual(
-                missing_runner_tools(path), ["GNU date (date -d)"]
-            )
-
-    def test_a_date_answering_otherwise_is_named(self) -> None:
-        """A date exiting zero with another answer still counts as missing."""
-        with tempfile.TemporaryDirectory() as scratch:
-            path = stub_path(scratch, date="echo 'usage: date'")
-            self.assertEqual(
-                missing_runner_tools(path), ["GNU date (date -d)"]
-            )
 
     def test_bash_3_is_named(self) -> None:
         """A bash reporting 3, as macOS ships, is named with its version."""
@@ -147,17 +122,11 @@ class RunnerTools(unittest.TestCase):
     def test_every_shortfall_is_named(self) -> None:
         """Each entry of ``RUNNER_TOOLS`` is named when absent, in order."""
         with tempfile.TemporaryDirectory() as scratch:
-            path = stub_path(
-                scratch, date="exit 1", bash="exit 127", absent=("jq",)
-            )
+            path = stub_path(scratch, bash="exit 127", absent=("jq",))
             missing = missing_runner_tools(path)
             self.assertEqual(
                 missing,
-                [
-                    "GNU date (date -d)",
-                    "bash 4 or later (found none)",
-                    "jq (not on PATH)",
-                ],
+                ["bash 4 or later (found none)", "jq (not on PATH)"],
             )
             for tool, named in zip(RUNNER_TOOLS, missing, strict=True):
                 self.assertTrue(named.startswith(tool), (tool, named))
@@ -165,7 +134,7 @@ class RunnerTools(unittest.TestCase):
     def test_a_missing_command_is_empty(self) -> None:
         """A command PATH does not hold probes as empty, not an error."""
         with tempfile.TemporaryDirectory() as scratch:
-            self.assertEqual(probe(["date", "+%F"], {"PATH": scratch}), "")
+            self.assertEqual(probe(["jq", "--version"], {"PATH": scratch}), "")
 
 
 if __name__ == "__main__":

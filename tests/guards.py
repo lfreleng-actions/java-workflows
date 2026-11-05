@@ -25,11 +25,10 @@ from helpers import Verdict
 
 # What the guards need beyond git, bash and POSIX tools, which every
 # supported developer host has. Each entry names the guard that needs
-# it: GNU date -d, the two lanes' 'Validate Grype gate inputs' reading
-# the window start; bash 4, the merge lane's 'Validate inputs'
-# lower-casing with ${name,,}; jq, the two environment guards reading
-# their JSON. A guard that starts calling another tool extends this.
-RUNNER_TOOLS = ("GNU date (date -d)", "bash 4 or later", "jq")
+# it: bash 4, the merge lane's 'Validate inputs' lower-casing with
+# ${name,,}; jq, the two environment guards reading their JSON. A guard
+# that starts calling another tool extends this.
+RUNNER_TOOLS = ("bash 4 or later", "jq")
 
 
 def missing_runner_tools(path: str | None = None) -> list[str]:
@@ -42,8 +41,6 @@ def missing_runner_tools(path: str | None = None) -> list[str]:
     if path is not None:
         env["PATH"] = path
     missing: list[str] = []
-    if probe(["date", "-u", "-d", "2026-01-01", "+%F"], env) != "2026-01-01":
-        missing.append("GNU date (date -d)")
     major = probe(["bash", "-c", 'printf %s "${BASH_VERSINFO[0]}"'], env)
     if not major.isdigit() or int(major) < 4:
         missing.append(f"bash 4 or later (found {major or 'none'})")

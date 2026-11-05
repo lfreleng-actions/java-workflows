@@ -95,12 +95,13 @@ EXPAND_VENDORED = (
     ".github/scripts/vendor/maven-build-action/expand-workspace-vars.sh"
 )
 METADATA_ACTION = "lfreleng-actions/maven-snapshot-metadata-action"
+GRYPE_ACTION = "lfreleng-actions/grype-scan-action"
 ARTEFACT_ACTIONS = (
     "actions/upload-artifact",
     "actions/download-artifact",
     "lfreleng-actions/maven-build-action",
     "lfreleng-actions/gradle-build-action",
-    "lfreleng-actions/grype-scan-action",
+    GRYPE_ACTION,
 )
 SUFFIX = "${{ inputs.artifact_suffix }}"
 NEEDS_PREFIX = "${{ needs."
@@ -1689,6 +1690,11 @@ class ArtefactSuffixes(ContractCase):
     download-artifact, and the actions the lanes pass a name to.
     repository-metadata-action takes no name; it suffixes its upload
     with a timestamp and a random part of its own, so it cannot collide.
+    A grype-scan-action step in validate-only mode checks its inputs
+    and uploads nothing, so it names no artefact either. No other
+    action here reads that input, so on any other step the key is a
+    stray one the action ignores, and the step is held to the suffix
+    like the rest.
 
     A download by artifact-ids resolves no name at all: it fetches the
     one upload whose ID it was given, and download-artifact rejects a
@@ -1708,6 +1714,10 @@ class ArtefactSuffixes(ContractCase):
                 continue
             inputs = with_of(step)
             if inputs.get("artifact-upload") == "false":
+                continue
+            if is_action(step, GRYPE_ACTION) and (
+                inputs.get("validate-only") == "true"
+            ):
                 continue
             count += 1
             label = text(step.get("name"))
@@ -1787,6 +1797,35 @@ class ArtefactSuffixes(ContractCase):
         step_of(job_of(maven, "build"), SBOM_UPLOAD)["with"]["name"] = (
             "sbom-files"
         )
+        self.assert_check_fails(self.check_artefact_names, MAVEN, maven)
+
+    def test_a_scan_marked_validate_only_as_yaml_true_fails(self) -> None:
+        """A grype step with validate-only as YAML true, unnamed, fails.
+
+        The action reads the string 'true'; the skip reads the same, so
+        a bare boolean does not pass a real scan over unexamined.
+        """
+        gradle = load_workflow(GRADLE)
+        steps_of(job_of(gradle, "grype")).append(
+            {
+                "name": "Validate again",
+                "uses": f"{GRYPE_ACTION}@{'0' * 40}",
+                "with": {"validate-only": True},
+            }
+        )
+        self.assert_check_fails(self.check_artefact_names, GRADLE, gradle)
+
+    def test_an_upload_marked_validate_only_fails(self) -> None:
+        """An unsuffixed upload with a stray validate-only key fails.
+
+        upload-artifact has no such input, so the step uploads all the
+        same; only grype-scan-action's validate-only mode names no
+        artefact, and only that action earns the skip.
+        """
+        maven = load_workflow(MAVEN)
+        inputs = step_of(job_of(maven, "build"), SBOM_UPLOAD)["with"]
+        inputs["name"] = "sbom-files"
+        inputs["validate-only"] = "true"
         self.assert_check_fails(self.check_artefact_names, MAVEN, maven)
 
     def test_an_empty_name_beside_a_suffixed_artifact_name_fails(self) -> None:

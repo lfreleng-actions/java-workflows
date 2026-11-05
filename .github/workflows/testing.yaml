@@ -812,7 +812,7 @@ jobs:
       - name: 'Grype audit SBOM'
         id: grype-audit
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/grype-scan-action@5c81b23afb2ea771b2d247807a12d90783328675  # v0.5.0
+        uses: lfreleng-actions/grype-scan-action@413f5af7ba50b0a048ad0ff98e594dedbbb714b9  # v0.6.0
         with:
           sbom: 'sbom-cyclonedx.json'
           fail-on: 'medium'
@@ -843,6 +843,59 @@ jobs:
             exit 1
           fi
           echo "Grype gate verdict (${CASE}, gate-active=${EXPECTED}) checked ✅"
+
+  # Proves the verify lanes' gerrit-validate job rejects a bad policy
+  # value in seconds: the Grype gate's validate-only step, at the
+  # lanes' pin with the lanes' default policy and a gate-when the
+  # action does not know, must fail. A job calling a lane cannot set
+  # continue-on-error, so this runs the action itself, with the lanes'
+  # with: block less the lane-input expressions, which wiring-check
+  # holds in step. Like the lanes' job it runs that one action, with
+  # no checkout and no harden-runner: that validate-only makes no
+  # network request is grype-scan-action's contract, which its own
+  # repository's validate-only CI job tests, so this job asserts the
+  # verdict alone and proves nothing about the network.
+  gate-validate-check:
+    name: 'Grype Gate Validate Check'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions: {}
+    steps:
+      - name: 'Validate Grype gate inputs'
+        id: validate
+        continue-on-error: true
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/grype-scan-action@413f5af7ba50b0a048ad0ff98e594dedbbb714b9  # v0.6.0
+        with:
+          validate-only: 'true'
+          fail-on: 'medium'
+          gate-when: 'never'
+          dependency-policy: 'declared'
+          transitive-fail-on: 'critical'
+          only-fixed: 'true'
+          remediation-window-days: ''
+          remediation-window-start: ''
+          bypass-repository: ''
+
+      - name: 'Assert the step rejected the gate-when'
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.validate.outcome }}
+          VALIDATED: ${{ steps.validate.outputs.validated }}
+        run: |
+          set -euo pipefail
+          echo "outcome: ${OUTCOME}"
+          echo "validated: ${VALIDATED}"
+          if [ "${OUTCOME}" != "failure" ]; then
+            echo "::error::validate-only ended '${OUTCOME}' on a" \
+              "gate-when the action does not know; expected failure"
+            exit 1
+          fi
+          if [ -n "${VALIDATED}" ]; then
+            echo "::error::validated is '${VALIDATED}' after a rejection"
+            exit 1
+          fi
+          echo "Grype gate validate-only rejection checked ✅"
 
   # Proves each build lane publishes its build artefact's name, shape
   # and count as workflow outputs a caller can use, and that the
