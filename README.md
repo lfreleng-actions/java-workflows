@@ -124,8 +124,8 @@ the Gradle `test` task) runs the tests as part of its own lifecycle.
 ### Grype gate policy
 
 By default the `grype` job gates every scan at `grype_fail_on`, as it
-always has. Six inputs, the same in both lanes, pass the gate policy of
-`grype-scan-action` through:
+always has. These inputs, the same in both lanes, pass the gate policy
+of `grype-scan-action` through:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -137,6 +137,10 @@ always has. Six inputs, the same in both lanes, pass the gate policy of
 | `grype_only_fixed`               | boolean | `true`     | Gate on findings with a published fix version; a finding without one is a warning                   |
 | `grype_remediation_window_days`  | string  | `''`       | Days a finding stays a warning on an unarmed run after its fix appeared; empty turns the window off |
 | `grype_remediation_window_start` | string  | `''`       | `YYYY-MM-DD` floor for the window clock; a fix with no date starts there, else gates at once        |
+| `grype_dependency_ecosystems`    | string  | `''`       | Comma-separated detection presets, `node` to `docker`; empty means every preset                     |
+| `grype_dependency_patterns`      | string  | `''`       | Extra dependency file patterns, one per line, watched beside the presets and the lane's own         |
+| `grype_bypass_repository`        | string  | `''`       | `owner/name` holding the approved `BYPASS:` issues; empty means the calling repository              |
+| `grype_timeout_minutes`          | number  | `30`       | Timeout for the `grype` job                                                                         |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -158,30 +162,32 @@ blocking; `grype_only_fixed: false` and `grype_dependency_policy: all`
 restore the previous strictness. The `grype_gate_when` default,
 `always`, keeps today's timing: every scan gates.
 
-With `grype_gate_when: dependencies-changed`, a `dependency-change`
-job runs
-[`dependency-change-action`](https://github.com/lfreleng-actions/dependency-change-action)
-with the `maven` or `gradle` preset after its checkout. The job runs
+With `grype_gate_when: dependencies-changed`, the existing
+`repository-metadata` job detects dependency changes with
+[`repository-metadata-action`](https://github.com/lfreleng-actions/repository-metadata-action#dependency-change-detection),
+which runs `dependency-change-action` after its checkout. The job runs
 nothing from the project, where the `build` job runs its plugins and
-build scripts, and nothing the project ships can write or replace the
-sidecar before the upload. Any other call skips the job, so with the
-default `always` the `grype` job waits for `build` alone. Detection is repository-wide
-(`path-prefix: '.'`), not scoped to `path_prefix`: a Maven parent POM
-or a Gradle included build sits outside the project directory as often
-as in it, and a change there must arm the gate; the cost is one strict
-run for a dependency change in an unrelated project of the same
-repository. The lanes add patterns to the presets: Maven watches
-`.mvn/jvm.config`, since a `-D` property set there can select a
+build scripts, and is not a matrix, so one job output,
+`dependencies_changed`, carries the verdict to the `grype` job. Any
+other call leaves detection off and the output empty. Detection covers
+every preset of `dependency-change-action` unless
+`grype_dependency_ecosystems` narrows them: over-matching costs a
+strict run, where under-matching would let a finding the change
+introduced pass as a warning. Detection is repository-wide
+(`dependency_path_prefix: '.'`), not scoped to `path_prefix`: a Maven
+parent POM or a Gradle included build sits outside the project
+directory as often as in it, and a change there must arm the gate; the
+cost is one strict run for a dependency change in an unrelated project
+of the same repository. The lanes add patterns to the presets: Maven
+watches `.mvn/jvm.config`, since a `-D` property set there can select a
 dependency version; Gradle watches every `*.gradle` and `*.gradle.kts`,
-which covers a convention script a subproject applies. The
-`dependency-change.json` sidecar travels in an artefact of its own,
-`dependency-change-maven<suffix>` or `dependency-change-gradle<suffix>`,
-to the `grype` job. That job downloads the sidecar and the SBOM each
-by the ID its upload returned, never by name, and each into a
-directory of its own: the `build` job runs project code, and an
-artefact it uploaded under a reused name, or a file planted inside
-the SBOM artefact, could otherwise stand in for the sidecar. The job
-reads the file through `dependency-change-manifest`. Detection needs
+which covers a convention script a subproject applies; and
+`grype_dependency_patterns` adds the caller's own. The `grype` job
+needs `repository-metadata` as well as `build`, still runs when the
+metadata job failed or skipped, and ignores the verdict unless that
+job succeeded. Detection fails closed: an empty verdict, from a
+metadata job that failed or skipped or from a change the action could
+not resolve, gates the scan as on `always`. Detection needs
 `sbom_enabled` on, since without an SBOM no scan consumes its result.
 A change that left the dependency files alone then has its findings
 reported as warnings, except a finding whose remediation window
@@ -197,11 +203,11 @@ convention-plugin build outside `buildSrc/` and `build-logic/`, or a
 version property passed through `mvn_params` or `build_arguments` is
 not a dependency change by its rules. A repository that declares its
 dependencies in such a place keeps `grype_gate_when: always`, the
-default. The
-action's README holds the file list per preset, how it picks the base
-commit per event, the fail-closed contract and the symbolic-link rule;
-in short, when it cannot prove what the change touched, it writes no
-sidecar and the scan gates as it does today. The base it compares
+default. The `dependency-change-action` README holds the file list per
+preset, how it picks the base commit per event, the fail-closed
+contract and the symbolic-link rule; in short, when it cannot prove
+what the change touched, the verdict stays empty and the scan gates as
+it does today. The base it compares
 against depends on how the lane checked out. On a GitHub call it takes
 the base from the event and checks that the checked-out commit is the
 run's own, `GITHUB_SHA`; it compares commits, not repository or ref
@@ -219,7 +225,7 @@ touch counts as unresolved under repository-wide detection, so such a
 repository always gates. Both presets include files that change for
 reasons other than dependencies (`.mvn/maven.config`,
 `gradle.properties`, `buildSrc/`, `build-logic/`), at the cost of a
-strict run. The `dependency-change` job's `actions/checkout` fetches
+strict run. The `repository-metadata` job's `actions/checkout` fetches
 the whole history, which holds the base the action compares against;
 `checkout-gerrit-change-action` fetches depth 2 already.
 
@@ -236,10 +242,18 @@ it; with none, the finding gates at once, since a missing date must not
 buy unlimited time. Both inputs default to empty, as in the action, and
 do nothing on `always` runs. The lanes check every policy input in
 `gerrit-validate`, so a typo fails in seconds rather than after the
-build; whether a start date lies in the future is the action's call.
+build, as are `grype_fail_on`, the detection presets and the bypass
+repository; whether a start date lies in the future is the action's
+call, and a bad `grype_dependency_patterns` entry fails the
+`repository-metadata` job by the detector's own grammar.
+`grype_bypass_repository` names the repository whose approved `BYPASS:`
+issues `grype-scan-action` honours; set it to share one bypass list
+across repositories.
 
 Each lane publishes `grype_gate_active` and `grype_gate_reason` (one
-line saying why); both are empty when the scan did not run.
+line saying why); both are empty when the scan did not run. It also
+publishes `grype_dependencies_changed`, the verdict the `grype` job
+received: `true` or `false` when detection resolved, empty otherwise.
 `grype_gate_active` is `grype-scan-action`'s own verdict, whether a
 finding could block the run before `grype_permit_fail` takes effect,
 and not a restatement of the dependency-change signal: the value
@@ -422,7 +436,10 @@ skipped its publish would leave the SNAPSHOT behind the branch with
 every check green. The step summary records the commit built, the group
 paths, the metadata seeded and pruned, and the files published and
 failed. The `grype` job audits the SBOM for information and never fails
-the run. The build and publish jobs add the `nexus_server` host to their
+the run: its policy inputs default to `grype-scan-action`'s own values
+and shape the report, while the scan keeps `permit-fail` on and the job
+continues on error. A bad policy value fails the input check before
+the build. The build and publish jobs add the `nexus_server` host to their
 egress allow-lists.
 
 The caller owns the triggers, the Gerrit comments, the wait for
@@ -445,22 +462,28 @@ Inputs of the merge lane's own:
 
 <!-- markdownlint-disable MD013 -->
 
-| Name                      | Type    | Default     | Description                                                                |
-| ------------------------- | ------- | ----------- | -------------------------------------------------------------------------- |
-| `nexus_server`            | string  | `''`        | Nexus 2 server URL (`https://`); the lane fails without it                 |
-| `repository_name`         | string  | `snapshots` | Snapshot repository to publish to                                          |
-| `nexus_username`          | string  | `''`        | Nexus username and 1Password item; empty takes the built repository's name |
-| `publish_environment`     | string  | `''`        | GitHub environment for the publish job alone; empty means none             |
-| `dry_run`                 | boolean | `false`     | Publish nothing and log each upload URL, with no credential (self-tests)   |
-| `gerrit_branch`           | string  | `''`        | Branch a Gerrit change merged into; the lane builds its head               |
-| `publish_timeout_minutes` | number  | `30`        | Timeout for the publish job                                                |
+| Name                       | Type    | Default     | Description                                                                           |
+| -------------------------- | ------- | ----------- | ------------------------------------------------------------------------------------- |
+| `nexus_server`             | string  | `''`        | Nexus 2 server URL (`https://`); the lane fails without it                            |
+| `repository_name`          | string  | `snapshots` | Snapshot repository to publish to                                                     |
+| `nexus_username`           | string  | `''`        | Nexus username and 1Password item; empty takes the built repository's name            |
+| `publish_environment`      | string  | `''`        | GitHub environment for the publish job alone; empty means none                        |
+| `dry_run`                  | boolean | `false`     | Publish nothing and log each upload URL, with no credential (self-tests)              |
+| `gerrit_branch`            | string  | `''`        | Branch a Gerrit change merged into; the lane builds its head                          |
+| `publish_timeout_minutes`  | number  | `30`        | Timeout for the publish job                                                           |
+| `grype_fail_on`            | string  | `medium`    | Severity from which the scan reports a failure, `negligible` to `critical`, or `none` |
+| `grype_only_fixed`         | boolean | `false`     | Count a finding when it has a published fix version                                   |
+| `grype_dependency_policy`  | string  | `all`       | `all`, or `declared` to count the packages the project declares                       |
+| `grype_transitive_fail_on` | string  | `none`      | Severity from which an inherited package counts anyway under `declared`               |
+| `grype_bypass_repository`  | string  | `''`        | `owner/name` holding the approved `BYPASS:` issues; empty means this repository       |
+| `grype_timeout_minutes`    | number  | `30`        | Timeout for the `grype` job                                                           |
 
 <!-- markdownlint-enable MD013 -->
 
 The lane shares `repository`, `ref`, `checkout_submodules`,
 `path_prefix`, `java_version`, `mvn_version`, `mvn_profiles`,
 `mvn_params`, `mvn_opts`, `mvn_pom_file`, `env_vars`, `sbom_enabled`,
-`grype_enabled`, the harden-runner inputs and the build, SBOM and Grype
+`grype_enabled`, the harden-runner inputs and the build and SBOM
 timeouts with the verify lane, where the `Verify lane` section
 describes them. Here `ref` names a branch, as a name or a `refs/heads/`
 ref; left empty, the lane builds the triggering branch, and fails when
@@ -650,25 +673,26 @@ fixture carries a git submodule and a test that reads it, and a
 `checkout_submodules` must actually fetch it. Three calls run under
 `grype_gate_when: dependencies-changed`. `maven-gate-test` builds the
 fixture at a pinned commit, which is not the commit the run is for,
-and `dependency-change-action` reports unresolved; its `gate-check` job
-asserts the lane's `grype_gate_active` is `true` and that no sidecar
-artefact exists. `maven-gate-resolved` and `gradle-gate-resolved`
-build the small projects under `tests/fixtures/maven` and
-`tests/fixtures/gradle` in this repository, at the run's own commit,
-where the action resolves the change and writes a sidecar; the
-`gate-resolved-check` job requires that sidecar, since on a pull
+and detection reports unresolved; its `gate-check` job asserts the
+lane's `grype_gate_active` is `true` and its
+`grype_dependencies_changed` empty. `maven-gate-resolved` and
+`gradle-gate-resolved` build the small projects under
+`tests/fixtures/maven` and `tests/fixtures/gradle` in this repository,
+at the run's own commit, where detection resolves; the
+`gate-resolved-check` job requires the lane's
+`grype_dependencies_changed` to be `true` or `false`, since on a pull
 request of this repository the action resolves by its own rules, and
-holds the lane's `grype_gate_active` to the sidecar's `changed` flag,
-which the two agree on under the lane's policy (a blocking
-`grype_fail_on`, no remediation window), with the base the commit's
-parent. Which flag the pull request earns
-is the detector's call and is not re-derived; `gate-verdict-cases`
-proves each value instead, on a change built for it: per lane and
-case it starts a scratch repository from the fixture, commits one
-known change (the fixture's `pom.xml` or `build.gradle.kts`, or a
-Java source), runs `dependency-change-action` with the lane's inputs
-and an explicit base, asserts the `changed` flag, `reason`, `base`
-and file list it expects, then runs `grype-scan-action` with the
+holds the lane's `grype_gate_active` to it, which the two agree on
+under the lane's policy (a blocking `grype_fail_on`, no remediation
+window). Which value the pull request earns is the detector's call and
+is not re-derived; `gate-verdict-cases` proves each value instead, on
+a change built for it: per lane and case it starts a scratch
+repository from the fixture, commits one known change (the fixture's
+`pom.xml` or `build.gradle.kts`, or a Java source), runs
+`repository-metadata-action` with the lane's patterns and an explicit
+base, asserts the `dependencies_changed`, `dependency_change_reason`
+and `dependency_change_base` outputs it expects, then runs
+`grype-scan-action` with the
 lane's policy over the resolved lane's SBOM and asserts `gate-active`
 is `false` for the unchanged case and `true` for the changed one. A
 `wiring-check` job runs the `unittest` suite under `tests/` with
@@ -679,10 +703,12 @@ placeholder expansion, the submodule wiring the fixtures cannot
 exercise, and that every artefact name the Maven lanes use carries
 `artifact_suffix`; `tests/test_grype_gate.py` holds both lanes to the
 Grype gate policy's wiring: each input's `gerrit-validate` rejection,
-the detection step's job, pin, preset, extra patterns and position,
-the checkout depth, the sidecar's own artefact, the download of it and
-of the SBOM each by its upload's ID into a directory of its own, the
-verdict outputs, the self-test calls, that no
+the detection inputs on the `repository-metadata` step, its pin, job
+output, checkout depth and position, the `grype` job's `needs`,
+condition and guarded verdict, the download of the SBOM alone by its
+upload's ID, the absence of the old detection job and sidecar, each
+new input's declaration and pass-through, the merge lane's input
+checks, the verdict outputs, the self-test calls, that no
 symbolic link or submodule sits in this repository's tree, and that
 `gate-verdict-cases` runs both actions at the lanes' pins with the
 lanes' inputs and the expected verdict fixed per case. Each structural

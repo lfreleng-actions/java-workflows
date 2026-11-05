@@ -57,18 +57,19 @@ Both `maven-build-test.yaml` and `gradle-build-test.yaml` are fully
 wired. The job graph is:
 
 ```text
-gerrit-validate ─┬─ repository-metadata (informational)
-                 ├─ dependency-change (grype_gate_when: dependencies-changed)
-                 └─ build ─ grype
+gerrit-validate ─┬─ repository-metadata ─┐
+                 └─ build ───────────────┴─ grype
 ```
 
 One job owns the built tree: every step that reads it runs inside
 `build`, so nothing is checked out, resolved or built twice. Only
 `grype`, which reads nothing but the SBOM document, runs downstream,
-with the dependency-change sidecar when that job ran. The
-`dependency-change` job runs nothing from the project and only when
-the call asks for change-scoped gating with the SBOM on; any other
-call skips it, and `grype` then waits for `build` alone.
+with the dependency-change verdict from `repository-metadata`. That
+job runs nothing from the project and is informational, except that
+under change-scoped gating with the SBOM on it detects dependency
+changes and publishes `dependencies_changed` as a job output; `grype`
+reads it only when the job succeeded, so a failed or skipped metadata
+job leaves the verdict empty and the scan gates.
 
 `build` job (Maven):
 
@@ -1010,24 +1011,24 @@ this repository wires them together:
 
 <!-- markdownlint-disable MD013 -->
 
-| Action                           | Lane                | Role                                                          |
-| -------------------------------- | ------------------- | ------------------------------------------------------------- |
-| `build-metadata-action`          | All                 | Java version + release metadata detection                     |
-| `maven-build-action`             | All                 | Maven setup + lifecycle build                                 |
-| `gradle-build-action`            | Verify              | Gradle setup + build (brought to Maven parity)                |
-| `junit-test-report-action`       | Verify              | JUnit XML rendering + check                                   |
-| `sbom-action`                    | All                 | CycloneDX SBOM generation (cyclonedx backend, resolved graph) |
-| `grype-scan-action`              | All                 | Vulnerability scan over the generated SBOM                    |
-| `dependency-change-action`       | Verify              | Dependency-file change signal for the opt-in Grype gate       |
-| `maven-xml-settings-action`      | Merge, release      | Nexus `settings.xml` synthesis                                |
-| `maven-snapshot-metadata-action` | Merge               | Seed and prune SNAPSHOT metadata around the deploy            |
-| `nexus-publish-action`           | Merge               | Upload the SNAPSHOT `m2repo` to Nexus                         |
-| `credential-load-action`         | Merge, release      | Load a publish or signing credential into one job             |
-| `maven-stage-prep-action`        | Release             | Version the reactor for a release build                       |
-| `nexus-staging-action`           | Release             | Stage, then promote, in Nexus2                                |
-| `sigul-sign-action`              | Release             | Sigul signing of artefacts and the release tag (in rework)    |
-| `verify-release-schema-action`   | Release             | Validate the release file and publish its fields              |
-| `central-publish-action`         | Release             | Maven Central publishing, where a project uses it             |
+| Action                           | Lane           | Role                                                             |
+| -------------------------------- | -------------- | ---------------------------------------------------------------- |
+| `build-metadata-action`          | All            | Java version + release metadata detection                        |
+| `maven-build-action`             | All            | Maven setup + lifecycle build                                    |
+| `gradle-build-action`            | Verify         | Gradle setup + build (brought to Maven parity)                   |
+| `junit-test-report-action`       | Verify         | JUnit XML rendering + check                                      |
+| `sbom-action`                    | All            | CycloneDX SBOM generation (cyclonedx backend, resolved graph)    |
+| `grype-scan-action`              | All            | Vulnerability scan over the generated SBOM                       |
+| `repository-metadata-action`     | Verify, merge  | Repository metadata; dependency-change signal for the Grype gate |
+| `maven-xml-settings-action`      | Merge, release | Nexus `settings.xml` synthesis                                   |
+| `maven-snapshot-metadata-action` | Merge          | Seed and prune SNAPSHOT metadata around the deploy               |
+| `nexus-publish-action`           | Merge          | Upload the SNAPSHOT `m2repo` to Nexus                            |
+| `credential-load-action`         | Merge, release | Load a publish or signing credential into one job                |
+| `maven-stage-prep-action`        | Release        | Version the reactor for a release build                          |
+| `nexus-staging-action`           | Release        | Stage, then promote, in Nexus2                                   |
+| `sigul-sign-action`              | Release        | Sigul signing of artefacts and the release tag (in rework)       |
+| `verify-release-schema-action`   | Release        | Validate the release file and publish its fields                 |
+| `central-publish-action`         | Release        | Maven Central publishing, where a project uses it                |
 
 <!-- markdownlint-enable MD013 -->
 
