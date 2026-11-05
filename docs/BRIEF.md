@@ -363,7 +363,11 @@ nor turn it into a negative Gerrit vote.
 The repository-metadata, build, publish and grype jobs run under
 harden-runner, as the verify lane's jobs do. `validate` does without,
 like the verify lane's `gerrit-validate`: it runs one shell check that
-makes no network call, with no checkout, token or credential. The build
+makes no network call, with no checkout, token or credential. (The
+verify lane's job also runs `grype-scan-action` in validate-only mode,
+which GitHub fetches with the workflow; that it makes no network
+request of its own is the action's contract, tested in its own
+repository.) The build
 and publish jobs each add the `nexus_server` host and port to the
 central allow-list: `fetch` reads metadata from it in the build job,
 and the publish job writes to it.
@@ -1232,7 +1236,8 @@ job, the structural guard beside that behavioural one, runs the
 `tests/test_grype_gate.py`) over this branch's workflows, each rule
 also against a copy of the workflow with that one thing wrong, which
 it must reject. It extracts the POM, environment and
-metadata-location guards and runs their accept and reject paths,
+metadata-location guards and the Grype presets check and runs their
+accept and reject paths,
 including a line break that must not start a workflow command and
 names Unicode case mapping turns into reserved ones. It requires
 `checkout_submodules` on every checkout in both lanes, and the
