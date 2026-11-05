@@ -1293,7 +1293,10 @@ request.
   through, setting `supplemental_required` whenever a supplemental list
   is named, so a missing list fails the job at the allow-list step.
   `tests/test-harden-runner-inputs.sh`, run as a prek hook, fails on any
-  drift from that set, its pass-through form or the action's pin.
+  drift from that set or its pass-through form, on a description other
+  than the reference wording optionally followed by `. <note>` about
+  the workflow, and unless every block-action step pins the same
+  commit SHA, with the same `# vX.Y.Z` comment, at or above v0.15.0.
   `java-maven-versions.yaml` takes no inputs and loads no allow-list:
   its one job publishes static JSON and runs no project code, so its
   harden-runner step blocks everything but a fixed `github.com:443`.

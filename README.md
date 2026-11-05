@@ -760,8 +760,11 @@ The Gradle self-test call also sets the three supplemental
 nothing new, so every pull request runs the pass-through in `block`
 mode. `bash tests/test-harden-runner-inputs.sh`, which a prek hook
 runs, fails when a lane workflow drops one of the five inputs, passes
-one in another form, or pins another release of
-`harden-runner-block-action`.
+one in another form, or describes one in anything other than the
+reference wording, optionally followed by `. <note>` about the
+workflow. It also fails unless every `harden-runner-block-action`
+step in the repository pins the same commit SHA, with the same
+`# vX.Y.Z` comment, at or above v0.15.0.
 
 ## Design
 
