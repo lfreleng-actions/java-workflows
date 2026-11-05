@@ -671,12 +671,13 @@ and an explicit base, asserts the `changed` flag, `reason`, `base`
 and file list it expects, then runs `grype-scan-action` with the
 lane's policy over the resolved lane's SBOM and asserts `gate-active`
 is `false` for the unchanged case and `true` for the changed one. A
-`wiring-check` job runs `.github/scripts/wiring-check.sh` to test the
-guard steps, the merge lane's input checks, its coordinate check and
-its copy of `maven-build-action`'s placeholder expansion, the
-submodule wiring the fixtures cannot exercise, and that every artefact
-name the Maven lanes use carries `artifact_suffix`; it then runs
-`.github/scripts/grype-gate-check.sh`, which holds both lanes to the
+`wiring-check` job runs the `unittest` suite under `tests/` with
+`uv run --locked python -B -m unittest discover -s tests -v`.
+`tests/test_wiring.py` tests the guard steps, the merge lane's input
+checks, its coordinate check and its copy of `maven-build-action`'s
+placeholder expansion, the submodule wiring the fixtures cannot
+exercise, and that every artefact name the Maven lanes use carries
+`artifact_suffix`; `tests/test_grype_gate.py` holds both lanes to the
 Grype gate policy's wiring: each input's `gerrit-validate` rejection,
 the detection step's job, pin, preset, extra patterns and position,
 the checkout depth, the sidecar's own artefact, the download of it and
@@ -684,7 +685,31 @@ of the SBOM each by its upload's ID into a directory of its own, the
 verdict outputs, the self-test calls, that no
 symbolic link or submodule sits in this repository's tree, and that
 `gate-verdict-cases` runs both actions at the lanes' pins with the
-lanes' inputs and the expected verdict fixed per case.
+lanes' inputs and the expected verdict fixed per case. Each structural
+rule also runs against a copy of the workflow with that one thing
+wrong, and must reject it, so a rule that stops rejecting fails the
+suite. A lookup by step name or `id` fails when a job carries two, and a
+key written twice fails the parse, a bare `on` and a quoted `"on"`
+counting as one key, so a second, drifted copy cannot hide behind a
+first that matches. Each workflow is also read with PyYAML's
+`BaseLoader`, where every key is the text written, and the keys must
+agree with the `SafeLoader` reading at every level, the top-level `on`
+aside, so a key PyYAML would retype (`off`, `no`, `null`, a bare
+number) fails the suite with its path rather than hide its entry from
+a lookup by name; `tests/test_helpers.py` holds each lookup to that.
+Run it locally with the same command; `uv` installs the locked
+interpreter and PyYAML from `uv.lock`. The structural tests need nothing
+more. The tests that run a guard extracted from a workflow need what
+`ubuntu-latest` has and stock macOS lacks: GNU `date -d`, which the
+Grype gate's input checks read the window start with; bash 4 or
+later, which the merge lane's input check lower-cases with; and `jq`,
+which the environment guards read their JSON with. `tests/guards.py`
+lists the three with the guard each serves. On a host without one of
+them, stock macOS or a Linux machine for one, the suite skips those
+tests and names the missing tool, and on the `ubuntu-latest` runner,
+known by `GITHUB_ACTIONS` and `RUNNER_OS`, it skips nothing. The suite
+takes git and bash for granted, as every test in this organisation
+does.
 
 The `compatibility-verify` and `compatibility-merge` jobs then run both
 Maven lanes once for every Maven release and Java version in
