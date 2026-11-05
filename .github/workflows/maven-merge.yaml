@@ -371,7 +371,12 @@ jobs:
     # Fails fast on inputs the later jobs cannot use, before anything
     # builds, and derives the values they share: the Nexus endpoint the
     # build and publish jobs add to their egress allow-lists, the Nexus
-    # username, and the branch the checkouts build.
+    # username, and the branch the checkouts build. The job checks out
+    # nothing and runs no harden-runner by design: its one action,
+    # grype-scan-action in validate-only mode, is fetched by GitHub
+    # with the workflow, and that it makes no network request of its
+    # own is the action's contract, tested by its own repository's
+    # validate-only CI job rather than proven here.
     runs-on: ubuntu-latest
     permissions: {}
     timeout-minutes: 5
@@ -394,45 +399,25 @@ jobs:
               "to 64 letters, digits, '.', '_' or '-'."
             exit 1
           fi
-      # Apart from 'Validate inputs' so its outputs stay its own.
+      # grype-scan-action checks these inputs itself, but only once the
+      # build has run. Its validate-only mode runs the same checks on
+      # the same code and nothing else: no scan, no network request,
+      # so a typo fails here in seconds and the rules cannot drift
+      # from the action's own. The step passes every input the scan
+      # passes as the lane's own or as a fixed value, the same way:
+      # permit-fail included, since the scan fixes it. grype_only_fixed
+      # is a boolean input, which GitHub types at the call.
       - name: 'Validate Grype inputs'
-        shell: bash
-        env:
-          FAIL_ON: ${{ inputs.grype_fail_on }}
-          DEPENDENCY_POLICY: ${{ inputs.grype_dependency_policy }}
-          TRANSITIVE_FAIL_ON: ${{ inputs.grype_transitive_fail_on }}
-          BYPASS_REPOSITORY: ${{ inputs.grype_bypass_repository }}
-        run: |
-          set -euo pipefail
-          status=0
-          case "${FAIL_ON}" in
-            negligible | low | medium | high | critical | none) ;;
-            *)
-              echo "::error::grype_fail_on must be one of negligible," \
-                "low, medium, high, critical, none."
-              status=1 ;;
-          esac
-          case "${DEPENDENCY_POLICY}" in
-            all | declared) ;;
-            *)
-              echo "::error::grype_dependency_policy must be 'all' or" \
-                "'declared'."
-              status=1 ;;
-          esac
-          case "${TRANSITIVE_FAIL_ON}" in
-            negligible | low | medium | high | critical | none) ;;
-            *)
-              echo "::error::grype_transitive_fail_on must be one of" \
-                "negligible, low, medium, high, critical, none."
-              status=1 ;;
-          esac
-          repo='^([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?$'
-          if [[ ! "${BYPASS_REPOSITORY}" =~ ${repo} ]]; then
-            echo "::error::grype_bypass_repository must be empty or" \
-              "owner/name of letters, digits, '.', '_' and '-'."
-            status=1
-          fi
-          exit "${status}"
+        # yamllint disable-line rule:line-length
+        uses: lfreleng-actions/grype-scan-action@f65dca2762823cfc8f376e32fee9baa6f3292696  # v0.6.2
+        with:
+          validate-only: 'true'
+          fail-on: ${{ inputs.grype_fail_on }}
+          permit-fail: 'true'
+          only-fixed: ${{ inputs.grype_only_fixed }}
+          dependency-policy: ${{ inputs.grype_dependency_policy }}
+          transitive-fail-on: ${{ inputs.grype_transitive_fail_on }}
+          bypass-repository: ${{ inputs.grype_bypass_repository }}
       - name: 'Validate inputs'
         id: validate
         shell: bash
@@ -1576,7 +1561,7 @@ jobs:
       - name: 'Grype audit SBOM'
         id: grype-audit
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/grype-scan-action@413f5af7ba50b0a048ad0ff98e594dedbbb714b9  # v0.6.0
+        uses: lfreleng-actions/grype-scan-action@f65dca2762823cfc8f376e32fee9baa6f3292696  # v0.6.2
         with:
           sbom: 'sbom-cyclonedx.json'
           fail-on: ${{ inputs.grype_fail_on }}

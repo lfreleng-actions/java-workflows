@@ -110,12 +110,12 @@ OLD_WIRING = (
     "dependency-change-manifest",
 )
 OLD_JOB = "dependency-change"
-GRYPE_PIN = "413f5af7ba50b0a048ad0ff98e594dedbbb714b9"
+GRYPE_PIN = "f65dca2762823cfc8f376e32fee9baa6f3292696"
 GRYPE_ACTION = "lfreleng-actions/grype-scan-action"
 GRYPE_USES = f"{GRYPE_ACTION}@{GRYPE_PIN}"
 # The pin with its version comment, as each lane's text must hold it:
 # once on the validation step, once on the scan.
-GRYPE_LINE = f"uses: {GRYPE_USES}  # v0.6.0"
+GRYPE_LINE = f"uses: {GRYPE_USES}  # v0.6.2"
 
 VALIDATE_JOB = "gerrit-validate"
 MERGE_VALIDATE_JOB = "validate"
@@ -562,21 +562,18 @@ class GateInputValidation(ContractCase):
                         f"{lane}: '{name}' must run on every call",
                     )
 
-    @unittest.expectedFailure
     def test_the_validator_mirrors_the_scan(self) -> None:
         """Each lane validates through the action with the scan's inputs."""
         for lane in VALIDATED_LANES:
             with self.subTest(lane=lane):
                 self.check_validator(load_workflow(lane), lane)
 
-    @unittest.expectedFailure
     def test_the_job_fetches_one_action(self) -> None:
         """Each lane's validation job runs no action but the validator."""
         for lane in VALIDATED_LANES:
             with self.subTest(lane=lane):
                 self.check_job_fetches_one_action(load_workflow(lane), lane)
 
-    @unittest.expectedFailure
     def test_no_shell_validator_remains(self) -> None:
         """No run: step of a validation job checks a policy input."""
         for lane in VALIDATED_LANES:
@@ -589,7 +586,6 @@ class GateInputValidation(ContractCase):
             with self.subTest(lane=lane):
                 self.check_ecosystems_step(load_workflow(lane))
 
-    @unittest.expectedFailure
     def test_the_pin_appears_twice_with_its_comment(self) -> None:
         """Each lane's text holds the pinned uses: line twice."""
         for lane in VALIDATED_LANES:
@@ -651,7 +647,6 @@ class GateInputValidation(ContractCase):
         del with_of(validator)["validate-only"]
         self.assert_check_fails(self.check_validator, workflow, GRADLE)
 
-    @unittest.expectedFailure
     def test_a_merge_validator_without_validate_only_fails(self) -> None:
         """A merge validator without validate-only, a real scan, fails."""
         workflow = mutated(load_workflow(MERGE))
@@ -705,7 +700,6 @@ class GateInputValidation(ContractCase):
         del with_of(validator)["fail-on"]
         self.assert_check_fails(self.check_validator, workflow, GRADLE)
 
-    @unittest.expectedFailure
     def test_a_merge_scan_dropping_permit_fail_fails(self) -> None:
         """A merge scan no longer passing permit-fail fails."""
         workflow = mutated(load_workflow(MERGE))
