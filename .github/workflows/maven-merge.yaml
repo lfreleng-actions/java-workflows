@@ -197,6 +197,49 @@ on:
         required: false
         type: boolean
         default: true
+      # The scan's policy, passed through to grype-scan-action. The
+      # defaults are the action's own, so the report reads as it did
+      # before these inputs existed; the job still permits failure and
+      # continues on error, so none of them can fail the run. The
+      # validate job rejects a bad value before the build.
+      grype_fail_on:
+        description: >-
+          Minimum severity the Grype report flags as failing:
+          negligible, low, medium, high, critical, or none.
+        required: false
+        type: string
+        default: 'medium'
+      grype_only_fixed:
+        description: >-
+          Flag only findings that have a fix available.
+        required: false
+        type: boolean
+        default: false
+      grype_dependency_policy:
+        description: >-
+          Which findings count: 'all', or 'declared' for only packages
+          the project declares, with inherited ones reported as
+          warnings unless they reach grype_transitive_fail_on.
+        required: false
+        type: string
+        default: 'all'
+      grype_transitive_fail_on:
+        description: >-
+          Lowest severity at which an inherited package counts under
+          grype_dependency_policy 'declared': negligible, low, medium,
+          high, critical, or none.
+        required: false
+        type: string
+        default: 'none'
+      grype_bypass_repository:
+        description: >-
+          Repository holding the approved 'BYPASS:' issues
+          grype-scan-action honours, as owner/name. Empty uses the
+          repository running the workflow; set it to share one bypass
+          list across repositories.
+        required: false
+        type: string
+        default: ''
 
       # --- Runner hardening ---
       harden_runner_egress:
@@ -351,6 +394,45 @@ jobs:
               "to 64 letters, digits, '.', '_' or '-'."
             exit 1
           fi
+      # Apart from 'Validate inputs' so its outputs stay its own.
+      - name: 'Validate Grype inputs'
+        shell: bash
+        env:
+          FAIL_ON: ${{ inputs.grype_fail_on }}
+          DEPENDENCY_POLICY: ${{ inputs.grype_dependency_policy }}
+          TRANSITIVE_FAIL_ON: ${{ inputs.grype_transitive_fail_on }}
+          BYPASS_REPOSITORY: ${{ inputs.grype_bypass_repository }}
+        run: |
+          set -euo pipefail
+          status=0
+          case "${FAIL_ON}" in
+            negligible | low | medium | high | critical | none) ;;
+            *)
+              echo "::error::grype_fail_on must be one of negligible," \
+                "low, medium, high, critical, none."
+              status=1 ;;
+          esac
+          case "${DEPENDENCY_POLICY}" in
+            all | declared) ;;
+            *)
+              echo "::error::grype_dependency_policy must be 'all' or" \
+                "'declared'."
+              status=1 ;;
+          esac
+          case "${TRANSITIVE_FAIL_ON}" in
+            negligible | low | medium | high | critical | none) ;;
+            *)
+              echo "::error::grype_transitive_fail_on must be one of" \
+                "negligible, low, medium, high, critical, none."
+              status=1 ;;
+          esac
+          repo='^([A-Za-z0-9._-]+/[A-Za-z0-9._-]+)?$'
+          if [[ ! "${BYPASS_REPOSITORY}" =~ ${repo} ]]; then
+            echo "::error::grype_bypass_repository must be empty or" \
+              "owner/name of letters, digits, '.', '_' and '-'."
+            status=1
+          fi
+          exit "${status}"
       - name: 'Validate inputs'
         id: validate
         shell: bash
@@ -501,7 +583,7 @@ jobs:
       - name: 'Gather repository metadata'
         id: repo-metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/repository-metadata-action@2206d754f65f1a90f57b49be546712c5f594def2  # v0.3.3
+        uses: lfreleng-actions/repository-metadata-action@18e5b7c5b16423b0e734891d103513826b324858  # v0.4.0
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           github_summary: 'true'
@@ -1497,8 +1579,13 @@ jobs:
         uses: lfreleng-actions/grype-scan-action@5c81b23afb2ea771b2d247807a12d90783328675  # v0.5.0
         with:
           sbom: 'sbom-cyclonedx.json'
-          fail-on: 'medium'
+          fail-on: ${{ inputs.grype_fail_on }}
+          # The scan reports, never gates, whatever the policy says.
           permit-fail: 'true'
+          only-fixed: ${{ inputs.grype_only_fixed }}
+          dependency-policy: ${{ inputs.grype_dependency_policy }}
+          transitive-fail-on: ${{ inputs.grype_transitive_fail_on }}
+          bypass-repository: ${{ inputs.grype_bypass_repository }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
           # The action's default name, with the suffix that keeps each
           # call's reports apart.
