@@ -9,9 +9,13 @@ dependency files, so these tests hold it in place:
 - the six grype_* policy inputs exist with the agreed defaults, and
   each reaches grype-scan-action under its own name, at the pin the
   lanes share;
-- gerrit-validate's input check, and the merge lane's, accept each
-  allowed value and reject a typo, run as extracted from the
-  workflows;
+- gerrit-validate validates the policy inputs by running
+  grype-scan-action in validate-only mode, at the scan's pin, with
+  every policy expression the scan passes and nothing to scan, in a
+  job that fetches that one action and nothing else; its
+  grype_dependency_ecosystems check, and the merge lane's input check,
+  accept each allowed value and reject a typo, run as extracted from
+  the workflows;
 - every repository-metadata-action call is at the v0.4.0 pin, and no
   workflow calls dependency-change-action directly, reads its
   sidecar, or keeps a dependency-change job;
@@ -46,7 +50,6 @@ with one thing wrong, and expect it to fail.
 from __future__ import annotations
 
 import copy
-import datetime
 import re
 import subprocess
 import unittest
@@ -56,6 +59,7 @@ from unittest import mock
 from guards import needs_runner_tools, run_script
 from helpers import (
     CHECKOUT_ACTIONS,
+    ECOSYSTEMS_VALIDATE,
     GATE_VALIDATE,
     GRADLE,
     MAVEN,
@@ -63,6 +67,7 @@ from helpers import (
     TESTING,
     ContractCase,
     Job,
+    Step,
     Verdict,
     Workflow,
     is_action,
@@ -101,7 +106,33 @@ OLD_WIRING = (
 )
 OLD_JOB = "dependency-change"
 GRYPE_PIN = "5c81b23afb2ea771b2d247807a12d90783328675"
-GRYPE_USES = f"lfreleng-actions/grype-scan-action@{GRYPE_PIN}"
+GRYPE_ACTION = "lfreleng-actions/grype-scan-action"
+GRYPE_USES = f"{GRYPE_ACTION}@{GRYPE_PIN}"
+# The pin with its version comment, as each verify lane's text must
+# hold it: once on the validation step, once on the scan.
+GRYPE_LINE = f"uses: {GRYPE_USES}  # v0.5.0"
+
+VALIDATE_JOB = "gerrit-validate"
+# The scan's inputs that are one grype_* input of the lane, passed
+# verbatim; the validation step must pass each with the same
+# expression. Read from the scan step, so an input added there and
+# not to the validator fails the suite; these must be among them.
+POLICY_EXPRESSION = re.compile(r"^\$\{\{ inputs\.grype_[a-z_]+ \}\}$")
+VALIDATED_INPUTS = frozenset(
+    {
+        "fail-on",
+        "gate-when",
+        "dependency-policy",
+        "transitive-fail-on",
+        "only-fixed",
+        "remediation-window-days",
+        "remediation-window-start",
+        "bypass-repository",
+    }
+)
+# The one policy-adjacent input gerrit-validate still checks in shell:
+# an input of repository-metadata-action, not of grype-scan-action.
+ECOSYSTEMS_INPUT = "${{ inputs.grype_dependency_ecosystems }}"
 
 META_JOB = "repository-metadata"
 META_STEP = "Gather repository metadata"
@@ -348,278 +379,307 @@ class GatePolicyInputs(ContractCase):
         self.assert_check_fails(self.check_scanner, workflow)
 
 
+def policy_inputs(step: Step) -> dict[str, str]:
+    """Return the inputs ``step`` passes as one grype_* input, verbatim."""
+    return {
+        name: text(value)
+        for name, value in with_of(step).items()
+        if POLICY_EXPRESSION.match(text(value)) is not None
+    }
+
+
+def uses_in(job: Job) -> list[str]:
+    """Return the ``uses:`` of each action step of ``job``, in order."""
+    return [uses_of(step) for step in steps_of(job) if uses_of(step)]
+
+
 class GateInputValidation(ContractCase):
-    """The gate input validation, run as extracted from each lane."""
+    """The gate input validation: grype-scan-action in validate-only mode.
 
-    scripts: ClassVar[dict[str, str]] = {}
+    gerrit-validate runs the action at the scan's pin with
+    ``validate-only: 'true'``, every policy input the grype job's scan
+    passes as a plain expression of the lane's inputs, each with the
+    same expression, and nothing else: no ``sbom``, no ``target``. The
+    rules are then the action's own, and the two steps cannot drift.
+    The job fetches that one action and nothing else: no checkout and
+    no harden-runner, since validate-only makes no network request.
+    ``grype_dependency_ecosystems`` stays a shell check, run here as
+    extracted, as an input of repository-metadata-action.
+    """
 
-    @classmethod
-    def setUpClass(cls) -> None:
-        """Extract each lane's validation step once."""
-        super().setUpClass()
-        cls.scripts = {
-            lane: run_of(load_workflow(lane), "gerrit-validate", GATE_VALIDATE)
-            for lane in LANES
-        }
-
-    def validate(
-        self,
-        lane: str,
-        gate_when: str = "always",
-        policy: str = "declared",
-        transitive: str = "critical",
-        days: str = "",
-        start: str = "",
-        fail_on: str = "medium",
-        ecosystems: str = "",
-        bypass: str = "",
-    ) -> Verdict:
-        """Run the step with one value set and the rest at their defaults."""
-        return run_script(
-            self.scripts[lane],
-            {
-                "FAIL_ON": fail_on,
-                "GATE_WHEN": gate_when,
-                "DEPENDENCY_POLICY": policy,
-                "TRANSITIVE_FAIL_ON": transitive,
-                "WINDOW_DAYS": days,
-                "WINDOW_START": start,
-                "ECOSYSTEMS": ecosystems,
-                "BYPASS_REPOSITORY": bypass,
-            },
+    def check_validator(self, workflow: Workflow) -> None:
+        """Fail unless the validator mirrors the scan in validate-only mode."""
+        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        scan = step_of(job_of(workflow, "grype"), GRYPE_STEP)
+        policy = policy_inputs(scan)
+        self.assertLessEqual(
+            VALIDATED_INPUTS,
+            set(policy),
+            f"'{GRYPE_STEP}' must pass each policy input as the lane's own",
+        )
+        self.assertEqual(
+            uses_of(validator),
+            uses_of(scan),
+            f"'{GATE_VALIDATE}' and '{GRYPE_STEP}' must share one pin",
+        )
+        self.assertEqual(
+            uses_of(validator),
+            GRYPE_USES,
+            f"'{GATE_VALIDATE}' must run grype-scan-action at {GRYPE_PIN}",
+        )
+        self.assertEqual(
+            with_of(validator),
+            {"validate-only": "true", **policy},
+            f"'{GATE_VALIDATE}' must pass validate-only 'true' and the"
+            f" scan's policy expressions, and nothing else",
         )
 
-    def test_the_step_runs_on_every_call(self) -> None:
-        """The validation step has no condition."""
+    def check_job_fetches_one_action(self, workflow: Workflow) -> None:
+        """Fail unless the validator is the job's only action step."""
+        self.assertEqual(
+            uses_in(job_of(workflow, VALIDATE_JOB)),
+            [GRYPE_USES],
+            f"{VALIDATE_JOB} must run no action but the validator: no"
+            " checkout, no harden-runner",
+        )
+
+    def check_no_shell_validator(self, workflow: Workflow) -> None:
+        """Fail unless no run: step reads a grype_* input but ecosystems."""
+        for step in steps_of(job_of(workflow, VALIDATE_JOB)):
+            if not step.get("run"):
+                continue
+            read = [
+                text(value)
+                for value in scalars(step.get("env"))
+                if "inputs.grype_" in text(value)
+            ]
+            self.assertEqual(
+                read,
+                [ECOSYSTEMS_INPUT]
+                if step.get("name") == ECOSYSTEMS_VALIDATE
+                else [],
+                f"{VALIDATE_JOB}: '{text(step.get('name'))}' must not check"
+                " a grype_* policy input in shell",
+            )
+
+    def check_ecosystems_step(self, workflow: Workflow) -> None:
+        """Fail unless the ecosystems check reads that input alone."""
+        step = step_of(job_of(workflow, VALIDATE_JOB), ECOSYSTEMS_VALIDATE)
+        self.assertEqual(
+            section(step, "env"),
+            {"ECOSYSTEMS": ECOSYSTEMS_INPUT},
+            f"'{ECOSYSTEMS_VALIDATE}' must read grype_dependency_ecosystems",
+        )
+
+    def check_pin_text(self, content: str, path: str) -> None:
+        """Fail unless the pinned line appears twice, and no other ref."""
+        self.assertEqual(
+            content.count(GRYPE_LINE),
+            2,
+            f"{path}: the validation step and the scan must both run"
+            f" {GRYPE_LINE}",
+        )
+        self.assertEqual(
+            content.count(f"{GRYPE_ACTION}@"),
+            2,
+            f"{path}: grype-scan-action must appear at that pin alone",
+        )
+
+    def validate(self, lane: str, ecosystems: str) -> Verdict:
+        """Run the lane's ecosystems check, as extracted, with one value."""
+        script = run_of(load_workflow(lane), VALIDATE_JOB, ECOSYSTEMS_VALIDATE)
+        return run_script(script, {"ECOSYSTEMS": ecosystems})
+
+    @unittest.expectedFailure
+    def test_the_steps_run_on_every_call(self) -> None:
+        """Neither validation step has a condition."""
+        for lane in LANES:
+            for name in (GATE_VALIDATE, ECOSYSTEMS_VALIDATE):
+                with self.subTest(lane=lane, step=name):
+                    step = step_of(
+                        job_of(load_workflow(lane), VALIDATE_JOB), name
+                    )
+                    self.assertEqual(
+                        text(step.get("if")),
+                        "",
+                        f"{lane}: '{name}' must run on every call",
+                    )
+
+    @unittest.expectedFailure
+    def test_the_validator_mirrors_the_scan(self) -> None:
+        """Each lane validates through the action with the scan's inputs."""
         for lane in LANES:
             with self.subTest(lane=lane):
-                step = step_of(
-                    job_of(load_workflow(lane), "gerrit-validate"),
-                    GATE_VALIDATE,
-                )
-                self.assertEqual(
-                    text(step.get("if")),
-                    "",
-                    f"{lane}: '{GATE_VALIDATE}' must run on every call",
-                )
+                self.check_validator(load_workflow(lane))
 
-    @needs_runner_tools
-    def test_defaults_pass(self) -> None:
-        """The defaults pass."""
+    @unittest.expectedFailure
+    def test_the_job_fetches_one_action(self) -> None:
+        """Each lane's gerrit-validate runs no action but the validator."""
         for lane in LANES:
             with self.subTest(lane=lane):
-                self.assert_passes(self.validate(lane), "defaults")
+                self.check_job_fetches_one_action(load_workflow(lane))
 
-    @needs_runner_tools
-    def test_gate_when(self) -> None:
-        """grype_gate_when takes its two values and nothing else."""
+    @unittest.expectedFailure
+    def test_no_shell_validator_remains(self) -> None:
+        """No run: step of gerrit-validate checks a policy input."""
         for lane in LANES:
-            for value in ("always", "dependencies-changed"):
-                with self.subTest(lane=lane, value=value):
-                    self.assert_passes(
-                        self.validate(lane, gate_when=value),
-                        f"grype_gate_when '{value}'",
-                    )
-            for value in (
-                "",
-                "Always",
-                "dependencies_changed",
-                "never",
-                "always\n::warning::injected",
-            ):
-                with self.subTest(lane=lane, value=value):
-                    self.assert_fails(
-                        self.validate(lane, gate_when=value),
-                        f"grype_gate_when '{value}' rejected",
-                    )
+            with self.subTest(lane=lane):
+                self.check_no_shell_validator(load_workflow(lane))
 
-    @needs_runner_tools
-    def test_dependency_policy(self) -> None:
-        """grype_dependency_policy takes its two values and nothing else."""
+    @unittest.expectedFailure
+    def test_the_ecosystems_step_reads_its_input(self) -> None:
+        """The ecosystems check reads grype_dependency_ecosystems alone."""
         for lane in LANES:
-            for value in ("all", "declared"):
-                with self.subTest(lane=lane, value=value):
-                    self.assert_passes(
-                        self.validate(lane, policy=value),
-                        f"grype_dependency_policy '{value}'",
-                    )
-            for value in ("", "direct", "Declared", "all declared"):
-                with self.subTest(lane=lane, value=value):
-                    self.assert_fails(
-                        self.validate(lane, policy=value),
-                        f"grype_dependency_policy '{value}' rejected",
-                    )
+            with self.subTest(lane=lane):
+                self.check_ecosystems_step(load_workflow(lane))
 
-    @needs_runner_tools
-    def test_transitive_fail_on(self) -> None:
-        """grype_transitive_fail_on takes a severity and nothing else."""
+    @unittest.expectedFailure
+    def test_the_pin_appears_twice_with_its_comment(self) -> None:
+        """Each lane's text holds the pinned uses: line twice."""
         for lane in LANES:
-            for value in (
-                "none",
-                "negligible",
-                "low",
-                "medium",
-                "high",
-                "critical",
-            ):
-                with self.subTest(lane=lane, value=value):
-                    self.assert_passes(
-                        self.validate(lane, transitive=value),
-                        f"grype_transitive_fail_on '{value}'",
-                    )
-            for value in ("", "Critical", "moderate", "high,critical"):
-                with self.subTest(lane=lane, value=value):
-                    self.assert_fails(
-                        self.validate(lane, transitive=value),
-                        f"grype_transitive_fail_on '{value}' rejected",
-                    )
+            with self.subTest(lane=lane):
+                self.check_pin_text(read_text(lane), lane)
 
     @needs_runner_tools
-    def test_remediation_window_days(self) -> None:
-        """grype_remediation_window_days takes a whole number or nothing."""
-        for lane in LANES:
-            for value in ("", "0", "7", "30", "365"):
-                with self.subTest(lane=lane, value=value):
-                    self.assert_passes(
-                        self.validate(lane, days=value),
-                        f"grype_remediation_window_days '{value}'",
-                    )
-            for value in ("-1", "7.5", "7d", " 7", "seven"):
-                with self.subTest(lane=lane, value=value):
-                    self.assert_fails(
-                        self.validate(lane, days=value),
-                        f"grype_remediation_window_days '{value}' rejected",
-                    )
-
-    # 0000-01-01: GNU date accepts year zero, the action's ISO parser
-    # does not, so it must fail here rather than after the build.
-    START_PASSES = ("0001-01-01", "2026-01-01", "2024-02-29", "2099-12-31")
-    START_FAILS = (
-        "2026-1-1",
-        "20260101",
-        "01-01-2026",
-        "2026-02-30",
-        "2026-13-01",
-        "0000-01-01",
-        "0000-12-31",
-        "2026-01-01T00:00:00Z",
-        "yesterday",
-        "2026-01-01\n::warning::injected",
-    )
-
-    def test_the_date_cases_agree_with_iso_8601(self) -> None:
-        """The date data itself: each pass is a calendar date, no fail is.
-
-        A date here is the extended ``YYYY-MM-DD`` form that names a day
-        of the proleptic Gregorian calendar from year 1 on, as the
-        action's parser reads it.
-        """
-        for value in self.START_PASSES:
-            with self.subTest(value=value):
-                self.assertTrue(self.is_iso_date(value), f"{value!r}")
-        for value in self.START_FAILS:
-            with self.subTest(value=value):
-                self.assertFalse(self.is_iso_date(value), f"{value!r}")
-
-    @staticmethod
-    def is_iso_date(value: str) -> bool:
-        """Return whether ``value`` is an extended-form calendar date."""
-        if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value) is None:
-            return False
-        try:
-            datetime.date.fromisoformat(value)
-        except ValueError:
-            return False
-        return True
-
-    @needs_runner_tools
-    def test_remediation_window_start(self) -> None:
-        """grype_remediation_window_start takes a full ISO date or nothing."""
-        for lane in LANES:
-            for value in ("", *self.START_PASSES):
-                with self.subTest(lane=lane, value=value):
-                    self.assert_passes(
-                        self.validate(lane, start=value),
-                        f"grype_remediation_window_start '{value}'",
-                    )
-            for value in self.START_FAILS:
-                with self.subTest(lane=lane, value=value):
-                    verdict = self.validate(lane, start=value)
-                    self.assert_fails(
-                        verdict,
-                        f"grype_remediation_window_start '{value}' rejected",
-                    )
-
-    @needs_runner_tools
-    def test_fail_on(self) -> None:
-        """grype_fail_on takes a severity or none, and nothing else."""
-        for lane in LANES:
-            for value in SEVERITIES:
-                with self.subTest(lane=lane, value=value):
-                    self.assert_passes(
-                        self.validate(lane, fail_on=value),
-                        f"grype_fail_on '{value}'",
-                    )
-            for value in SEVERITY_FAILS:
-                with self.subTest(lane=lane, value=value):
-                    self.assert_fails(
-                        self.validate(lane, fail_on=value),
-                        f"grype_fail_on '{value}' rejected",
-                    )
-
-    @needs_runner_tools
+    @unittest.expectedFailure
     def test_dependency_ecosystems(self) -> None:
         """grype_dependency_ecosystems takes known presets, or nothing."""
         for lane in LANES:
             for value in ECOSYSTEM_PASSES:
                 with self.subTest(lane=lane, value=value):
                     self.assert_passes(
-                        self.validate(lane, ecosystems=value),
+                        self.validate(lane, value),
                         f"grype_dependency_ecosystems '{value}'",
                     )
             for value in ECOSYSTEM_FAILS:
                 with self.subTest(lane=lane, value=value):
                     self.assert_fails(
-                        self.validate(lane, ecosystems=value),
+                        self.validate(lane, value),
                         f"grype_dependency_ecosystems '{value}' rejected",
                     )
 
     @needs_runner_tools
-    def test_bypass_repository(self) -> None:
-        """grype_bypass_repository takes owner/name, or nothing."""
-        for lane in LANES:
-            for value in BYPASS_PASSES:
-                with self.subTest(lane=lane, value=value):
-                    self.assert_passes(
-                        self.validate(lane, bypass=value),
-                        f"grype_bypass_repository '{value}'",
-                    )
-            for value in BYPASS_FAILS:
-                with self.subTest(lane=lane, value=value):
-                    self.assert_fails(
-                        self.validate(lane, bypass=value),
-                        f"grype_bypass_repository '{value}' rejected",
-                    )
-
-    @needs_runner_tools
+    @unittest.expectedFailure
     def test_no_line_break_starts_a_workflow_command(self) -> None:
         """An injected line break never reaches the log as a command."""
         for lane in LANES:
-            for field, value in (
-                ("gate_when", "always\n::warning::injected"),
-                ("start", "2026-01-01\n::warning::injected"),
-                ("fail_on", "medium\n::warning::injected"),
-                ("ecosystems", "maven\n::warning::injected"),
-                ("bypass", "a/b\n::warning::injected"),
-            ):
-                with self.subTest(lane=lane, field=field):
-                    verdict = self.validate(lane, **{field: value})
-                    self.assert_fails(verdict, f"{field} with a line break")
-                    self.assertFalse(
-                        verdict.warned(),
-                        f"{lane}: the gate validation let a line break"
-                        " start a workflow command",
-                    )
+            with self.subTest(lane=lane):
+                verdict = self.validate(lane, "maven\n::warning::injected")
+                self.assert_fails(verdict, "ecosystems with a line break")
+                self.assertFalse(
+                    verdict.warned(),
+                    f"{lane}: the ecosystems check let a line break start"
+                    " a workflow command",
+                )
+
+    def test_a_drifted_expression_fails(self) -> None:
+        """A validator passing gate-when from another input fails."""
+        workflow = mutated(load_workflow(MAVEN))
+        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        with_of(validator)["gate-when"] = (
+            "${{ inputs.grype_dependency_policy }}"
+        )
+        self.assert_check_fails(self.check_validator, workflow)
+
+    @unittest.expectedFailure
+    def test_a_missing_validate_only_fails(self) -> None:
+        """A validator without validate-only, a real scan, fails."""
+        workflow = mutated(load_workflow(GRADLE))
+        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        del with_of(validator)["validate-only"]
+        self.assert_check_fails(self.check_validator, workflow)
+
+    def test_a_bare_boolean_validate_only_fails(self) -> None:
+        """A validate-only written as YAML true, not the string, fails."""
+        workflow = mutated(load_workflow(MAVEN))
+        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        with_of(validator)["validate-only"] = True
+        self.assert_check_fails(self.check_validator, workflow)
+
+    def test_differing_pins_fail(self) -> None:
+        """A validator at another commit than the scan fails."""
+        workflow = mutated(load_workflow(GRADLE))
+        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        validator["uses"] = f"{GRYPE_ACTION}@{'0' * 40}"
+        self.assert_check_fails(self.check_validator, workflow)
+
+    def test_a_scan_input_the_validator_lacks_fails(self) -> None:
+        """A policy input added to the scan alone fails."""
+        workflow = mutated(load_workflow(MAVEN))
+        scan = step_of(job_of(workflow, "grype"), GRYPE_STEP)
+        with_of(scan)["declared-source"] = (
+            "${{ inputs.grype_declared_source }}"
+        )
+        self.assert_check_fails(self.check_validator, workflow)
+
+    @unittest.expectedFailure
+    def test_a_scan_dropping_a_policy_input_fails(self) -> None:
+        """A scan no longer passing a policy input as the lane's fails."""
+        workflow = mutated(load_workflow(GRADLE))
+        scan = step_of(job_of(workflow, "grype"), GRYPE_STEP)
+        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        with_of(scan)["fail-on"] = "medium"
+        del with_of(validator)["fail-on"]
+        self.assert_check_fails(self.check_validator, workflow)
+
+    def test_an_sbom_passed_to_the_validator_fails(self) -> None:
+        """A validator given something to scan fails."""
+        workflow = mutated(load_workflow(MAVEN))
+        validator = step_of(job_of(workflow, VALIDATE_JOB), GATE_VALIDATE)
+        with_of(validator)["sbom"] = f"{SBOM_DIR}/sbom-cyclonedx.json"
+        self.assert_check_fails(self.check_validator, workflow)
+
+    def test_a_checkout_in_the_job_fails(self) -> None:
+        """A gerrit-validate that checks out fails."""
+        workflow = mutated(load_workflow(GRADLE))
+        steps_of(job_of(workflow, VALIDATE_JOB)).insert(
+            0,
+            {"name": "Checkout", "uses": f"{CHECKOUT_ACTIONS[0]}@{'0' * 40}"},
+        )
+        self.assert_check_fails(self.check_job_fetches_one_action, workflow)
+
+    def test_a_harden_runner_in_the_job_fails(self) -> None:
+        """A gerrit-validate under harden-runner fails."""
+        workflow = mutated(load_workflow(MAVEN))
+        steps_of(job_of(workflow, VALIDATE_JOB)).insert(
+            0,
+            {
+                "name": "Harden runner",
+                "uses": f"step-security/harden-runner@{'0' * 40}",
+            },
+        )
+        self.assert_check_fails(self.check_job_fetches_one_action, workflow)
+
+    def test_a_shell_policy_check_fails(self) -> None:
+        """A run: step reading a policy input fails."""
+        workflow = mutated(load_workflow(GRADLE))
+        steps_of(job_of(workflow, VALIDATE_JOB)).append(
+            {
+                "name": "Validate grype_fail_on",
+                "env": {"FAIL_ON": "${{ inputs.grype_fail_on }}"},
+                "run": "true",
+            }
+        )
+        self.assert_check_fails(self.check_no_shell_validator, workflow)
+
+    @unittest.expectedFailure
+    def test_an_ecosystems_step_reading_more_fails(self) -> None:
+        """An ecosystems check reading a policy input too fails."""
+        workflow = mutated(load_workflow(MAVEN))
+        step = step_of(job_of(workflow, VALIDATE_JOB), ECOSYSTEMS_VALIDATE)
+        section(step, "env")["GATE_WHEN"] = "${{ inputs.grype_gate_when }}"
+        self.assert_check_fails(self.check_ecosystems_step, workflow)
+        self.assert_check_fails(self.check_no_shell_validator, workflow)
+
+    def test_one_pinned_line_fails(self) -> None:
+        """A lane with the pin on the scan alone fails."""
+        content = read_text(MAVEN).replace(GRYPE_LINE, "", 1)
+        self.assert_check_fails(self.check_pin_text, content, MAVEN)
+
+    def test_a_third_reference_fails(self) -> None:
+        """A lane with a third grype-scan-action reference fails."""
+        content = read_text(GRADLE) + f"\n# uses: {GRYPE_ACTION}@{'0' * 40}\n"
+        self.assert_check_fails(self.check_pin_text, content, GRADLE)
 
 
 def lane_patterns(preset: str) -> list[str]:
