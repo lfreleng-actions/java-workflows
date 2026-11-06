@@ -291,7 +291,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6e6cab073a93c0d58e4e8846d44e1cbddbac975b'  # v0.21.0
       harden_runner_supplemental_allowlist:
         description: >-
           Extra harden-runner allow-list merged with
@@ -594,7 +594,7 @@ jobs:
       # first would win, and audit mode would be unreachable.
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           # yamllint disable-line rule:line-length
@@ -618,7 +618,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@f0dd3d4dd4fceff1f56348152ecf0e040594f16a  # v1.2.1
+        uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -672,7 +672,7 @@ jobs:
       - name: 'Gather repository metadata'
         id: repo-metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/repository-metadata-action@18e5b7c5b16423b0e734891d103513826b324858  # v0.4.0
+        uses: lfreleng-actions/repository-metadata-action@f0e5d2d8dc1154a5d702b75acc551eff6ba072dc  # v0.5.1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           github_summary: 'true'
@@ -724,7 +724,7 @@ jobs:
       # first would win, and audit mode would be unreachable.
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           # yamllint disable-line rule:line-length
@@ -763,7 +763,7 @@ jobs:
       - name: 'Checkout Gerrit change'
         if: inputs.gerrit_refspec != ''
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/checkout-gerrit-change-action@f0dd3d4dd4fceff1f56348152ecf0e040594f16a  # v1.2.1
+        uses: lfreleng-actions/checkout-gerrit-change-action@8721c15dacdd703064df5ade1416f7e5590b65f3  # v1.4.1
         with:
           gerrit-refspec: ${{ inputs.gerrit_refspec }}
           gerrit-project: ${{ inputs.gerrit_project }}
@@ -803,14 +803,14 @@ jobs:
       - name: 'Detect build metadata'
         id: metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/build-metadata-action@f5788fd76522ba71a079caaa77b7e50d7a7c5d0f  # v0.11.1
+        uses: lfreleng-actions/build-metadata-action@a52e7ccbf5e1b71075112e7b6c0ec3937fc39f0d  # v0.12.0
         with:
           path_prefix: ${{ inputs.path_prefix }}
 
       - name: 'Build with Gradle'
         id: build
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/gradle-build-action@62e164ecb3db615191f718067a09efca6f2b3057  # v0.7.0
+        uses: lfreleng-actions/gradle-build-action@2c976bb2b5e116f5ae339de015634af605affdbc  # v0.7.1
         with:
           path_prefix: ${{ inputs.path_prefix }}
           # Caller override wins, else the detected version, else 21.
@@ -895,7 +895,7 @@ jobs:
         if: ${{ !cancelled() && steps.reports.outputs.found == '1' }}
         timeout-minutes: ${{ inputs.tests_timeout_minutes }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/junit-test-report-action@85e6bbd4dfcc434acf458fa1b49d55f367f802cc  # v0.0.3
+        uses: lfreleng-actions/junit-test-report-action@ee5eebd63818eace7a28e1bd3f42c552da7d1a1b  # v0.0.4
         with:
           report-paths: 'junit-reports/**/*.xml'
           fail-on-failure: ${{ !inputs.test_permit_fail }}
@@ -1072,7 +1072,7 @@ jobs:
         if: ${{ !cancelled() && inputs.sbom_enabled && steps.gradle-args.outcome == 'success' && steps.wrapper.outcome != 'failure' }}
         timeout-minutes: ${{ inputs.sbom_timeout_minutes }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/sbom-action@73cdda97132f74a64733b238747d34151444da15  # v0.7.0
+        uses: lfreleng-actions/sbom-action@6a9b119a4ddeb29a02f24fbbc0446da5eaa25fdd  # v0.7.2
         with:
           backend: 'cyclonedx'
           # Named rather than left to 'auto', which resolves a tree
@@ -1203,7 +1203,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(steps.cbom-budget.outputs.minutes) }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/cbom-action@ec9253d00fccbe103002ada6067224ec767a7b1c  # v0.0.2
+        uses: lfreleng-actions/cbom-action@4484596115b7c4b825b448c6052c2df805d413db  # v0.0.3
         with:
           path_prefix: ${{ inputs.path_prefix }}
           # Reports go to runner temp, never the workspace. The action
@@ -1272,7 +1272,7 @@ jobs:
       # first would win, and audit mode would be unreachable.
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           # yamllint disable-line rule:line-length

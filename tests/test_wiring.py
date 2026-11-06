@@ -90,7 +90,7 @@ SBOM_UPLOAD = "Upload SBOM artifacts"
 M2REPO_DOWNLOAD = "Download the m2repo"
 PRUNE = "Prune unchanged SNAPSHOT metadata"
 
-EXPAND_PIN = "22149998fae8dd5ef1ffc8890ec0ce3785683983"
+EXPAND_PIN = "1de87fd734620335eeae65933795f226c0d8a24e"
 EXPAND_VENDORED = (
     ".github/scripts/vendor/maven-build-action/expand-workspace-vars.sh"
 )
