@@ -1970,7 +1970,6 @@ class CellEvidence(ContractCase):
         """Return each lane workflow by path."""
         return {path: load_workflow(path) for path in LANES}
 
-    @unittest.expectedFailure
     def test_every_cell_upload_overwrites(self) -> None:
         """Each upload a compatibility check reads overwrites per cell."""
         self.check_overwrite(load_workflow(TESTING), self.lanes())
@@ -2007,7 +2006,6 @@ class CellEvidence(ContractCase):
         step["with"]["pattern"] = "{gradle-toolchain,gradle-other}-gradle-*"
         self.assert_check_fails(self.check_overwrite, testing, self.lanes())
 
-    @unittest.expectedFailure
     def test_every_record_waits_for_success(self) -> None:
         """Each lane records its toolchain only after a successful build."""
         for path in LANES:

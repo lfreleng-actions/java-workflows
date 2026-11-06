@@ -1223,6 +1223,10 @@ jobs:
           # Lane-specific: a caller's run shares one artifact namespace
           # across every lane it calls.
           name: maven-merge-m2repo${{ inputs.artifact_suffix }}
+          # With a suffix the name is this cell's alone, so a re-run
+          # replaces the upload of an earlier attempt rather than adding
+          # a second the compatibility check would read beside it.
+          overwrite: ${{ inputs.artifact_suffix != '' }}
           path: ${{ steps.build.outputs.m2repo_path }}
           # A Maven artifactId or version can begin with a dot; by
           # default such paths would drop out of the hand-off while the
@@ -1236,9 +1240,12 @@ jobs:
       # Maven deployed them. Record both as Maven reports them, run
       # from outside the project so its .mvn configuration does not
       # apply. A single call, with no suffix, uploads nothing more.
+      # Taken only when every step before it succeeded: after a failed
+      # setup or build it would record whatever the runner image
+      # carries, and the check would read that as the cell's toolchain.
       - name: 'Record the toolchain'
         id: toolchain
-        if: ${{ !cancelled() && inputs.artifact_suffix != '' }}
+        if: ${{ success() && inputs.artifact_suffix != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1252,6 +1259,10 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: maven-merge-toolchain${{ inputs.artifact_suffix }}
+          # With a suffix the name is this cell's alone, so a re-run
+          # replaces the upload of an earlier attempt rather than adding
+          # a second the compatibility check would read beside it.
+          overwrite: ${{ inputs.artifact_suffix != '' }}
           path: ${{ runner.temp }}/toolchain/toolchain.txt
           retention-days: 3
           if-no-files-found: error

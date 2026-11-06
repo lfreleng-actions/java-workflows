@@ -774,7 +774,9 @@ an `m2repo` that fails `.github/scripts/merge-check.sh` or holds jars
 another JDK built. The Gradle fixture compiles through a Java 17
 toolchain, so for Gradle the launcher JVM in the record is the proof
 of the JDK under test. A lane called without an `artifact_suffix`
-records no toolchain. See [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
+records no toolchain. A failed cell publishes no toolchain record, and
+a re-run replaces a cell's artefacts rather than adding to them. See
+[`docs/BRIEF.md`](docs/BRIEF.md) for detail.
 
 The Gradle self-test call also sets the three supplemental
 [egress allow-list](#egress-allow-list) inputs to values that grant
