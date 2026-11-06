@@ -19,6 +19,9 @@
 - the submodule wiring of every checkout in all three lanes;
 - every lane's artifact_suffix, on every artefact name it chooses for
   an upload or a download, so a matrix of calls cannot cross them;
+- every per-cell upload the compatibility checks read, which a re-run
+  replaces, and every toolchain record, which waits for a successful
+  build;
 - zizmor's impostor-commit ignores for the examples' placeholder SHA,
   which only an online run applies, against the examples themselves.
 
@@ -88,6 +91,14 @@ LANES = (MAVEN, GRADLE, MERGE)
 SBOM_STEP = "Generate SBOM"
 SBOM_UPLOAD = "Upload SBOM artifacts"
 M2REPO_DOWNLOAD = "Download the m2repo"
+M2REPO_UPLOAD = "Upload the m2repo"
+JUNIT_UPLOAD = "Upload JUnit reports"
+RECORD = "Record the toolchain"
+RECORD_UPLOAD = "Upload the toolchain record"
+RECORD_IF = "${{ success() && inputs.artifact_suffix != '' }}"
+RECORDED = "steps.toolchain.outcome == 'success'"
+OVERWRITE = "${{ inputs.artifact_suffix != '' }}"
+CELL_PATTERN = re.compile(r"\{([^}]+)\}-(?:maven|gradle)-\*")
 PRUNE = "Prune unchanged SNAPSHOT metadata"
 
 EXPAND_PIN = "1de87fd734620335eeae65933795f226c0d8a24e"
@@ -1888,6 +1899,138 @@ class ArtefactSuffixes(ContractCase):
                 self.assert_check_fails(
                     self.check_artefact_names, MAVEN, maven
                 )
+
+
+class CellEvidence(ContractCase):
+    """Lanes: a cell publishes only evidence a re-run replaces.
+
+    The compatibility checks in testing.yaml download every cell's
+    artefacts by pattern, so each upload they read must replace its
+    cell's earlier one when the cell is re-run; otherwise a failed
+    attempt's upload survives beside the new one and the check reads
+    both. The overwrite holds only with a suffix: without one, two
+    calls in a run share a name, and an overwrite would delete the
+    other call's upload, which its Grype job fetches by ID.
+
+    A toolchain record describes the build tool the cell provisioned,
+    so it is taken only when every step before it succeeded; after a
+    failed setup it would record whatever the runner image carries.
+    """
+
+    def cell_names(self, testing: Workflow) -> set[str]:
+        """Return each artefact name prefix a compatibility check reads."""
+        names: set[str] = set()
+        for mapping in mappings(testing):
+            match = CELL_PATTERN.fullmatch(text(mapping.get("pattern")))
+            if match is not None:
+                names.update(match.group(1).split(","))
+        self.assertTrue(names, f"{TESTING}: found no cell patterns")
+        return names
+
+    def check_overwrite(
+        self, testing: Workflow, lanes: dict[str, Workflow]
+    ) -> None:
+        """Fail unless every upload a check reads overwrites per cell."""
+        for prefix in sorted(self.cell_names(testing)):
+            name = prefix + SUFFIX
+            uploads = [
+                (path, step)
+                for path, workflow in lanes.items()
+                for job in jobs_of(workflow).values()
+                for step in steps_of(job)
+                if is_action(step, "actions/upload-artifact")
+                and text(with_of(step).get("name")) == name
+            ]
+            self.assertTrue(
+                uploads, f"{TESTING} reads '{name}', which no lane uploads"
+            )
+            for path, step in uploads:
+                self.assertEqual(
+                    text(with_of(step).get("overwrite")),
+                    OVERWRITE,
+                    f"{path}: '{text(step.get('name'))}' uploads '{name}'"
+                    " without replacing a re-run cell's earlier upload",
+                )
+
+    def check_record(self, path: str, workflow: Workflow) -> None:
+        """Fail unless the toolchain record waits for a successful build."""
+        build = job_of(workflow, "build")
+        self.assertEqual(
+            text(step_of(build, RECORD).get("if")),
+            RECORD_IF,
+            f"{path}: '{RECORD}' runs after a failed step",
+        )
+        self.assertIn(
+            RECORDED,
+            text(step_of(build, RECORD_UPLOAD).get("if")),
+            f"{path}: '{RECORD_UPLOAD}' does not wait for the record",
+        )
+
+    def lanes(self) -> dict[str, Workflow]:
+        """Return each lane workflow by path."""
+        return {path: load_workflow(path) for path in LANES}
+
+    def test_every_cell_upload_overwrites(self) -> None:
+        """Each upload a compatibility check reads overwrites per cell."""
+        self.check_overwrite(load_workflow(TESTING), self.lanes())
+
+    def test_an_upload_without_overwrite_fails(self) -> None:
+        """Removing or hard-coding one upload's overwrite fails."""
+        for path, name in (
+            (MAVEN, RECORD_UPLOAD),
+            (MAVEN, JUNIT_UPLOAD),
+            (MAVEN, SBOM_UPLOAD),
+            (GRADLE, RECORD_UPLOAD),
+            (GRADLE, JUNIT_UPLOAD),
+            (GRADLE, SBOM_UPLOAD),
+            (MERGE, RECORD_UPLOAD),
+            (MERGE, M2REPO_UPLOAD),
+        ):
+            for value in (None, True):
+                with self.subTest(workflow=path, step=name, value=value):
+                    lanes = self.lanes()
+                    build = job_of(lanes[path], "build")
+                    inputs = with_of(step_of(build, name))
+                    inputs.pop("overwrite", None)
+                    if value is not None:
+                        inputs["overwrite"] = value
+                    self.assert_check_fails(
+                        self.check_overwrite, load_workflow(TESTING), lanes
+                    )
+
+    def test_a_pattern_no_lane_uploads_fails(self) -> None:
+        """A check reading a name no lane uploads fails."""
+        testing = load_workflow(TESTING)
+        job = job_of(testing, "compatibility-gradle-check")
+        step = step_of(job, "Download every cell")
+        step["with"]["pattern"] = "{gradle-toolchain,gradle-other}-gradle-*"
+        self.assert_check_fails(self.check_overwrite, testing, self.lanes())
+
+    def test_every_record_waits_for_success(self) -> None:
+        """Each lane records its toolchain only after a successful build."""
+        for path in LANES:
+            with self.subTest(workflow=path):
+                self.check_record(path, load_workflow(path))
+
+    def test_a_record_after_a_failure_fails(self) -> None:
+        """A record taken whatever came before it fails the check."""
+        for path in LANES:
+            with self.subTest(workflow=path):
+                workflow = load_workflow(path)
+                step_of(job_of(workflow, "build"), RECORD)["if"] = (
+                    "${{ !cancelled() && inputs.artifact_suffix != '' }}"
+                )
+                self.assert_check_fails(self.check_record, path, workflow)
+
+    def test_an_upload_not_waiting_for_the_record_fails(self) -> None:
+        """An upload that does not wait for the record fails the check."""
+        for path in LANES:
+            with self.subTest(workflow=path):
+                workflow = load_workflow(path)
+                step_of(job_of(workflow, "build"), RECORD_UPLOAD)["if"] = (
+                    "${{ !cancelled() }}"
+                )
+                self.assert_check_fails(self.check_record, path, workflow)
 
 
 @needs_runner_tools

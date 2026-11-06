@@ -1061,9 +1061,12 @@ jobs:
       # ran it. Record both as Maven reports them, run from outside the
       # project so its .mvn configuration does not apply. A single call,
       # with no suffix, uploads nothing more.
+      # Taken only when every step before it succeeded: after a failed
+      # setup or build it would record whatever the runner image
+      # carries, and the check would read that as the cell's toolchain.
       - name: 'Record the toolchain'
         id: toolchain
-        if: ${{ !cancelled() && inputs.artifact_suffix != '' }}
+        if: ${{ success() && inputs.artifact_suffix != '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1076,6 +1079,10 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: maven-toolchain${{ inputs.artifact_suffix }}
+          # With a suffix the name is this cell's alone, so a re-run
+          # replaces the upload of an earlier attempt rather than adding
+          # a second the compatibility check would read beside it.
+          overwrite: ${{ inputs.artifact_suffix != '' }}
           path: ${{ runner.temp }}/toolchain/toolchain.txt
           retention-days: 7
           if-no-files-found: error
@@ -1108,6 +1115,10 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: maven-junit-reports${{ inputs.artifact_suffix }}
+          # With a suffix the name is this cell's alone, so a re-run
+          # replaces the upload of an earlier attempt rather than adding
+          # a second the compatibility check would read beside it.
+          overwrite: ${{ inputs.artifact_suffix != '' }}
           path: junit-reports
           if-no-files-found: warn
 
@@ -1332,6 +1343,10 @@ jobs:
           # to the newest match, so a shared 'sbom-files' had both
           # Grype jobs scan whichever lane happened to upload last.
           name: sbom-files-maven${{ inputs.artifact_suffix }}
+          # With a suffix the name is this cell's alone, so a re-run
+          # replaces the upload of an earlier attempt rather than adding
+          # a second the compatibility check would read beside it.
+          overwrite: ${{ inputs.artifact_suffix != '' }}
           # Glob matches whichever SBOM formats the generator produced.
           path: sbom-cyclonedx.*
           retention-days: 45

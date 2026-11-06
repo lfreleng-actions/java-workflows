@@ -1143,7 +1143,12 @@ provisioned `gradle_version`, run inside the project, where its own
 JVM settings apply: its launcher JVM is the JDK that ran the build.
 That record is the Gradle lane's only JDK evidence, because a project
 can compile and test through a Java toolchain of its own, as
-`test-gradle-project` does with Java 17.
+`test-gradle-project` does with Java 17. A cell whose setup or build
+failed publishes no toolchain record, since the build tool on the
+runner would then be the image's rather than the one asked for, and
+the check reports the record as missing. With a suffix, each per-cell
+upload sets `overwrite`, so a re-run replaces a cell's artefacts
+rather than adding a second set the check would read beside the first.
 
 The self-test's `compatibility-verify` and `compatibility-merge` jobs
 call both Maven lanes once per cell, and `compatibility-check` runs
