@@ -786,10 +786,7 @@ artefacts. See [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
 The Gradle self-test call also sets the three supplemental
 [egress allow-list](#egress-allow-list) inputs to values that grant
 nothing new, so every pull request runs the pass-through in `block`
-mode. `bash tests/test-harden-runner-inputs.sh`, which a prek hook
-runs, fails when a lane workflow drops one of the five inputs, passes
-one in another form, or pins another release of
-`harden-runner-block-action`.
+mode.
 
 ## Design
 
