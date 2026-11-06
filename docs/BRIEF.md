@@ -1158,6 +1158,14 @@ failing a missing cell as well as one that ran the wrong toolchain.
 `gradle_cells`, with `gradle_version` set so `gradle-build-action`
 provisions that release rather than the fixture's wrapper, and
 `.github/scripts/gradle-compatibility-check.sh` checks those cells.
+Both checks go through `.github/scripts/latest-attempt-check.sh`,
+which reads each cell's build job from the run's jobs with
+`filter=latest` and fails a cell whose latest attempt did not succeed
+before reading its artefacts: a re-run that fails before uploading
+replaces nothing, so an earlier passing attempt's artefacts remain.
+Only cells whose latest build succeeded reach the record checks, one
+cell at a time. Reading the jobs takes `actions: read`, which those
+two jobs alone hold; the lanes ask for nothing new.
 The merge cells apply `.github/scripts/merge-check.sh`, the same
 assertions the single `merge-check` call uses. Grype and the CBOM
 stay off in these calls: they read the SBOM and the bytecode, which

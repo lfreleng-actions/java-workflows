@@ -258,7 +258,7 @@ jobs:
           fail() { echo "::error::$1"; status=1; }
           jobs="repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs"
           conclusion="$(gh api --paginate \
-            "${jobs}?filter=latest&per_page=100" \
+            "${jobs}?filter=latest&per_page=50" \
             --jq '.jobs[] | select(.name == "Maven Merge / Build")
               | .steps[] | select(.name == "Export env_vars")
               | .conclusion')"
@@ -1286,7 +1286,9 @@ jobs:
   # A matrix of reusable workflow calls hands its caller one cell's
   # outputs alone, so these read every cell's artefacts instead, and
   # fail on a cell that is missing as well as one that ran on the
-  # wrong Maven release or JDK, as each lane recorded them.
+  # wrong Maven release or JDK, as each lane recorded them. A cell
+  # whose build job did not succeed in its latest attempt fails before
+  # its artefacts are read: an earlier attempt's may still be there.
   compatibility-check:
     name: 'Compatibility Check (${{ matrix.lane }})'
     needs: [versions, compatibility-verify, compatibility-merge]
@@ -1294,6 +1296,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      actions: read  # reads each cell's latest build job
       contents: read
     strategy:
       fail-fast: false
@@ -1336,6 +1339,34 @@ jobs:
           pattern: ${{ matrix.pattern }}
           path: cells
 
+      # filter=latest reads each job's newest attempt, so a cell that
+      # passed and then failed on a later attempt reads as failed,
+      # whatever artefacts its passing attempt left behind. A page of
+      # 100 jobs times out server-side (HTTP 502) on a run this size,
+      # so it reads 50 a page and retries a 5xx twice before failing.
+      - name: 'Read each cell build'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          jobs="repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs"
+          errors="${RUNNER_TEMP}/jobs.err"
+          for delay in 5 15 0; do
+            if gh api --paginate "${jobs}?filter=latest&per_page=50" \
+              --jq '.jobs[] | {name, conclusion}' \
+              > "${RUNNER_TEMP}/jobs.json" 2> "${errors}"; then
+              exit 0
+            fi
+            cat "${errors}" >&2
+            if [ "${delay}" -eq 0 ] \
+              || ! grep -q 'HTTP 5[0-9][0-9]' "${errors}"; then
+              exit 1
+            fi
+            echo "::warning::Jobs API server error; retrying in ${delay}s"
+            sleep "${delay}"
+          done
+
       - name: 'Assert every cell'
         shell: bash
         env:
@@ -1343,8 +1374,8 @@ jobs:
           MAVEN: ${{ needs.versions.outputs.maven }}
           JAVA: ${{ needs.versions.outputs.java }}
         run: |
-          bash .github/scripts/compatibility-check.sh \
-            "${LANE}" cells "${MAVEN}" "${JAVA}"
+          bash .github/scripts/latest-attempt-check.sh "${LANE}" \
+            "${RUNNER_TEMP}/jobs.json" cells "${MAVEN}" "${JAVA}"
 
   # The Gradle lane on every Gradle release and Java version under
   # test that Gradle supports running on: Gradle 8 stops at Java 24,
@@ -1377,7 +1408,8 @@ jobs:
 
   # Reads every Gradle cell's artefacts, as compatibility-check does
   # for the Maven lanes, through
-  # .github/scripts/gradle-compatibility-check.sh.
+  # .github/scripts/gradle-compatibility-check.sh, once the cell's
+  # latest build job is known to have succeeded.
   compatibility-gradle-check:
     name: 'Compatibility Check (gradle)'
     needs: [versions, compatibility-gradle]
@@ -1385,6 +1417,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      actions: read  # reads each cell's latest build job
       contents: read
     steps:
       - name: 'Load egress allow-list'
@@ -1419,9 +1452,38 @@ jobs:
           pattern: '{gradle-toolchain,gradle-junit-reports,sbom-files-gradle}-gradle-*'
           path: cells
 
+      # filter=latest reads each job's newest attempt, so a cell that
+      # passed and then failed on a later attempt reads as failed,
+      # whatever artefacts its passing attempt left behind. A page of
+      # 100 jobs times out server-side (HTTP 502) on a run this size,
+      # so it reads 50 a page and retries a 5xx twice before failing.
+      - name: 'Read each cell build'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          jobs="repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs"
+          errors="${RUNNER_TEMP}/jobs.err"
+          for delay in 5 15 0; do
+            if gh api --paginate "${jobs}?filter=latest&per_page=50" \
+              --jq '.jobs[] | {name, conclusion}' \
+              > "${RUNNER_TEMP}/jobs.json" 2> "${errors}"; then
+              exit 0
+            fi
+            cat "${errors}" >&2
+            if [ "${delay}" -eq 0 ] \
+              || ! grep -q 'HTTP 5[0-9][0-9]' "${errors}"; then
+              exit 1
+            fi
+            echo "::warning::Jobs API server error; retrying in ${delay}s"
+            sleep "${delay}"
+          done
+
       - name: 'Assert every cell'
         shell: bash
         env:
           CELLS: ${{ needs.versions.outputs.gradle_cells }}
         run: |
-          bash .github/scripts/gradle-compatibility-check.sh cells "${CELLS}"
+          bash .github/scripts/latest-attempt-check.sh gradle \
+            "${RUNNER_TEMP}/jobs.json" cells "${CELLS}"

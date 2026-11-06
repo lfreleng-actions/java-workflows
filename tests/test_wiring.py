@@ -2071,7 +2071,12 @@ class LatestAttemptWiring(ContractCase):
             f"{job_id}: '{ASSERT_CELLS}' runs before '{READ_BUILDS}'",
         )
         read = run_of(testing, job_id, READ_BUILDS)
-        for needed in ("filter=latest", "{name, conclusion}", JOBS_FILE):
+        for needed in (
+            "filter=latest",
+            "per_page=50",
+            "{name, conclusion}",
+            JOBS_FILE,
+        ):
             self.assertIn(needed, read, f"{job_id}: '{READ_BUILDS}'")
         asserting = run_of(testing, job_id, ASSERT_CELLS)
         self.assertIn(
@@ -2094,7 +2099,6 @@ class LatestAttemptWiring(ContractCase):
                 if isinstance(permissions, dict) and "actions" in permissions:
                     self.fail(f"{path}: asks for an actions permission")
 
-    @unittest.expectedFailure
     def test_every_aggregator_reads_the_latest_builds_first(self) -> None:
         """Both compatibility checks read the builds before the records."""
         testing = load_workflow(TESTING)
@@ -2295,7 +2299,6 @@ class LatestAttemptCheck(ContractCase):
             )
             return run_script(f"{command}\n", {}, cwd=ROOT)
 
-    @unittest.expectedFailure
     def test_a_passing_latest_build_reads_the_records(self) -> None:
         """A cell whose latest build succeeded passes on good records."""
         for lane, job, write in (
@@ -2307,7 +2310,6 @@ class LatestAttemptCheck(ContractCase):
                 self.assert_passes(verdict, f"{lane}: passing cell")
                 self.assertIn("All 1 ", verdict.log)
 
-    @unittest.expectedFailure
     def test_a_passing_latest_build_with_bad_records_fails(self) -> None:
         """A succeeded build still goes through the record checks."""
         for lane, job in (
@@ -2320,7 +2322,6 @@ class LatestAttemptCheck(ContractCase):
                 self.assert_fails(verdict, f"{lane}: no records")
                 self.assertIn("no toolchain record", verdict.log)
 
-    @unittest.expectedFailure
     def test_a_failed_latest_build_fails_over_old_records(self) -> None:
         """A cell whose latest build failed fails beside passing records."""
         for lane, job, write in (
@@ -2338,7 +2339,6 @@ class LatestAttemptCheck(ContractCase):
                     )
                     self.assertNotIn("no toolchain record", verdict.log)
 
-    @unittest.expectedFailure
     def test_a_cell_without_a_build_job_fails(self) -> None:
         """A cell whose build job is absent from the run fails."""
         for lane, write in (

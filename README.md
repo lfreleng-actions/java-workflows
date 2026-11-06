@@ -775,8 +775,13 @@ another JDK built. The Gradle fixture compiles through a Java 17
 toolchain, so for Gradle the launcher JVM in the record is the proof
 of the JDK under test. A lane called without an `artifact_suffix`
 records no toolchain. A failed cell publishes no toolchain record, and
-a re-run replaces a cell's artefacts rather than adding to them. See
-[`docs/BRIEF.md`](docs/BRIEF.md) for detail.
+a re-run replaces a cell's artefacts rather than adding to them. A
+cell that fails before uploading leaves an earlier attempt's
+artefacts behind, so both checks first read the run's jobs, with
+`actions: read` on those two jobs alone, and
+`.github/scripts/latest-attempt-check.sh` fails a cell whose build
+job did not succeed in its latest attempt before reading its
+artefacts. See [`docs/BRIEF.md`](docs/BRIEF.md) for detail.
 
 The Gradle self-test call also sets the three supplemental
 [egress allow-list](#egress-allow-list) inputs to values that grant
