@@ -264,7 +264,7 @@ on:
         required: false
         type: string
         # yamllint disable-line rule:line-length
-        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6d4a65c5601afd6c2fbe52bda4b0024b132f265d'  # v0.19.0
+        default: 'lfreleng-actions//.github/harden-runner/lfreleng-actions/allow_list.txt@6e6cab073a93c0d58e4e8846d44e1cbddbac975b'  # v0.21.0
       harden_runner_supplemental_allowlist:
         description: >-
           Extra harden-runner allow-list merged with
@@ -534,7 +534,7 @@ jobs:
       # first would win, and audit mode would be unreachable.
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           # yamllint disable-line rule:line-length
@@ -568,7 +568,7 @@ jobs:
       - name: 'Gather repository metadata'
         id: repo-metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/repository-metadata-action@18e5b7c5b16423b0e734891d103513826b324858  # v0.4.0
+        uses: lfreleng-actions/repository-metadata-action@f0e5d2d8dc1154a5d702b75acc551eff6ba072dc  # v0.5.1
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           github_summary: 'true'
@@ -609,7 +609,7 @@ jobs:
       # first would win, and audit mode would be unreachable.
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           # yamllint disable-line rule:line-length
@@ -825,7 +825,7 @@ jobs:
       - name: 'Detect build metadata'
         id: metadata
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/build-metadata-action@f5788fd76522ba71a079caaa77b7e50d7a7c5d0f  # v0.11.1
+        uses: lfreleng-actions/build-metadata-action@a52e7ccbf5e1b71075112e7b6c0ec3937fc39f0d  # v0.12.0
         with:
           path_prefix: ${{ steps.pom.outputs.metadata_path }}
 
@@ -843,7 +843,7 @@ jobs:
       # the deploy, from v0.5.2, builds on the Temurin requested here.
       - name: 'Set up Java'
         # yamllint disable-line rule:line-length
-        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad  # v6.1.0
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78  # v6.2.0
         with:
           # yamllint disable-line rule:line-length
           java-version: ${{ inputs.java_version != '' && inputs.java_version || steps.metadata.outputs.java_version || '21' }}
@@ -883,7 +883,7 @@ jobs:
       - name: 'Export env_vars'
         if: inputs.env_vars != '' && inputs.env_vars != '{}'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/vars-to-env-action@72cd8dd1bf83e9861a111f59e1e02f04ba82a5dc  # v0.0.1
+        uses: lfreleng-actions/vars-to-env-action@3e370dd1d3ca48e972458510f38b52732c0c63d8  # v0.0.2
         with:
           secrets: ${{ inputs.env_vars }}
 
@@ -1005,7 +1005,7 @@ jobs:
       - name: 'Fetch published SNAPSHOT metadata'
         id: fetch
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-snapshot-metadata-action@063f53e596f92e98f16eac8b131005b712da6a95  # v0.1.2
+        uses: lfreleng-actions/maven-snapshot-metadata-action@4e5b8ba2c3f3715f47589ec5db581cdfc431db02  # v0.1.3
         with:
           mode: 'fetch'
           nexus_server: ${{ inputs.nexus_server }}
@@ -1032,7 +1032,7 @@ jobs:
       - name: 'Build and deploy to the m2repo'
         id: build
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-build-action@22149998fae8dd5ef1ffc8890ec0ce3785683983  # v0.5.5
+        uses: lfreleng-actions/maven-build-action@1de87fd734620335eeae65933795f226c0d8a24e  # v0.5.6
         with:
           path_prefix: ${{ inputs.path_prefix }}
           # yamllint disable-line rule:line-length
@@ -1066,7 +1066,7 @@ jobs:
       - name: 'Prune unchanged SNAPSHOT metadata'
         id: prune
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/maven-snapshot-metadata-action@063f53e596f92e98f16eac8b131005b712da6a95  # v0.1.2
+        uses: lfreleng-actions/maven-snapshot-metadata-action@4e5b8ba2c3f3715f47589ec5db581cdfc431db02  # v0.1.3
         with:
           mode: 'prune'
           m2repo_path: ${{ steps.build.outputs.m2repo_path }}
@@ -1304,7 +1304,7 @@ jobs:
         continue-on-error: true
         timeout-minutes: ${{ fromJSON(steps.sbom-budget.outputs.minutes) }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/sbom-action@73cdda97132f74a64733b238747d34151444da15  # v0.7.0
+        uses: lfreleng-actions/sbom-action@6a9b119a4ddeb29a02f24fbbc0446da5eaa25fdd  # v0.7.2
         with:
           backend: 'cyclonedx'
           dependency_manager: 'maven'
@@ -1361,7 +1361,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           # yamllint disable-line rule:line-length
@@ -1447,7 +1447,7 @@ jobs:
         id: load-credential
         if: ${{ !inputs.dry_run }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/credential-load-action@2748d6e79cd70f8d3b7befee38468bd851eab51d  # v2.1.0
+        uses: lfreleng-actions/credential-load-action@c4bf64f187865afb318669d8c9a95147c9e9d832  # v2.1.1
         with:
           op_service_account_token: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           vault_mapping_json: ${{ secrets.VAULT_MAPPING_JSON }}
@@ -1466,7 +1466,7 @@ jobs:
       - name: 'Publish the m2repo to Nexus'
         id: publish
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/nexus-publish-action@d929e9053da8383d47c1ae857e8aa4e47f6b1bd9  # v1.3.2
+        uses: lfreleng-actions/nexus-publish-action@7051db42beb4b1d22d2f51e557a9497976af6642  # v1.3.3
         with:
           nexus_server: ${{ inputs.nexus_server }}
           nexus_username: ${{ needs.validate.outputs.nexus_username }}
@@ -1530,7 +1530,7 @@ jobs:
     steps:
       - name: 'Load egress allow-list'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/harden-runner-block-action@2fed66c9c36c4687c31ca349b925b81ec629673f  # v0.15.0
+        uses: lfreleng-actions/harden-runner-block-action@f5a475661142cd2f1611ae6fbf8af2be0f36a9a7  # v0.16.3
         with:
           config: ${{ inputs.harden_runner_allowlist }}
           # yamllint disable-line rule:line-length
