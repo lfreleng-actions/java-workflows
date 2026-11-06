@@ -1309,8 +1309,6 @@ request.
   empty). Each `harden-runner-block-action` step passes all of them
   through, setting `supplemental_required` whenever a supplemental list
   is named, so a missing list fails the job at the allow-list step.
-  `tests/test-harden-runner-inputs.sh`, run as a prek hook, fails on any
-  drift from that set, its pass-through form or the action's pin.
   `java-maven-versions.yaml` takes no inputs and loads no allow-list:
   its one job publishes static JSON and runs no project code, so its
   harden-runner step blocks everything but a fixed `github.com:443`.
