@@ -22,6 +22,8 @@
 - every per-cell upload the compatibility checks read, which a re-run
   replaces, and every toolchain record, which waits for a successful
   build;
+- the compatibility checks' reading of each cell's latest build job
+  before its records, and latest-attempt-check.sh's verdicts on it;
 - zizmor's impostor-commit ignores for the examples' placeholder SHA,
   which only an online run applies, against the examples themselves.
 
@@ -32,12 +34,15 @@ tests hand it a mutated copy and expect the assertion to fire.
 from __future__ import annotations
 
 import copy
+import json
 import os
 import re
+import shlex
 import subprocess
 import tempfile
 import time
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 
 from guards import needs_runner_tools, run_script
@@ -100,6 +105,11 @@ RECORDED = "steps.toolchain.outcome == 'success'"
 OVERWRITE = "${{ inputs.artifact_suffix != '' }}"
 CELL_PATTERN = re.compile(r"\{([^}]+)\}-(?:maven|gradle)-\*")
 PRUNE = "Prune unchanged SNAPSHOT metadata"
+AGGREGATORS = ("compatibility-check", "compatibility-gradle-check")
+READ_BUILDS = "Read each cell build"
+ASSERT_CELLS = "Assert every cell"
+JOBS_FILE = "${RUNNER_TEMP}/jobs.json"
+LATEST_CHECK = ".github/scripts/latest-attempt-check.sh"
 
 EXPAND_PIN = "1de87fd734620335eeae65933795f226c0d8a24e"
 EXPAND_VENDORED = (
@@ -2031,6 +2041,316 @@ class CellEvidence(ContractCase):
                     "${{ !cancelled() }}"
                 )
                 self.assert_check_fails(self.check_record, path, workflow)
+
+
+class LatestAttemptWiring(ContractCase):
+    """testing.yaml: the compatibility checks read each cell's last try.
+
+    A re-run replaces a cell's artefacts only when the cell uploads
+    again, so a cell that passed and then failed before uploading
+    leaves the passing attempt's artefacts behind. Each aggregator
+    therefore reads the run's jobs, as their latest attempts left
+    them, before its record checks, which takes ``actions: read`` on
+    that job alone; the lanes every consumer calls ask for nothing new.
+    """
+
+    def check_aggregator(self, testing: Workflow, job_id: str) -> None:
+        """Fail unless ``job_id`` reads the latest builds, then checks."""
+        job = job_of(testing, job_id)
+        permissions: dict[str, object] = job.get("permissions") or {}
+        self.assertEqual(
+            text(permissions.get("actions")),
+            "read",
+            f"{job_id}: cannot read the run's jobs without actions: read",
+        )
+        reading = step_index(job, READ_BUILDS)
+        self.assertGreaterEqual(reading, 0, f"{job_id}: no '{READ_BUILDS}'")
+        self.assertGreater(
+            step_index(job, ASSERT_CELLS),
+            reading,
+            f"{job_id}: '{ASSERT_CELLS}' runs before '{READ_BUILDS}'",
+        )
+        read = run_of(testing, job_id, READ_BUILDS)
+        for needed in (
+            "filter=latest",
+            "per_page=50",
+            "{name, conclusion}",
+            JOBS_FILE,
+        ):
+            self.assertIn(needed, read, f"{job_id}: '{READ_BUILDS}'")
+        asserting = run_of(testing, job_id, ASSERT_CELLS)
+        self.assertIn(
+            f"bash {LATEST_CHECK} ",
+            asserting,
+            f"{job_id}: '{ASSERT_CELLS}' does not judge the latest builds",
+        )
+        self.assertIn(JOBS_FILE, asserting, f"{job_id}: '{ASSERT_CELLS}'")
+        self.assertNotIn(
+            "compatibility-check.sh",
+            asserting,
+            f"{job_id}: '{ASSERT_CELLS}' reads records without the builds",
+        )
+
+    def check_lanes(self, lanes: dict[str, Workflow]) -> None:
+        """Fail when a lane asks for any actions permission."""
+        for path, workflow in lanes.items():
+            for mapping in mappings(workflow):
+                permissions: object = mapping.get("permissions")
+                if isinstance(permissions, dict) and "actions" in permissions:
+                    self.fail(f"{path}: asks for an actions permission")
+
+    def test_every_aggregator_reads_the_latest_builds_first(self) -> None:
+        """Both compatibility checks read the builds before the records."""
+        testing = load_workflow(TESTING)
+        for job_id in AGGREGATORS:
+            with self.subTest(job=job_id):
+                self.check_aggregator(testing, job_id)
+
+    def test_an_aggregator_without_actions_read_fails(self) -> None:
+        """Dropping the aggregator's actions: read fails the check."""
+        for job_id in AGGREGATORS:
+            with self.subTest(job=job_id):
+                testing = load_workflow(TESTING)
+                job_of(testing, job_id)["permissions"].pop("actions", None)
+                self.assert_check_fails(self.check_aggregator, testing, job_id)
+
+    def test_reading_the_builds_after_the_records_fails(self) -> None:
+        """Reading the builds after the record checks fails the check."""
+        for job_id in AGGREGATORS:
+            with self.subTest(job=job_id):
+                testing = load_workflow(TESTING)
+                steps = steps_of(job_of(testing, job_id))
+                read = steps.pop(
+                    step_index(job_of(testing, job_id), READ_BUILDS)
+                )
+                steps.append(read)
+                self.assert_check_fails(self.check_aggregator, testing, job_id)
+
+    def test_a_record_check_without_the_builds_fails(self) -> None:
+        """Calling a record check script directly fails the check."""
+        for job_id, script in (
+            (
+                "compatibility-check",
+                (
+                    "bash .github/scripts/compatibility-check.sh "
+                    '"${LANE}" cells "${MAVEN}" "${JAVA}"'
+                ),
+            ),
+            (
+                "compatibility-gradle-check",
+                (
+                    "bash .github/scripts/gradle-compatibility-check.sh "
+                    'cells "${CELLS}"'
+                ),
+            ),
+        ):
+            with self.subTest(job=job_id):
+                testing = load_workflow(TESTING)
+                step_of(job_of(testing, job_id), ASSERT_CELLS)["run"] = script
+                self.assert_check_fails(self.check_aggregator, testing, job_id)
+
+    def test_no_lane_asks_for_actions(self) -> None:
+        """The lanes every consumer calls hold no actions permission."""
+        self.check_lanes({path: load_workflow(path) for path in LANES})
+
+    def test_a_lane_asking_for_actions_fails(self) -> None:
+        """A lane build job granted actions: read fails the check."""
+        for path in LANES:
+            with self.subTest(workflow=path):
+                workflow = load_workflow(path)
+                job_of(workflow, "build")["permissions"]["actions"] = "read"
+                self.assert_check_fails(self.check_lanes, {path: workflow})
+
+
+@needs_runner_tools
+class LatestAttemptCheck(ContractCase):
+    """latest-attempt-check.sh: a cell is judged by its latest build.
+
+    Each test lays out one cell's artefacts as the aggregator downloads
+    them, and a jobs file naming the cell's build job as testing.yaml
+    and the lane name it, so a renamed job fails here rather than
+    failing every cell in the run.
+    """
+
+    MAVEN_LINE = "3.9"
+    MAVEN_VERSION = "3.9.11"
+    GRADLE_LINE = "8.14"
+    GRADLE_VERSION = "8.14.3"
+    JAVA = "17"
+
+    def build_job(self, caller: str, matrix: dict[str, str]) -> str:
+        """Return the run's name for ``caller``'s build job on a cell."""
+        job = job_of(load_workflow(TESTING), caller)
+        name = text(job.get("name"))
+        for key, value in matrix.items():
+            name = name.replace(f"${{{{ matrix.{key} }}}}", value)
+        self.assertNotIn("${{", name, f"{caller}: unrendered name")
+        lane = load_workflow(text(job.get("uses")).removeprefix("$/"))
+        return f"{name} / {text(job_of(lane, 'build').get('name'))}"
+
+    def maven_job(self, lane: str) -> str:
+        """Return the cell's build job name in a Maven lane."""
+        caller = (
+            "compatibility-merge"
+            if lane == "merge"
+            else ("compatibility-verify")
+        )
+        return self.build_job(
+            caller, {"maven.line": self.MAVEN_LINE, "java": self.JAVA}
+        )
+
+    def gradle_job(self) -> str:
+        """Return the cell's build job name in the Gradle lane."""
+        return self.build_job(
+            "compatibility-gradle",
+            {"gradle.line": self.GRADLE_LINE, "java": self.JAVA},
+        )
+
+    @staticmethod
+    def write_sbom(path: Path) -> None:
+        """Write an SBOM carrying the fixture's resolved dependencies."""
+        path.mkdir(parents=True)
+        components = ",".join(
+            '{"group":"com.fasterxml.jackson.core",'
+            f'"name":"{name}","version":"2.20.0"}}'
+            for name in ("jackson-databind", "jackson-core")
+        )
+        (path / "sbom-cyclonedx.json").write_text(
+            f'{{"components":[{components}]}}', encoding="utf-8"
+        )
+
+    def write_verify_cell(self, cells: Path) -> None:
+        """Write a passing verify cell's artefacts under ``cells``."""
+        suffix = f"-maven-{self.MAVEN_LINE}-java-{self.JAVA}"
+        toolchain = cells / f"maven-toolchain{suffix}"
+        toolchain.mkdir(parents=True)
+        (toolchain / "toolchain.txt").write_text(
+            f"Apache Maven {self.MAVEN_VERSION} (0000000)\n"
+            f"Java version: {self.JAVA}.0.12, vendor: Eclipse Adoptium\n",
+            encoding="utf-8",
+        )
+        reports = cells / f"maven-junit-reports{suffix}"
+        reports.mkdir(parents=True)
+        (reports / "TEST-Example.xml").write_text(
+            '<property name="java.specification.version"'
+            f' value="{self.JAVA}"/>\n',
+            encoding="utf-8",
+        )
+        self.write_sbom(cells / f"sbom-files-maven{suffix}")
+
+    def write_gradle_cell(self, cells: Path) -> None:
+        """Write a passing Gradle cell's artefacts under ``cells``."""
+        suffix = f"-gradle-{self.GRADLE_LINE}-java-{self.JAVA}"
+        toolchain = cells / f"gradle-toolchain{suffix}"
+        toolchain.mkdir(parents=True)
+        (toolchain / "toolchain.txt").write_text(
+            f"Gradle {self.GRADLE_VERSION}\n"
+            f"Launcher JVM:  {self.JAVA}.0.12 (Eclipse Adoptium)\n",
+            encoding="utf-8",
+        )
+        reports = cells / f"gradle-junit-reports{suffix}"
+        reports.mkdir(parents=True)
+        (reports / "TEST-Example.xml").write_text("<x/>\n", encoding="utf-8")
+        self.write_sbom(cells / f"sbom-files-gradle{suffix}")
+
+    def run_check(
+        self,
+        lane: str,
+        jobs: dict[str, str],
+        write: Callable[[Path], None] | None,
+    ) -> Verdict:
+        """Run the check on one cell of ``lane`` with ``jobs`` concluded."""
+        with tempfile.TemporaryDirectory() as scratch:
+            cells = Path(scratch) / "cells"
+            cells.mkdir()
+            if write is not None:
+                write(cells)
+            jobs_file = Path(scratch) / "jobs.json"
+            jobs_file.write_text(
+                "".join(
+                    json.dumps({"name": name, "conclusion": conclusion}) + "\n"
+                    for name, conclusion in jobs.items()
+                ),
+                encoding="utf-8",
+            )
+            if lane == "gradle":
+                gradle = {
+                    "line": self.GRADLE_LINE,
+                    "version": self.GRADLE_VERSION,
+                }
+                arguments = [
+                    json.dumps([{"gradle": gradle, "java": self.JAVA}])
+                ]
+            else:
+                maven = {
+                    "line": self.MAVEN_LINE,
+                    "version": self.MAVEN_VERSION,
+                }
+                arguments = [json.dumps([maven]), json.dumps([self.JAVA])]
+            command = shlex.join(
+                [
+                    "bash",
+                    str(ROOT / LATEST_CHECK),
+                    lane,
+                    str(jobs_file),
+                    str(cells),
+                    *arguments,
+                ]
+            )
+            return run_script(f"{command}\n", {}, cwd=ROOT)
+
+    def test_a_passing_latest_build_reads_the_records(self) -> None:
+        """A cell whose latest build succeeded passes on good records."""
+        for lane, job, write in (
+            ("verify", self.maven_job("verify"), self.write_verify_cell),
+            ("gradle", self.gradle_job(), self.write_gradle_cell),
+        ):
+            with self.subTest(lane=lane):
+                verdict = self.run_check(lane, {job: "success"}, write)
+                self.assert_passes(verdict, f"{lane}: passing cell")
+                self.assertIn("All 1 ", verdict.log)
+
+    def test_a_passing_latest_build_with_bad_records_fails(self) -> None:
+        """A succeeded build still goes through the record checks."""
+        for lane, job in (
+            ("verify", self.maven_job("verify")),
+            ("merge", self.maven_job("merge")),
+            ("gradle", self.gradle_job()),
+        ):
+            with self.subTest(lane=lane):
+                verdict = self.run_check(lane, {job: "success"}, None)
+                self.assert_fails(verdict, f"{lane}: no records")
+                self.assertIn("no toolchain record", verdict.log)
+
+    def test_a_failed_latest_build_fails_over_old_records(self) -> None:
+        """A cell whose latest build failed fails beside passing records."""
+        for lane, job, write in (
+            ("verify", self.maven_job("verify"), self.write_verify_cell),
+            ("merge", self.maven_job("merge"), None),
+            ("gradle", self.gradle_job(), self.write_gradle_cell),
+        ):
+            for conclusion in ("failure", "cancelled", "skipped"):
+                with self.subTest(lane=lane, conclusion=conclusion):
+                    verdict = self.run_check(lane, {job: conclusion}, write)
+                    self.assert_fails(verdict, f"{lane}: {conclusion}")
+                    self.assertIn(
+                        f"its latest build concluded '{conclusion}'",
+                        verdict.log,
+                    )
+                    self.assertNotIn("no toolchain record", verdict.log)
+
+    def test_a_cell_without_a_build_job_fails(self) -> None:
+        """A cell whose build job is absent from the run fails."""
+        for lane, write in (
+            ("verify", self.write_verify_cell),
+            ("gradle", self.write_gradle_cell),
+        ):
+            with self.subTest(lane=lane):
+                verdict = self.run_check(
+                    lane, {"Other / Build": "success"}, write
+                )
+                self.assert_fails(verdict, f"{lane}: no build job")
+                self.assertIn("job in this run", verdict.log)
 
 
 @needs_runner_tools
