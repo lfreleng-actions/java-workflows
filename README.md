@@ -137,8 +137,8 @@ of `grype-scan-action` through:
 | `grype_only_fixed`               | boolean | `true`     | Gate on findings with a published fix version; a finding without one is a warning                   |
 | `grype_remediation_window_days`  | string  | `''`       | Days a finding stays a warning on an unarmed run after its fix appeared; empty turns the window off |
 | `grype_remediation_window_start` | string  | `''`       | `YYYY-MM-DD` floor for the window clock; a fix with no date starts there, else gates at once        |
-| `grype_dependency_ecosystems`    | string  | `''`       | Comma-separated detection presets, `node` to `docker`; empty means every preset                     |
-| `grype_dependency_patterns`      | string  | `''`       | Extra dependency file patterns, one per line, watched beside the presets and the lane's own         |
+| `grype_dependency_ecosystems`    | string  | `''`       | Comma-separated presets, `node` to `docker`, added to the lane's own; empty means every preset      |
+| `grype_dependency_patterns`      | string  | `''`       | Extra dependency file patterns, one per line, watched beside the presets                            |
 | `grype_bypass_repository`        | string  | `''`       | `owner/name` holding the approved `BYPASS:` issues; empty means the calling repository              |
 | `grype_timeout_minutes`          | number  | `30`       | Timeout for the `grype` job                                                                         |
 
@@ -173,16 +173,21 @@ other call leaves detection off and the output empty. Detection covers
 every preset of `dependency-change-action` unless
 `grype_dependency_ecosystems` narrows them: over-matching costs a
 strict run, where under-matching would let a finding the change
-introduced pass as a warning. Detection is repository-wide
+introduced pass as a warning. A narrowed selection always includes the
+lane's own preset, `maven` or `gradle`, and the input adds the presets
+it names: `node` on the Maven lane watches `maven,node`, and the
+detector drops a duplicate when the caller names the lane's preset
+too. Detection is repository-wide
 (`dependency_path_prefix: '.'`), not scoped to `path_prefix`: a Maven
 parent POM or a Gradle included build sits outside the project
 directory as often as in it, and a change there must arm the gate; the
 cost is one strict run for a dependency change in an unrelated project
-of the same repository. The lanes add patterns to the presets: Maven
-watches `.mvn/jvm.config`, since a `-D` property set there can select a
-dependency version; Gradle watches every `*.gradle` and `*.gradle.kts`,
-which covers a convention script a subproject applies; and
-`grype_dependency_patterns` adds the caller's own. The `grype` job
+of the same repository. The lane's preset covers its extra files: the
+`maven` preset watches `.mvn/jvm.config`, since a `-D` property set
+there can select a dependency version, and the `gradle` preset watches
+every `*.gradle` and `*.gradle.kts`, which covers a convention script a
+subproject applies. The lanes add no patterns of their own;
+`grype_dependency_patterns` adds the caller's. The `grype` job
 needs `repository-metadata` as well as `build`, still runs when the
 metadata job failed or skipped, and ignores the verdict unless that
 job succeeded. Detection fails closed: an empty verdict, from a
@@ -696,15 +701,21 @@ holds the lane's `grype_gate_active` to it, which the two agree on
 under the lane's policy (a blocking `grype_fail_on`, no remediation
 window). Which value the pull request earns is the detector's call and
 is not re-derived; `gate-verdict-cases` proves each value instead, on
-a change built for it: per lane and case it starts a scratch
-repository from the fixture, commits one known change (the fixture's
-`pom.xml` or `build.gradle.kts`, or a Java source), runs
-`repository-metadata-action` with the lane's patterns and an explicit
-base, asserts the `dependencies_changed`, `dependency_change_reason`
-and `dependency_change_base` outputs it expects, then runs
+a change built for it: per lane, case and selection it starts a
+scratch repository from the fixture, commits one known change (the
+fixture's `pom.xml` or `build.gradle.kts`; a Java source; or, for the
+auxiliary case, `.mvn/jvm.config` or a `gradle/deps.gradle` script,
+which the lane's preset covers with no extra pattern), runs
+`repository-metadata-action` with no extra patterns, an explicit base
+and either every preset or `node` prefixed with the lane's preset as
+the lanes prefix it, so a narrowed selection must still flag the
+lane's own files, asserts the
+`dependencies_changed`, `dependency_change_reason` and
+`dependency_change_base` outputs it expects, then runs
 `grype-scan-action` with the
 lane's policy over the resolved lane's SBOM and asserts `gate-active`
-is `false` for the unchanged case and `true` for the changed one.
+is `false` for the unchanged case and `true` for the changed and
+auxiliary ones.
 `gate-validate-check` runs the lanes' validation step itself, at the
 lanes' pin with the lanes' defaults and a `grype_gate_when` the action
 does not know, as the lanes' job runs it, and asserts the step fails:

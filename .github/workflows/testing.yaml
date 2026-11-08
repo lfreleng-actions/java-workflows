@@ -659,16 +659,22 @@ jobs:
   # Each verdict on a change built for it. A case starts a scratch
   # repository in the workspace from a lane's fixture, commits it,
   # then commits one known change: the dependency file at the
-  # fixture's root for 'changed', a Java source for 'unchanged'. It
+  # fixture's root for 'changed', a Java source for 'unchanged', and
+  # for 'auxiliary' a file the lane's preset covers beside its build
+  # file (.mvn/jvm.config, or a Gradle script the build applies). It
   # runs repository-metadata-action with the lane's detection inputs
-  # (every preset, the lane's fixed patterns) and the first commit as
-  # the explicit base, then grype-scan-action with the lane's policy
-  # over the SBOM the resolved lane built from that fixture, reading
-  # the verdict through the same dependencies-changed input. The
-  # expected verdict and gate-active are known when the case is
-  # written, so no second matcher re-derives them.
+  # (no extra patterns; every preset, or a selection narrowed to
+  # 'node', which the lane prefixes with its own preset as the lanes
+  # do) and the first commit as the explicit base, so a narrowed
+  # selection must still flag the lane's own files. It then runs
+  # grype-scan-action with the lane's policy over the SBOM the
+  # resolved lane built from that fixture, reading the verdict
+  # through the same dependencies-changed input. The expected verdict
+  # and gate-active are known when the case is written, so no second
+  # matcher re-derives them.
   gate-verdict-cases:
-    name: 'Grype Gate Verdict (${{ matrix.lane }}, ${{ matrix.case }})'
+    # yamllint disable-line rule:line-length
+    name: "Grype Gate Verdict (${{ matrix.lane }}, ${{ matrix.case }}, ${{ matrix.ecosystems || 'every preset' }})"
     needs: [maven-gate-resolved, gradle-gate-resolved]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
@@ -680,19 +686,20 @@ jobs:
       fail-fast: false
       matrix:
         lane: ['maven', 'gradle']
-        case: ['unchanged', 'changed']
+        case: ['unchanged', 'changed', 'auxiliary']
+        ecosystems: ['', 'node']
         include:
           - lane: 'maven'
-            patterns: '.mvn/jvm.config'
             dependency_file: 'pom.xml'
+            auxiliary_file: '.mvn/jvm.config'
           - lane: 'gradle'
-            patterns: |
-              *.gradle
-              *.gradle.kts
             dependency_file: 'build.gradle.kts'
+            auxiliary_file: 'gradle/deps.gradle'
           - case: 'unchanged'
             expected: 'false'
           - case: 'changed'
+            expected: 'true'
+          - case: 'auxiliary'
             expected: 'true'
     steps:
       - name: 'Load egress allow-list'
@@ -729,6 +736,7 @@ jobs:
           LANE: ${{ matrix.lane }}
           CASE: ${{ matrix.case }}
           DEPENDENCY_FILE: ${{ matrix.dependency_file }}
+          AUXILIARY_FILE: ${{ matrix.auxiliary_file }}
         run: |
           set -euo pipefail
           cp -R "source/tests/fixtures/${LANE}/." .
@@ -741,16 +749,21 @@ jobs:
           echo "base=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
           case "${CASE}" in
             changed) target="${DEPENDENCY_FILE}" ;;
+            auxiliary)
+              target="${AUXILIARY_FILE}"
+              mkdir -p "$(dirname "${target}")" ;;
             unchanged)
               target="$(find src -type f -name '*.java' | sort | head -n 1)" ;;
             *) echo "::error::unknown case '${CASE}'"; exit 1 ;;
           esac
           case "${target}" in
             *.xml) marker='<!-- edited by gate-verdict-cases -->' ;;
+            *.config) marker='-Dgate.verdict.edited=true' ;;
             *) marker='// edited by gate-verdict-cases' ;;
           esac
           printf '\n%s\n' "${marker}" >> "${target}"
-          git commit -q -a -m "${CASE}"
+          git add -A
+          git commit -q -m "${CASE}"
           echo "Base $(git rev-parse HEAD^1), HEAD $(git rev-parse HEAD)"
           git --no-pager diff --stat HEAD^1 HEAD
 
@@ -765,7 +778,8 @@ jobs:
           github_summary: 'false'
           artifact_upload: 'false'
           dependency_change: 'true'
-          dependency_patterns: ${{ matrix.patterns }}
+          # yamllint disable-line rule:line-length
+          dependency_ecosystems: ${{ matrix.ecosystems != '' && format('{0},{1}', matrix.lane, matrix.ecosystems) || '' }}
           dependency_path_prefix: '.'
           dependency_base: ${{ steps.scratch.outputs.base }}
 
@@ -807,7 +821,7 @@ jobs:
           name: sbom-files-${{ matrix.lane }}-gate-resolved
 
       # The lane's policy, value for value, at the lane's pin. The
-      # database is restored only: four cases run at once, and the
+      # database is restored only: twelve cases run at once, and the
       # lanes' own scans write it.
       - name: 'Grype audit SBOM'
         id: grype-audit

@@ -69,7 +69,12 @@ job runs nothing from the project and is informational, except that
 under change-scoped gating with the SBOM on it detects dependency
 changes and publishes `dependencies_changed` as a job output; `grype`
 reads it only when the job succeeded, so a failed or skipped metadata
-job leaves the verdict empty and the scan gates.
+job leaves the verdict empty and the scan gates. Detection watches
+every preset of the detector, or, when `grype_dependency_ecosystems`
+narrows them, the lane's own preset (`maven` or `gradle`) and the ones
+the input names. The lane's preset covers `.mvn/jvm.config` or every
+`*.gradle` and `*.gradle.kts` script, so the lanes add no patterns of
+their own beside any `grype_dependency_patterns` the caller passes.
 
 `build` job (Maven):
 
