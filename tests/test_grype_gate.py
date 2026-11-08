@@ -23,8 +23,9 @@ dependency files, so these tests hold it in place:
 - each verify lane's repository-metadata job detects with its own
   step, only under grype_gate_when: dependencies-changed with Grype
   and the SBOM on, over the whole repository, with every preset unless
-  the caller narrows them, the lane's fixed patterns and the caller's,
-  after a checkout that holds the parent of HEAD, and publishes
+  the caller narrows them, a narrowed selection always prefixed with
+  the lane's own preset, and only the caller's extra patterns, after a
+  checkout that holds the parent of HEAD, and publishes
   dependencies_changed as a job output;
 - the Grype job needs build and repository-metadata, still runs when
   the metadata job failed or skipped, reads the verdict only when that
@@ -40,8 +41,9 @@ dependency files, so these tests hold it in place:
   without which the resolved lanes could report unresolved;
 - testing.yaml's gate-verdict-cases job runs repository-metadata-action
   and grype-scan-action at the lanes' pins with the lanes' own inputs,
-  on a known change per lane and case, with the verdict each case
-  expects fixed in the matrix;
+  on a known change per lane and case, over every preset and over a
+  selection narrowed to node that the lane's preset prefixes, with the
+  verdict each case expects fixed in the matrix;
 - testing.yaml's gate-validate-check job runs the validation step at
   the lanes' pin with the lanes' defaults and a gate-when the action
   does not know, as the lanes' job does, with no checkout and no
@@ -196,15 +198,41 @@ VALIDATORS: dict[str, tuple[str, str, frozenset[str]]] = {
 }
 VALIDATED_LANES = (MAVEN, GRADLE, MERGE)
 
-# What each lane watches beyond the presets: a -D property in
-# jvm.config can select a Maven dependency version; any Gradle script
-# file can declare a plugin or dependency the preset does not name,
-# such as a convention script a subproject applies.
-EXTRA_PATTERNS = {
-    "maven": ".mvn/jvm.config",
-    "gradle": "*.gradle\n*.gradle.kts",
-}
+# The presets cover each lane's own extra files (.mvn/jvm.config, every
+# *.gradle and *.gradle.kts script), so a lane passes the caller's
+# patterns alone.
 CALLER_PATTERNS = "${{ inputs.grype_dependency_patterns }}"
+
+# A file each lane's preset covers beside its build file, which the
+# auxiliary case commits to prove the preset alone flags it.
+AUXILIARY_FILES = {
+    "maven": ".mvn/jvm.config",
+    "gradle": "gradle/deps.gradle",
+}
+CASE_VERDICTS = {"unchanged": "false", "changed": "true", "auxiliary": "true"}
+
+
+def lane_ecosystems(preset: str) -> str:
+    """Return the lane's detection presets, as the literal workflow text.
+
+    Empty selects every preset; a narrowed selection always includes
+    the lane's own, which covers its build and auxiliary files.
+    """
+    return (
+        "${{ inputs.grype_dependency_ecosystems != '' && format('"
+        + preset
+        + ",{0}', inputs.grype_dependency_ecosystems) || '' }}"
+    )
+
+
+# The cases job's detector presets: the lanes' expression over the
+# matrix, so the narrowed cases hold the lanes' prefixing.
+CASES_ECOSYSTEMS = (
+    "${{ matrix.ecosystems != '' && format('{0},{1}', matrix.lane,"
+    " matrix.ecosystems) || '' }}"
+)
+# Every preset, and a selection that names neither lane's preset.
+CASES_ECOSYSTEM_AXIS = ["", "node"]
 
 # name, type, default, grype-scan-action input, as the issue settled them.
 POLICY_INPUTS = (
@@ -231,16 +259,10 @@ POLICY_INPUTS = (
     ),
 )
 
-# The verify lanes' detection and bypass inputs: name, the job and step
-# that receive it, and the input there. The patterns input is checked
-# with the lane's fixed patterns, in MetadataDetection.
+# The verify lanes' bypass input: name, the job and step that receive
+# it, and the input there. The ecosystems and patterns inputs are
+# checked in MetadataDetection.
 VERIFY_INPUTS = (
-    (
-        "grype_dependency_ecosystems",
-        META_JOB,
-        META_STEP,
-        "dependency_ecosystems",
-    ),
     ("grype_bypass_repository", "grype", GRYPE_STEP, "bypass-repository"),
 )
 NEW_VERIFY_INPUTS = (
@@ -987,11 +1009,6 @@ class GateValidateCheck(ContractCase):
         self.assert_check_fails(self.check_assertion, testing)
 
 
-def lane_patterns(preset: str) -> list[str]:
-    """Return the lines the lane's metadata step passes as patterns."""
-    return [*EXTRA_PATTERNS[preset].splitlines(), CALLER_PATTERNS]
-
-
 class MetadataDetection(ContractCase):
     """Detection in the repository-metadata job: pin, inputs and output."""
 
@@ -1024,10 +1041,9 @@ class MetadataDetection(ContractCase):
             # job runs, and under 'always' the scan ignores the verdict.
             "dependency_change": f"${{{{ {DETECT_IF} }}}}",
             "gerrit_refspec": "${{ inputs.gerrit_refspec }}",
-            # Empty selects every preset.
-            "dependency_ecosystems": (
-                "${{ inputs.grype_dependency_ecosystems }}"
-            ),
+            # Empty selects every preset; a narrowed selection keeps
+            # the lane's own.
+            "dependency_ecosystems": lane_ecosystems(preset),
             # Repository-wide: a Maven parent chain or a Gradle included
             # build crosses directory boundaries path_prefix cannot
             # follow.
@@ -1036,10 +1052,10 @@ class MetadataDetection(ContractCase):
         got = {field: text(passed.get(field)) for field in want}
         self.assertEqual(got, want, f"'{META_STEP}' with:")
         self.assertEqual(
-            text(passed.get("dependency_patterns")).splitlines(),
-            lane_patterns(preset),
-            f"'{META_STEP}' must watch the {preset} lane's fixed patterns"
-            " and then the caller's",
+            text(passed.get("dependency_patterns")),
+            CALLER_PATTERNS,
+            f"'{META_STEP}' must watch the caller's patterns alone in the"
+            f" {preset} lane",
         )
         self.assertEqual(
             text(passed.get("dependency_base")),
@@ -1179,12 +1195,26 @@ class MetadataDetection(ContractCase):
         with_of(step)["dependency_ecosystems"] = "maven"
         self.assert_check_fails(self.check_step, workflow, "maven")
 
-    def test_the_other_lanes_patterns_fail(self) -> None:
-        """A lane watching the other lane's patterns fails the check."""
+    def test_unprefixed_ecosystems_fail(self) -> None:
+        """A narrowed selection that can drop the lane's preset fails."""
+        workflow = mutated(load_workflow(GRADLE))
+        step = step_of(job_of(workflow, META_JOB), META_STEP)
+        with_of(step)["dependency_ecosystems"] = ECOSYSTEMS_INPUT
+        self.assert_check_fails(self.check_step, workflow, "gradle")
+
+    def test_the_other_lanes_prefix_fails(self) -> None:
+        """A lane prefixing the other lane's preset fails the check."""
         workflow = mutated(load_workflow(MAVEN))
         step = step_of(job_of(workflow, META_JOB), META_STEP)
-        with_of(step)["dependency_patterns"] = "\n".join(
-            lane_patterns("gradle")
+        with_of(step)["dependency_ecosystems"] = lane_ecosystems("gradle")
+        self.assert_check_fails(self.check_step, workflow, "maven")
+
+    def test_a_fixed_pattern_fails(self) -> None:
+        """A step adding a fixed pattern to the caller's fails the check."""
+        workflow = mutated(load_workflow(MAVEN))
+        step = step_of(job_of(workflow, META_JOB), META_STEP)
+        with_of(step)["dependency_patterns"] = (
+            f".mvn/jvm.config\n{CALLER_PATTERNS}\n"
         )
         self.assert_check_fails(self.check_step, workflow, "maven")
 
@@ -1192,7 +1222,7 @@ class MetadataDetection(ContractCase):
         """A step ignoring grype_dependency_patterns fails the check."""
         workflow = mutated(load_workflow(GRADLE))
         step = step_of(job_of(workflow, META_JOB), META_STEP)
-        with_of(step)["dependency_patterns"] = EXTRA_PATTERNS["gradle"]
+        with_of(step)["dependency_patterns"] = "*.gradle\n*.gradle.kts"
         self.assert_check_fails(self.check_step, workflow, "gradle")
 
     def test_a_missing_job_output_fails(self) -> None:
@@ -1896,9 +1926,11 @@ class GateVerdictCases(ContractCase):
             "uses": META_USES,
             "id": META_STEP_ID,
             "dependency_change": "true",
-            # Empty, as the lanes default: every preset.
-            "dependency_ecosystems": "",
-            "dependency_patterns": "${{ matrix.patterns }}",
+            # Every preset, or the matrix's narrowed selection prefixed
+            # with the lane's preset, as the lanes pass it; no extra
+            # patterns.
+            "dependency_ecosystems": CASES_ECOSYSTEMS,
+            "dependency_patterns": "",
             "dependency_base": "${{ steps.scratch.outputs.base }}",
             "dependency_path_prefix": ".",
         }
@@ -1914,15 +1946,19 @@ class GateVerdictCases(ContractCase):
         """Fail unless the matrix carries the lanes' inputs and verdicts."""
         job = job_of(testing, CASES_JOB)
         rows = include_rows(job)
-        for preset, extra in EXTRA_PATTERNS.items():
+        for preset, auxiliary in AUXILIARY_FILES.items():
             row = row_where(rows, "lane", preset)
             self.assertEqual(
-                (text(row.get("ecosystems")), text(row.get("patterns"))),
-                ("", extra),
-                f"{CASES_JOB}'s {preset} row: the lane's fixed patterns,"
-                " every preset",
+                (
+                    text(row.get("ecosystems")),
+                    text(row.get("patterns")),
+                    text(row.get("auxiliary_file")),
+                ),
+                ("", "", auxiliary),
+                f"{CASES_JOB}'s {preset} row: the matrix's selection, no"
+                f" extra patterns, and {auxiliary} for the auxiliary case",
             )
-        for case, expected in (("unchanged", "false"), ("changed", "true")):
+        for case, expected in CASE_VERDICTS.items():
             row = row_where(rows, "case", case)
             self.assertEqual(
                 text(row.get("expected")),
@@ -1933,7 +1969,12 @@ class GateVerdictCases(ContractCase):
             matrix_axis(job, "lane"), ["maven", "gradle"], "matrix.lane"
         )
         self.assertEqual(
-            matrix_axis(job, "case"), ["unchanged", "changed"], "matrix.case"
+            matrix_axis(job, "case"), list(CASE_VERDICTS), "matrix.case"
+        )
+        self.assertEqual(
+            matrix_axis(job, "ecosystems"),
+            CASES_ECOSYSTEM_AXIS,
+            "matrix.ecosystems",
         )
 
     def check_scanner(self, testing: Workflow) -> None:
@@ -2067,11 +2108,33 @@ class GateVerdictCases(ContractCase):
         self.assert_check_fails(self.check_matrix, testing)
 
     def test_a_conflicting_later_lane_row_fails(self) -> None:
-        """A second maven row, overriding its patterns, fails the check."""
+        """A second maven row, overriding its file, fails the check."""
         testing = mutated(load_workflow(TESTING))
         include_of(job_of(testing, CASES_JOB)).append(
-            {"lane": "maven", "patterns": ""}
+            {"lane": "maven", "auxiliary_file": "pom.xml"}
         )
+        self.assert_check_fails(self.check_matrix, testing)
+
+    def test_a_detector_ignoring_the_selection_fails(self) -> None:
+        """A detector on every preset whatever the matrix says fails."""
+        testing = mutated(load_workflow(TESTING))
+        step = step_of(job_of(testing, CASES_JOB), DETECT_STEP)
+        with_of(step)["dependency_ecosystems"] = ""
+        self.assert_check_fails(self.check_detector, testing)
+
+    def test_an_unprefixed_detector_fails(self) -> None:
+        """A detector on the bare narrowed selection fails the check."""
+        testing = mutated(load_workflow(TESTING))
+        step = step_of(job_of(testing, CASES_JOB), DETECT_STEP)
+        with_of(step)["dependency_ecosystems"] = "${{ matrix.ecosystems }}"
+        self.assert_check_fails(self.check_detector, testing)
+
+    def test_a_dropped_narrowed_selection_fails(self) -> None:
+        """A matrix running every preset alone fails the check."""
+        testing = mutated(load_workflow(TESTING))
+        section(section(job_of(testing, CASES_JOB), "strategy"), "matrix")[
+            "ecosystems"
+        ] = [""]
         self.assert_check_fails(self.check_matrix, testing)
 
     def test_a_dropped_axis_value_fails(self) -> None:

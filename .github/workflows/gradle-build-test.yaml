@@ -142,11 +142,11 @@ on:
           'dependencies-changed' to gate only a change that touched a
           dependency file anywhere in the repository (every preset of
           dependency-change-action unless grype_dependency_ecosystems
-          narrows them, plus every *.gradle and *.gradle.kts script
-          and grype_dependency_patterns) and report findings as
-          warnings otherwise, except a finding whose remediation
-          window has run out, which gates even on an unchanged chain.
-          A change the detector cannot resolve gates.
+          narrows them to gradle and the ones it names, plus
+          grype_dependency_patterns) and report findings as warnings
+          otherwise, except a finding whose remediation window has run
+          out, which gates even on an unchanged chain. A change the
+          detector cannot resolve gates.
         required: false
         type: string
         default: 'always'
@@ -154,16 +154,16 @@ on:
         description: >-
           Comma-separated dependency-change-action presets detection
           watches under grype_gate_when 'dependencies-changed': node,
-          python, go, maven, gradle, rust, docker. Empty means every
-          preset.
+          python, go, maven, gradle, rust, docker. Detection always
+          watches the gradle preset, and a value adds the presets it
+          names. Empty means every preset.
         required: false
         type: string
         default: ''
       grype_dependency_patterns:
         description: >-
           Extra dependency file patterns, one per line, that detection
-          watches beside the presets and the *.gradle and *.gradle.kts
-          scripts.
+          watches beside the presets.
         required: false
         type: string
         default: ''
@@ -662,11 +662,14 @@ jobs:
       # scoped to path_prefix: a composite build's
       # includeBuild('../shared') crosses directory boundaries the
       # prefix rule cannot follow, and over-matching costs one strict
-      # run where under-matching disarms the gate. Every *.gradle and
-      # *.gradle.kts script joins the presets, since a script applied
-      # from the build file (dependencies.gradle under 'apply from')
-      # can hold the versions; the detector skips blank lines and
-      # drops duplicates, so an empty caller list is harmless. See
+      # run where under-matching disarms the gate. The gradle preset
+      # covers every *.gradle and *.gradle.kts script, where a script
+      # applied from the build file (dependencies.gradle under 'apply
+      # from') can hold the versions, so the step passes the caller's
+      # patterns alone, and a narrowed selection always includes that
+      # preset: empty still means every preset, and the detector drops
+      # a duplicate when the caller names gradle. It skips blank lines,
+      # so an empty caller list is harmless. See
       # repository-metadata-action's README for the wiring and the
       # detector's README for its rules.
       - name: 'Gather repository metadata'
@@ -682,11 +685,9 @@ jobs:
           # yamllint disable-line rule:line-length
           dependency_change: ${{ inputs.sbom_enabled && inputs.grype_enabled && inputs.grype_gate_when == 'dependencies-changed' }}
           gerrit_refspec: ${{ inputs.gerrit_refspec }}
-          dependency_ecosystems: ${{ inputs.grype_dependency_ecosystems }}
-          dependency_patterns: |
-            *.gradle
-            *.gradle.kts
-            ${{ inputs.grype_dependency_patterns }}
+          # yamllint disable-line rule:line-length
+          dependency_ecosystems: ${{ inputs.grype_dependency_ecosystems != '' && format('gradle,{0}', inputs.grype_dependency_ecosystems) || '' }}
+          dependency_patterns: ${{ inputs.grype_dependency_patterns }}
           dependency_path_prefix: '.'
 
   build:
