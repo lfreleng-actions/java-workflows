@@ -10,6 +10,10 @@
 - the merge lane's input validation, including the branch its
   checkouts build, and its m2repo checks, whose reject paths guard the
   publish;
+- the merge lane's m2repo hand-off: packed by build-artifact-action,
+  unpacked by publish and by the self-test by ID and expected-digest,
+  never read by name, each read refusing a missing ID or digest; and
+  its SBOM read by ID, refusing a missing one;
 - the merge lane's coordinate check: prune keeps it on, and the
   testing.yaml job proving the rejection runs the lane's own pin;
 - the merge lane's copy of maven-build-action's workspace placeholder
@@ -69,6 +73,7 @@ from helpers import (
     TESTING,
     VALIDATE,
     ContractCase,
+    Step,
     Verdict,
     Workflow,
     env_of,
@@ -99,8 +104,6 @@ LANES = (MAVEN, GRADLE, MERGE)
 
 SBOM_STEP = "Generate SBOM"
 SBOM_UPLOAD = "Upload SBOM artifacts"
-M2REPO_DOWNLOAD = "Download the m2repo"
-M2REPO_UPLOAD = "Upload the m2repo"
 M2REPO_UNPACK = "Unpack the m2repo"
 M2REPO_PACK = "Pack the m2repo"
 M2REPO_LOCATE_ID = "m2repo-path"
@@ -134,6 +137,7 @@ BUILD_ARTIFACT_PIN = "3ca6c9d63da49f604794b74af3c43c603175fc80"
 ARTEFACT_ACTIONS = (
     "actions/upload-artifact",
     "actions/download-artifact",
+    BUILD_ARTIFACT_ACTION,
     "lfreleng-actions/maven-build-action",
     "lfreleng-actions/gradle-build-action",
     GRYPE_ACTION,
@@ -984,7 +988,9 @@ class StaleM2repo(GuardCase):
     "Re-run failed jobs" reruns the publish with the build's outputs and
     artefact from an earlier attempt; publishing that m2repo could roll
     Nexus back. The guard compares the attempts, so the build must
-    record its own.
+    record its own. build-artifact-action's unpack refuses a manifest
+    from another run, but not one from an earlier attempt of this run,
+    so it does not stand in for the guard.
     """
 
     workflow = MERGE
@@ -1024,13 +1030,13 @@ class StaleM2repo(GuardCase):
             " attempt output",
         )
 
-    def check_guard_precedes_the_download(self, merge: Workflow) -> None:
-        """Fail unless the publish job refuses before it downloads."""
+    def check_guard_precedes_the_unpack(self, merge: Workflow) -> None:
+        """Fail unless the publish job refuses before it unpacks."""
         publish = job_of(merge, "publish")
         self.assertLess(
             step_index(publish, STALE),
-            step_index(publish, M2REPO_DOWNLOAD),
-            f"{MERGE}: the publish job downloads the m2repo before refusing"
+            step_index(publish, M2REPO_UNPACK),
+            f"{MERGE}: the publish job unpacks the m2repo before refusing"
             " a stale one",
         )
 
@@ -1042,9 +1048,9 @@ class StaleM2repo(GuardCase):
         """The guard's BUILD_ATTEMPT is the build job's output."""
         self.check_guard_reads_the_build_attempt(load_workflow(MERGE))
 
-    def test_guard_precedes_the_download(self) -> None:
-        """The guard runs before the m2repo download."""
-        self.check_guard_precedes_the_download(load_workflow(MERGE))
+    def test_guard_precedes_the_unpack(self) -> None:
+        """The guard runs before the m2repo unpack."""
+        self.check_guard_precedes_the_unpack(load_workflow(MERGE))
 
     def test_an_unrecorded_attempt_fails(self) -> None:
         """A build job without the attempt output fails the check."""
@@ -1062,15 +1068,15 @@ class StaleM2repo(GuardCase):
             self.check_guard_reads_the_build_attempt, merge
         )
 
-    def test_a_guard_after_the_download_fails(self) -> None:
-        """A guard moved behind the download fails the check."""
+    def test_a_guard_after_the_unpack_fails(self) -> None:
+        """A guard moved behind the unpack fails the check."""
         merge = load_workflow(MERGE)
         steps = steps_of(job_of(merge, "publish"))
         guard = steps.pop(step_index(job_of(merge, "publish"), STALE))
         steps.insert(
-            step_index(job_of(merge, "publish"), M2REPO_DOWNLOAD) + 1, guard
+            step_index(job_of(merge, "publish"), M2REPO_UNPACK) + 1, guard
         )
-        self.assert_check_fails(self.check_guard_precedes_the_download, merge)
+        self.assert_check_fails(self.check_guard_precedes_the_unpack, merge)
 
 
 class M2repoHandOff(ContractCase):
@@ -1254,34 +1260,28 @@ class M2repoHandOff(ContractCase):
             f"{MERGE}: the scan does not read the downloaded SBOM",
         )
 
-    @unittest.expectedFailure
     def test_build_packs_the_m2repo(self) -> None:
         """The build job packs the m2repo and publishes its identity."""
         self.check_pack(load_workflow(MERGE))
 
-    @unittest.expectedFailure
     def test_publish_unpacks_by_id_and_digest(self) -> None:
         """The publish job unpacks the m2repo by ID and expected-digest."""
         self.check_unpack(load_workflow(MERGE))
 
-    @unittest.expectedFailure
     def test_nothing_reads_the_m2repo_by_name(self) -> None:
         """Neither the lane nor its self-test reads the m2repo by name."""
         for path in (MERGE, TESTING):
             with self.subTest(workflow=path):
                 self.check_no_m2repo_by_name(path, load_workflow(path))
 
-    @unittest.expectedFailure
     def test_merge_check_unpacks_by_id(self) -> None:
         """The self-test's merge-check unpacks as the publish does."""
         self.check_merge_check(load_workflow(TESTING))
 
-    @unittest.expectedFailure
     def test_grype_reads_the_sbom_by_id(self) -> None:
         """The merge lane's Grype job downloads the SBOM by ID."""
         self.check_sbom_by_id(load_workflow(MERGE))
 
-    @unittest.expectedFailure
     def test_an_unpack_without_a_digest_fails(self) -> None:
         """A publish unpack with no expected-digest fails both checks."""
         merge = load_workflow(MERGE)
@@ -1291,7 +1291,6 @@ class M2repoHandOff(ContractCase):
         self.assert_check_fails(self.check_unpack, merge)
         self.assert_check_fails(self.check_no_m2repo_by_name, MERGE, merge)
 
-    @unittest.expectedFailure
     def test_an_unpack_by_name_fails(self) -> None:
         """A publish unpack with no artifact-id fails both checks."""
         merge = load_workflow(MERGE)
@@ -1325,14 +1324,12 @@ class M2repoHandOff(ContractCase):
         )
         self.assert_check_fails(self.check_pack, merge)
 
-    @unittest.expectedFailure
     def test_a_missing_workflow_output_fails(self) -> None:
         """A lane without the m2repo_artifact_id workflow output fails."""
         merge = load_workflow(MERGE)
         del merge["on"]["workflow_call"]["outputs"]["m2repo_artifact_id"]
         self.assert_check_fails(self.check_pack, merge)
 
-    @unittest.expectedFailure
     def test_a_pack_of_another_path_fails(self) -> None:
         """A pack of a path other than the located m2repo fails."""
         merge = load_workflow(MERGE)
@@ -1348,7 +1345,6 @@ class M2repoHandOff(ContractCase):
         steps.insert(step_index(build, LANDED), pack)
         self.assert_check_fails(self.check_pack, merge)
 
-    @unittest.expectedFailure
     def test_a_merge_check_by_name_fails(self) -> None:
         """A merge-check unpack without the call's ID fails the check."""
         testing = load_workflow(TESTING)
@@ -1356,7 +1352,6 @@ class M2repoHandOff(ContractCase):
         del with_of(unpack)["artifact-id"]
         self.assert_check_fails(self.check_merge_check, testing)
 
-    @unittest.expectedFailure
     def test_an_sbom_download_by_name_fails(self) -> None:
         """The merge lane's SBOM downloaded by name fails the check."""
         merge = load_workflow(MERGE)
@@ -1463,7 +1458,6 @@ class HandOffIdentity(ContractCase):
         script = run_of(load_workflow(MERGE), "grype", SBOM_IDENTITY)
         return run_script(script, {"SBOM_ARTIFACT_ID": artefact_id})
 
-    @unittest.expectedFailure
     def test_every_read_checks_its_identity(self) -> None:
         """Publish, merge-check and Grype each check before reading."""
         self.check_identity_guards(
@@ -1495,14 +1489,12 @@ class HandOffIdentity(ContractCase):
         )
 
     @needs_runner_tools
-    @unittest.expectedFailure
     def test_m2repo_identity_present(self) -> None:
         """A numeric ID and a lower-case SHA-256 digest pass."""
         verdict = self.run_m2repo_guard(self.GOOD_ID, self.GOOD_DIGEST)
         self.assert_passes(verdict, "m2repo identity present")
 
     @needs_runner_tools
-    @unittest.expectedFailure
     def test_m2repo_identity_missing_or_malformed(self) -> None:
         """An empty, non-numeric or malformed identity fails."""
         good_id, good_digest = self.GOOD_ID, self.GOOD_DIGEST
@@ -1520,13 +1512,11 @@ class HandOffIdentity(ContractCase):
                 self.assert_fails(verdict, "m2repo identity malformed")
 
     @needs_runner_tools
-    @unittest.expectedFailure
     def test_sbom_id_present(self) -> None:
         """A numeric SBOM artefact ID passes."""
         self.assert_passes(self.run_sbom_guard(self.GOOD_ID), "SBOM ID")
 
     @needs_runner_tools
-    @unittest.expectedFailure
     def test_sbom_id_missing_or_malformed(self) -> None:
         """An empty or non-numeric SBOM artefact ID fails."""
         for artefact_id in ("", "x1", f"{self.GOOD_ID}\n"):
@@ -1846,7 +1836,6 @@ class DeployLanded(GuardCase):
         self.assert_passes(verdict, "a dot-prefixed module beside another")
         self.assertEqual(verdict.value("file_count"), "3")
 
-    @unittest.expectedFailure
     def test_a_git_module_beside_another(self) -> None:
         """A module whose artifactId is .git, beside a valid one, fails.
 
@@ -1862,7 +1851,6 @@ class DeployLanded(GuardCase):
         )
         self.assert_fails(self.landed(tree), "a .git module beside another")
 
-    @unittest.expectedFailure
     def test_a_file_named_git_beside_an_artefact(self) -> None:
         """A file named .git in a SNAPSHOT version directory fails."""
         tree = self.m2repo("git-file", SNAPSHOT_JAR, f"{VERSION}/.git")
@@ -2222,7 +2210,9 @@ class ArtefactSuffixes(ContractCase):
     suffix. A name without it would hand one cell another cell's SBOM
     or, in the merge lane, another cell's m2repo to publish. The guard
     covers each step that names an artefact: upload-artifact,
-    download-artifact, and the actions the lanes pass a name to.
+    download-artifact, and the actions the lanes pass a name to,
+    build-artifact-action among them, whose unpack checks the name it
+    is given against the artefact it fetches by ID.
     repository-metadata-action takes no name; it suffixes its upload
     with a timestamp and a random part of its own, so it cannot collide.
     A grype-scan-action step in validate-only mode checks its inputs
@@ -2425,6 +2415,22 @@ class ArtefactSuffixes(ContractCase):
                 )
 
 
+def uploaded_name(step: Step) -> str | None:
+    """Return the artefact name ``step`` uploads, or None for no upload.
+
+    upload-artifact takes it as name, and a build-artifact-action pack
+    as artifact-name.
+    """
+    inputs = with_of(step)
+    if is_action(step, "actions/upload-artifact"):
+        return text(inputs.get("name"))
+    if is_action(step, BUILD_ARTIFACT_ACTION) and (
+        text(inputs.get("mode")) == "pack"
+    ):
+        return text(inputs.get("artifact-name"))
+    return None
+
+
 class CellEvidence(ContractCase):
     """Lanes: a cell publishes only evidence a re-run replaces.
 
@@ -2434,7 +2440,9 @@ class CellEvidence(ContractCase):
     attempt's upload survives beside the new one and the check reads
     both. The overwrite holds only with a suffix: without one, two
     calls in a run share a name, and an overwrite would delete the
-    other call's upload, which its Grype job fetches by ID.
+    other call's upload, which its Grype job fetches by ID. A
+    build-artifact-action pack uploads too, under its artifact-name,
+    and is held to the same rule.
 
     A toolchain record describes the build tool the cell provisioned,
     so it is taken only when every step before it succeeded; after a
@@ -2462,8 +2470,7 @@ class CellEvidence(ContractCase):
                 for path, workflow in lanes.items()
                 for job in jobs_of(workflow).values()
                 for step in steps_of(job)
-                if is_action(step, "actions/upload-artifact")
-                and text(with_of(step).get("name")) == name
+                if uploaded_name(step) == name
             ]
             self.assertTrue(
                 uploads, f"{TESTING} reads '{name}', which no lane uploads"
@@ -2508,7 +2515,7 @@ class CellEvidence(ContractCase):
             (GRADLE, JUNIT_UPLOAD),
             (GRADLE, SBOM_UPLOAD),
             (MERGE, RECORD_UPLOAD),
-            (MERGE, M2REPO_UPLOAD),
+            (MERGE, M2REPO_PACK),
         ):
             for value in (None, True):
                 with self.subTest(workflow=path, step=name, value=value):
