@@ -25,7 +25,9 @@
 - the compatibility checks' reading of each cell's latest build job
   before its records, and latest-attempt-check.sh's verdicts on it;
 - zizmor's impostor-commit ignores for the examples' placeholder SHA,
-  which only an online run applies, against the examples themselves.
+  which only an online run applies, against the examples themselves;
+- the check scripts' mode, 100644, and every workflow step running
+  one through its interpreter rather than the executable bit.
 
 Each structural check takes the workflow it judges, so the negative
 tests hand it a mutated copy and expect the assertion to fire.
@@ -36,6 +38,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import posixpath
 import re
 import shlex
 import subprocess
@@ -2584,6 +2587,156 @@ class ZizmorPlaceholderIgnores(ContractCase):
         }
         self.assert_check_fails(
             self.check_placeholders_have_entries, moved, self.entries
+        )
+
+
+INTERPRETERS = {".sh": "bash", ".py": "python3"}
+SCRIPT_PATH = re.compile(r"(?:\S*/)?\.github/scripts/[^\s;&|()<>]+(\.sh|\.py)")
+
+
+def shell_words(run: str) -> list[str]:
+    """Split a run: block into unquoted words and separator tokens.
+
+    Each run of ';', '&', '|', '(', ')', '<', '>' and newlines is one
+    token of its own, so a word never spans two commands. Backslash
+    continuations join their lines first, and every newline is doubled
+    because shlex swallows the newline that ends a comment.
+    """
+    text = run.replace("\\\n", " ").replace("\n", "\n\n")
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()<>\n")
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    return list(lexer)
+
+
+class ScriptInvocation(ContractCase):
+    """The check scripts: regular files, run through their interpreter.
+
+    The bot that drafts pull requests cannot write an executable file
+    or edit one, so every script under .github/scripts stays mode
+    100644, and every workflow step names the interpreter rather than
+    relying on the executable bit.
+    """
+
+    def check_modes(self, listing: str) -> None:
+        """Fail unless every entry of a 'git ls-files -s' listing is 100644."""
+        entries = [line.split(None, 3) for line in listing.splitlines()]
+        self.assertTrue(entries, ".github/scripts: git tracks no files")
+        for mode, _, _, path in entries:
+            self.assertEqual(
+                mode, "100644", f"{path}: mode {mode}, not a regular file"
+            )
+
+    def check_interpreters(self, workflows: dict[str, Workflow]) -> None:
+        """Fail when a run: block calls a script without its interpreter.
+
+        The word before each script path, after shell quoting and with
+        './' segments normalised away, must be the script's interpreter.
+        """
+        for path, workflow in workflows.items():
+            for mapping in mappings(workflow):
+                run = mapping.get("run")
+                if not isinstance(run, str) or ".github/scripts/" not in run:
+                    continue
+                try:
+                    words = shell_words(run)
+                except ValueError as error:
+                    self.fail(f"{path}: cannot split '{run.strip()}': {error}")
+                for index, word in enumerate(words):
+                    match = SCRIPT_PATH.fullmatch(posixpath.normpath(word))
+                    if not match:
+                        continue
+                    want = INTERPRETERS[match.group(1)]
+                    self.assertTrue(
+                        index > 0 and words[index - 1] == want,
+                        f"{path}: '{run.strip()}' runs {word} without"
+                        f" '{want}'",
+                    )
+
+    @staticmethod
+    def workflows() -> dict[str, Workflow]:
+        """Return every workflow under .github/workflows by path."""
+        directory = ROOT / ".github" / "workflows"
+        return {
+            str(path.relative_to(ROOT)): load_workflow(
+                str(path.relative_to(ROOT))
+            )
+            for pattern in ("*.yaml", "*.yml")
+            for path in sorted(directory.glob(pattern))
+        }
+
+    def test_no_script_is_executable(self) -> None:
+        """Every file git tracks under .github/scripts is mode 100644."""
+        listing = subprocess.run(
+            ["git", "ls-files", "-s", "--", ".github/scripts"],
+            check=True,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+        ).stdout
+        self.check_modes(listing)
+
+    def test_an_executable_script_fails(self) -> None:
+        """A script tracked as mode 100755 fails the check."""
+        self.assert_check_fails(
+            self.check_modes,
+            f"100755 {'0' * 40} 0\t.github/scripts/merge-check.sh\n",
+        )
+
+    def test_every_call_names_its_interpreter(self) -> None:
+        """Each workflow step runs a script through bash or python3."""
+        self.check_interpreters(self.workflows())
+
+    def check_call(self, call: str) -> None:
+        """Run check_interpreters on merge-check's step running *call*."""
+        testing = load_workflow(TESTING)
+        step = step_of(
+            job_of(testing, "merge-check"), "Assert the m2repo and the dry run"
+        )
+        step["run"] = call
+        self.check_interpreters({TESTING: testing})
+
+    def test_a_call_through_its_interpreter_passes(self) -> None:
+        """Quoting, './' prefixes and line continuations still pass."""
+        for call in (
+            "bash .github/scripts/merge-check.sh m2repo 0",
+            "bash ./.github/scripts/merge-check.sh m2repo 0",
+            'bash ".github/scripts/merge-check.sh" m2repo "${N}"',
+            "bash './.github/scripts/merge-check.sh' m2repo 0",
+            'bash "${GITHUB_WORKSPACE}/.github/scripts/merge-check.sh" m 0',
+            "bash \\\n  .github/scripts/merge-check.sh m2repo 0",
+            "set -e; bash .github/scripts/merge-check.sh m2repo 0",
+            "# the cell's check\nbash .github/scripts/merge-check.sh m 0",
+            "python3 .github/scripts/submodule-check.py junit-reports",
+            "echo 'see .github/scripts/merge-check.sh' >&2",
+        ):
+            with self.subTest(call=call):
+                self.check_call(call)
+
+    def test_a_call_without_its_interpreter_fails(self) -> None:
+        """A step running a script directly, or wrongly, fails the check."""
+        for call in (
+            ".github/scripts/merge-check.sh m2repo 0",
+            "./.github/scripts/merge-check.sh m2repo 0",
+            '".github/scripts/merge-check.sh" m2repo 0',
+            '"${GITHUB_WORKSPACE}/.github/scripts/merge-check.sh" m 0',
+            "python3 .github/scripts/merge-check.sh m2repo 0",
+            "bash .github/scripts/merge-check.sh;.github/scripts/x.sh",
+            "bash .github/scripts/merge-check.sh m && .github/scripts/x.sh",
+            "true | .github/scripts/merge-check.sh m2repo 0",
+            "x=$(.github/scripts/merge-check.sh m2repo 0)",
+            "echo bash # note\n.github/scripts/merge-check.sh m2repo 0",
+            "bash .github/scripts/merge-check.sh m\n.github/scripts/x.sh",
+            ".github/scripts/submodule-check.py junit-reports",
+            "bash .github/scripts/submodule-check.py junit-reports",
+        ):
+            with self.subTest(call=call):
+                self.assert_check_fails(self.check_call, call)
+
+    def test_an_unbalanced_quote_fails(self) -> None:
+        """A run: block shlex cannot split fails rather than passing."""
+        self.assert_check_fails(
+            self.check_call, "bash '.github/scripts/merge-check.sh m2repo 0"
         )
 
 
