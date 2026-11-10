@@ -23,8 +23,11 @@
 #   BOM-versioned and transitive dependencies with versions, so the
 #   SBOM step resolved the graph on that Maven and JDK.
 # merge: <dir> holds the maven-merge-toolchain and maven-merge-m2repo
-#   artefacts of every cell; each m2repo must pass merge-check.sh
-#   with jars built by the cell's JDK.
+#   artefacts of every cell; each m2repo artefact is the tar and
+#   manifest build-artifact-action packed, and the tree the tar holds
+#   must pass merge-check.sh with jars built by the cell's JDK. The
+#   artefacts are this run's own test data, so the tar is extracted
+#   as it is, into a scratch directory.
 #
 # Usage: compatibility-check.sh <verify|merge> <dir> <maven-json> <java-json>
 # The JSON arguments are java-maven-versions.yaml's two outputs.
@@ -53,7 +56,11 @@ fi
 
 case "${mode}" in
   verify) toolchain_artifact='maven-toolchain' ;;
-  merge) toolchain_artifact='maven-merge-toolchain' ;;
+  merge)
+    toolchain_artifact='maven-merge-toolchain'
+    scratch="$(mktemp -d)"
+    trap 'rm -rf -- "${scratch}"' EXIT
+    ;;
   *)
     echo "::error::Unknown mode: ${mode}"
     exit 1
@@ -112,9 +119,12 @@ for index in "${!lines[@]}"; do
         fi
         ;;
       merge)
-        m2repo="${dir}/maven-merge-m2repo${suffix}"
-        if [ ! -d "${m2repo}" ]; then
+        tar="${dir}/maven-merge-m2repo${suffix}/build-artifact.tar"
+        m2repo="${scratch}/m2repo${suffix}"
+        if [ ! -f "${tar}" ]; then
           fail "${cell}: no m2repo"
+        elif ! mkdir "${m2repo}" || ! tar -xf "${tar}" -C "${m2repo}"; then
+          fail "${cell}: the m2repo tar does not extract"
         elif ! bash "${here}/merge-check.sh" "${m2repo}" '' "${java}" \
           > "${dir}/.merge-check.log" 2>&1; then
           fail "${cell}: the m2repo fails merge-check.sh"

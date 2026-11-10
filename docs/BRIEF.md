@@ -486,15 +486,27 @@ and the publish job writes to it.
     release version cannot push it to the snapshot repository. It
     fails, too, on any entry that is neither a regular file nor a
     directory, the `m2repo` itself included: the checks read regular
-    files, while the upload follows symbolic links, so a link could
-    carry a release or out-of-group tree past them. The check cannot
-    see a single child POM redirecting its own deploy
+    files, so a link could carry whatever it names, a release or
+    out-of-group tree, past them into the publish. It fails on any
+    entry named `.git` as well: the pack skips those at any depth, and
+    an artifactId may be `.git`, so that module would drop from the
+    publish while its siblings landed. The check cannot see a single
+    child POM redirecting its own deploy
     while siblings land: no pinned action reports which modules skip
     the deploy, so that child's SNAPSHOT would go unpublished, with
     its metadata pruned rather than kept in the step summary's counts.
-11. Upload the `m2repo` as the `maven-merge-m2repo` artefact, hidden
-    files included, since an artifactId or version can begin with a
-    dot. It keeps three days, long enough to inspect a failed run
+11. Pack the `m2repo` with `build-artifact-action` (`pack`) as the
+    `maven-merge-m2repo` artefact: a reproducible tar of the tree and
+    a manifest listing every file's path, size and SHA-256. The pack
+    skips only entries named `.git`, which step 10 refuses, so hidden
+    files travel, since an artifactId or version can begin with a dot.
+    The action takes a path relative to the workspace, so a step
+    before it derives one from `maven-build-action`'s absolute
+    `m2repo_path` and fails on a path outside the workspace. The job
+    publishes the artefact's ID
+    and the manifest's SHA-256 as `m2repo_artifact_id` and
+    `m2repo_digest`, and the lane returns both to its caller. It
+    keeps three days, long enough to inspect a failed run
     without carrying a whole reactor's output for the default 90. The
     publish job refuses it in any later attempt, so a failed publish is
     retried with "Re-run all jobs"; see the publish job.
@@ -520,7 +532,7 @@ that trade-off stated.
 
 ### Publish job
 
-The job runs with `permissions: {}`: the artefact download reads this
+The job runs with `permissions: {}`: the unpack reads this
 run's artefacts through the runtime token, and nothing here checks out
 the repository or calls the API.
 
@@ -532,7 +544,25 @@ the repository or calls the API.
    records `github.run_attempt`, and the publish fails unless its own
    matches, telling the reader to use "Re-run all jobs", which rebuilds
    the branch head and fetches the metadata afresh.
-2. Download the `maven-merge-m2repo` artefact.
+   `build-artifact-action` refuses a manifest another run wrote, but
+   not one from an earlier attempt of this run, so it does not replace
+   this check.
+2. Unpack the `maven-merge-m2repo` artefact with
+   `build-artifact-action` (`unpack`), by the build job's
+   `m2repo_artifact_id` and `m2repo_digest`. A name resolves to the
+   newest artefact carrying it, which the project code the build job
+   runs, holding the runtime token, could have uploaded; the ID names
+   the one artefact the pack produced. The action extracts nothing
+   unless the manifest hashes to the expected digest, the manifest
+   names this run and the artefact, and the tar's members match the
+   manifest, so the tree Nexus receives is the tree the build job's
+   checks passed. Given no ID the action downloads by name, and given
+   no digest it skips the comparison; GitHub drops a job output that
+   matches a mask, which the build job's project code can register.
+   So a step before the unpack fails unless the ID is numeric and the
+   digest is 64 lower-case hex digits, and `merge-check` runs the same
+   step. The Grype job checks the SBOM's ID the same way, since a
+   download given no ID fetches every artefact in the run.
 3. Fail a live run that lacks `OP_SERVICE_ACCOUNT_TOKEN` or
    `VAULT_MAPPING_JSON`. The node lane warns and skips its publish
    instead, but a merge lane that skipped would leave the SNAPSHOT
@@ -669,7 +699,9 @@ credential and no network request, so the run needs no secrets. The
 job also sets `env_vars` to `{"MAVEN_OPTS": "-DprojectType=application"}`,
 which leaves the fixture's graph and the deploy alone.
 
-`merge-check` then downloads the `m2repo` artefact and asserts that
+`merge-check` then unpacks the `m2repo` artefact by the lane's
+`m2repo_artifact_id` and `m2repo_digest` outputs, as the publish job
+does, and asserts that
 each of the fixture's four artefacts (`test-maven-project`,
 `test-maven-parent`, `test-maven-core`, `test-maven-app`) deployed a
 timestamped SNAPSHOT at `buildNumber` 1 with its version-level
@@ -714,6 +746,7 @@ The lane pins released versions of the building blocks it depends on:
 | `nexus-publish-action`           | v1.3.0  | Retries, metadata last and held back; `dry_run`                                |
 | `maven-build-action`             | v0.5.3  | The tested `m2repo` contract; a deploy path callers cannot override            |
 | `credential-load-action`         | v2.0.4  | The publish credential, with `export_env: false`                               |
+| `build-artifact-action`          | v0.0.3  | The `m2repo` hand-off, packed and unpacked by artefact ID and digest           |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -1031,6 +1064,7 @@ this repository wires them together:
 | `maven-xml-settings-action`      | Merge, release | Nexus `settings.xml` synthesis                                   |
 | `maven-snapshot-metadata-action` | Merge          | Seed and prune SNAPSHOT metadata around the deploy               |
 | `nexus-publish-action`           | Merge          | Upload the SNAPSHOT `m2repo` to Nexus                            |
+| `build-artifact-action`          | Merge          | Hand the `m2repo` from build to publish by ID and digest         |
 | `credential-load-action`         | Merge, release | Load a publish or signing credential into one job                |
 | `maven-stage-prep-action`        | Release        | Version the reactor for a release build                          |
 | `nexus-staging-action`           | Release        | Stage, then promote, in Nexus2                                   |
@@ -1133,7 +1167,10 @@ existing name, and `tests/test_wiring.py` fails on any lane-chosen name
 without the suffix. The Grype job's downloads name nothing: each
 fetches one upload by the `artifact-id` a job of the lane published,
 and the guard holds such a download to that output, whose upload it
-checks in its turn.
+checks in its turn. The merge lane's publish job unpacks its
+`m2repo` the same way, by the pack's ID and digest; the name it also
+passes is one the action checks against the manifest, not one it
+looks up.
 
 A matrix of reusable workflow calls also hands its caller one call's
 outputs alone, so per-call evidence has to travel as artefacts. A call

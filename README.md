@@ -421,25 +421,41 @@ starts, sets up the JDK and Maven the deploy uses, then:
    copy. Release versions are the next check's to refuse;
 4. fails when the `m2repo` holds no deployed artefact, the trace of a
    POM that redirects the deploy itself, holds a file outside the
-   reactor's group paths, holds a release version, or holds a symbolic
-   link, which the upload would follow past these checks;
-5. uploads the `m2repo` as the `maven-merge-m2repo` artefact, kept
-   three days, for this attempt's publish job alone;
+   reactor's group paths, holds a release version, holds a symbolic
+   link, which would carry whatever it names past these checks into
+   the publish, or holds an entry named `.git`, which the pack skips;
+5. packs the `m2repo` with `build-artifact-action` (`pack`) as the
+   `maven-merge-m2repo` artefact, kept three days: a reproducible tar
+   and a manifest of every file's SHA-256, hidden files included. The
+   job publishes the artefact's ID and the manifest's digest as outputs
+   for this attempt's publish job alone;
 6. generates the SBOM, whose failure never stops the publish.
 
-The `publish` job downloads the artefact, loads the Nexus password with
-`credential-load-action`, and uploads the whole `m2repo` in one
-`nexus-publish-action` run, covering every `groupId` the reactor
-deploys. That run sends each `maven-metadata.xml` after the files it
-describes, and holds them back when any of those uploads fails, so an
-artefact missing from one group leaves no group's metadata advertising
-it. A failure among the metadata uploads holds back the rest, but
-cannot recall metadata already sent.
+The `publish` job unpacks the artefact with `build-artifact-action`
+(`unpack`) by that ID and digest, not by name: a name resolves to the
+newest artefact carrying it, which the project code the build job runs
+could have uploaded, while `unpack` fetches the one artefact the pack
+produced and extracts nothing unless its manifest hashes to the expected
+digest and the tar matches the manifest. GitHub drops a job output that
+matches a registered mask, and given no ID or digest the action would
+fall back to the name or skip the comparison, so the job first fails
+unless the ID is numeric and the digest a SHA-256. The merge lane's
+Grype job likewise fails on a missing SBOM artefact ID, where a download
+by no ID would fetch every artefact in the run. The publish job then
+loads the Nexus password with `credential-load-action`, and uploads the
+whole `m2repo` in one `nexus-publish-action` run, covering every
+`groupId` the reactor deploys. That run sends each `maven-metadata.xml`
+after the files it describes, and holds them back when any of those
+uploads fails, so an artefact missing from one group leaves no group's
+metadata advertising it. A failure among the metadata uploads holds back
+the rest, but cannot recall metadata already sent.
 
 Retry a failed publish with **Re-run all jobs**. The publish job fails
 when "Re-run failed jobs" hands it an `m2repo` from an earlier
 attempt: if another run had published since, that older tree would
-move the SNAPSHOT back to an older `buildNumber`.
+move the SNAPSHOT back to an older `buildNumber`. The `unpack` does not
+replace this check: it refuses a manifest from another run, but not
+one from an earlier attempt of the same run.
 A live run fails when `OP_SERVICE_ACCOUNT_TOKEN` or `VAULT_MAPPING_JSON`
 is missing, where the node lane warns and skips: a merge lane that
 skipped its publish would leave the SNAPSHOT behind the branch with
@@ -520,17 +536,21 @@ reactor-shaping options `maven-snapshot-metadata-action` accepts, and
 
 <!-- markdownlint-enable MD013 -->
 
-| Output              | Description                                     |
-| ------------------- | ----------------------------------------------- |
-| `publication_count` | Files the publish job uploaded                  |
-| `failed_count`      | Files that failed to upload                     |
-| `dry_run_count`     | Files a dry run would upload (`0` otherwise)    |
+| Output               | Description                                  |
+| -------------------- | -------------------------------------------- |
+| `publication_count`  | Files the publish job uploaded               |
+| `failed_count`       | Files that failed to upload                  |
+| `dry_run_count`      | Files a dry run would upload (`0` otherwise) |
+| `m2repo_artifact_id` | ID of the packed `m2repo` artefact           |
+| `m2repo_digest`      | SHA-256 of that artefact's manifest          |
 
 <!-- markdownlint-enable MD013 -->
 
 The `testing.yaml` self-test runs the lane over `test-maven-project`
 with `dry_run`, reading metadata from ONAP's Nexus, where the fixture's
-group has never published. A `merge-check` job then asserts each
+group has never published. A `merge-check` job then unpacks the
+`m2repo` by the call's `m2repo_artifact_id` and `m2repo_digest`
+outputs, as the publish job does, and asserts each
 module's timestamped SNAPSHOT at `buildNumber` 1 with its metadata, and
 a dry run covering every file in the `m2repo`. A `merge-env-check` job
 asserts that the lane's own `env_vars` export ran and that the value
@@ -570,7 +590,10 @@ chooses, for what it uploads or reads back, ends with it, so the calls
 cannot read each other's reports, SBOM or `m2repo`. Matrix calls run
 as separate jobs, and while `upload-artifact` refuses a name already
 used within one job, uploads from separate jobs coexist under one
-name, and `download-artifact` takes the newest without an error.
+name, and `download-artifact` takes the newest without an error. The
+merge lane's publish and Grype jobs read their `m2repo` and SBOM by
+artefact ID, which no other call can share, but a caller or check
+reading the artefacts by name or pattern still relies on the suffix.
 `repository-metadata-action` gives its own upload a unique name
 already. A single call leaves the suffix empty and keeps the names
 given in this document.

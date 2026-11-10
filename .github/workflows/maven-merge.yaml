@@ -166,9 +166,11 @@ on:
       # upload-artifact refuses a name already used within one job, but
       # uploads from separate jobs coexist under one name, and
       # download-artifact then takes the newest. Two calls of this
-      # workflow in one run, as a matrix makes, are separate jobs, so
-      # each would publish whichever m2repo landed last. Each call sets
-      # its own suffix; a single call leaves it empty.
+      # workflow in one run, as a matrix makes, are separate jobs. The
+      # publish and Grype jobs read theirs by ID, but a caller reading
+      # the artefacts by name or pattern could not tell the calls'
+      # apart. Each call sets its own suffix; a single call leaves it
+      # empty.
       artifact_suffix:
         description: >-
           Appended to the name of every artefact this workflow names
@@ -362,6 +364,16 @@ on:
       dry_run_count:
         description: 'Number of files a dry run would upload (0 otherwise)'
         value: ${{ jobs.publish.outputs.dry_run_count }}
+      m2repo_artifact_id:
+        description: >-
+          ID of the packed m2repo artefact the build job handed to the
+          publish job, for a caller that unpacks it by ID
+        value: ${{ jobs.build.outputs.m2repo_artifact_id }}
+      m2repo_digest:
+        description: >-
+          SHA-256 of the packed m2repo artefact's manifest, the
+          expected-digest an unpack of it must match
+        value: ${{ jobs.build.outputs.m2repo_digest }}
 
 permissions: {}
 
@@ -592,8 +604,15 @@ jobs:
       # The attempt that built the m2repo hand-off; publish refuses an
       # older one.
       attempt: ${{ github.run_attempt }}
+      # The packed m2repo's identity: publish unpacks this artefact and
+      # no other, and only if its manifest hashes to this digest.
+      m2repo_artifact_id: ${{ steps.pack-m2repo.outputs.artifact-id }}
+      m2repo_digest: ${{ steps.pack-m2repo.outputs.digest }}
       # Read by the Grype job.
       sbom_uploaded: ${{ steps.upload-sbom.outcome == 'success' }}
+      # The ID that upload returned, so the Grype job fetches that
+      # artefact and no other of the same name.
+      sbom_artifact_id: ${{ steps.upload-sbom.outputs.artifact-id }}
     permissions:
       contents: read
     timeout-minutes: ${{ inputs.build_timeout_minutes }}
@@ -1023,7 +1042,7 @@ jobs:
       # seeded metadata in place. v0.5.3 sets the deploy repository
       # after every caller argument and refuses a caller's own naming
       # anywhere else, so no input can redirect it. Coverage belongs to
-      # the verify lane, and this workflow uploads the m2repo itself. No
+      # the verify lane, and this workflow packs the m2repo itself. No
       # clean phase: the checkout is fresh (actions/checkout removes
       # untracked build output from a reused workspace) and the m2repo
       # check above refuses a tracked one, so clean has nothing to
@@ -1093,6 +1112,10 @@ jobs:
       # this lane must never push a release to the snapshot repository.
       # Files are judged by where they sit, not by a name pattern a
       # deployable file could also match.
+      #
+      # And fail on any entry named .git: the pack below skips those,
+      # so a module whose artifactId is .git would drop silently from
+      # the hand-off while every other module published.
       - name: 'Check the deploy landed in the m2repo'
         id: landed
         shell: bash
@@ -1110,15 +1133,21 @@ jobs:
             echo '::error::The deploy produced no m2repo.'
             exit 1
           fi
-          # The checks below read regular files alone, while the upload
-          # follows symbolic links: a link would carry whatever it names
-          # past them into the publish. A deploy writes regular files
-          # and directories, so refuse anything else, the root included.
+          # The checks below read regular files alone, while a symbolic
+          # link would carry whatever it names past them into the
+          # publish. A deploy writes regular files and directories, so
+          # refuse anything else, the root included.
           odd="$(find "${M2REPO_PATH}" ! -type f ! -type d -print | wc -l)"
           if [ "${odd}" -ne 0 ]; then
             echo "::error::${odd} entr(ies) in the m2repo are neither" \
               'regular files nor directories (symbolic links, say);' \
               'the hand-off would follow them past these checks.'
+            exit 1
+          fi
+          git_entries="$(find "${M2REPO_PATH}" -name .git -print | wc -l)"
+          if [ "${git_entries}" -ne 0 ]; then
+            echo "::error::${git_entries} entr(ies) in the m2repo are" \
+              "named .git, which the hand-off's pack never carries."
             exit 1
           fi
           total=0
@@ -1212,28 +1241,52 @@ jobs:
           echo "file_count=${total}" >> "${GITHUB_OUTPUT}"
           echo "${deployed} deployed artefact(s), ${total} file(s) ✅"
 
+      # build-artifact-action takes a path relative to the workspace,
+      # and maven-build-action reports an absolute one. Derive the
+      # relative path from that output, refusing one outside the
+      # workspace, so the pack reads the tree the checks above judged.
+      - name: 'Locate the m2repo in the workspace'
+        id: m2repo-path
+        shell: bash
+        env:
+          M2REPO_PATH: ${{ steps.build.outputs.m2repo_path }}
+        run: |
+          set -euo pipefail
+          relative="${M2REPO_PATH#"${GITHUB_WORKSPACE}"/}"
+          if [ "${relative}" = "${M2REPO_PATH}" ] \
+            || [ -z "${relative}" ]; then
+            echo "::error::The m2repo '${M2REPO_PATH}' does not lie" \
+              'inside the workspace.'
+            exit 1
+          fi
+          echo "path=${relative}" >> "${GITHUB_OUTPUT}"
+
       # The hand-off to the publish job, kept three days, long enough to
       # inspect a failed run without carrying a whole reactor's output
       # for the default 90. A failed publish is retried by re-running
       # every job, never the publish alone; see 'Refuse a stale m2repo'.
-      - name: 'Upload the m2repo'
+      # pack writes a reproducible tar and a manifest of every file's
+      # SHA-256, and reports the artefact's ID and the manifest's
+      # digest, which publish verifies before it extracts anything. It
+      # skips only entries named '.git', which the landed check above
+      # refuses, so every other path beginning with a dot (an
+      # artifactId or version may) stays in the hand-off it counted.
+      - name: 'Pack the m2repo'
+        id: pack-m2repo
         # yamllint disable-line rule:line-length
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        uses: lfreleng-actions/build-artifact-action@3ca6c9d63da49f604794b74af3c43c603175fc80  # v0.0.3
         with:
+          mode: 'pack'
           # Lane-specific: a caller's run shares one artifact namespace
           # across every lane it calls.
-          name: maven-merge-m2repo${{ inputs.artifact_suffix }}
+          artifact-name: maven-merge-m2repo${{ inputs.artifact_suffix }}
+          path: ${{ steps.m2repo-path.outputs.path }}
           # With a suffix the name is this cell's alone, so a re-run
           # replaces the upload of an earlier attempt rather than adding
           # a second the compatibility check would read beside it.
           overwrite: ${{ inputs.artifact_suffix != '' }}
-          path: ${{ steps.build.outputs.m2repo_path }}
-          # A Maven artifactId or version can begin with a dot; by
-          # default such paths would drop out of the hand-off while the
-          # landed check above counted them.
-          include-hidden-files: true
-          retention-days: 3
-          if-no-files-found: error
+          retention-days: '3'
+          fail-on-empty: 'true'
 
       # A caller running several calls in one run reads the JDK from
       # the deployed jars, but nothing the lane uploads records which
@@ -1269,7 +1322,7 @@ jobs:
 
       # --- SBOM (informational) ---
       # Generated from the dependency graph the deploy resolved, as the
-      # verify lane does, after the hand-off upload. continue-on-error
+      # verify lane does, after the hand-off pack. continue-on-error
       # keeps a failure here from failing the job, which would stop the
       # publish; the SBOM describes the SNAPSHOT, it does not gate it.
       # untrusted_checkout is 'false' for the verify lane's reason: the
@@ -1402,6 +1455,10 @@ jobs:
       # SNAPSHOT back to an older buildNumber. So a publish refuses an
       # m2repo from an earlier attempt; "Re-run all jobs" rebuilds the
       # branch head and fetches the metadata afresh.
+      #
+      # The unpack below does not replace this guard: it refuses a
+      # manifest from another run, but not one from an earlier attempt
+      # of this run, which is the rollback this step prevents.
       - name: 'Refuse a stale m2repo'
         shell: bash
         env:
@@ -1418,14 +1475,49 @@ jobs:
             exit 1
           fi
 
+      # unpack given no artifact-id downloads by name, and given no
+      # expected-digest skips the comparison. GitHub drops a job output
+      # that matches a registered mask, and the build job runs project
+      # code, which can register one; so a missing or malformed identity
+      # fails here rather than reach Nexus unchecked.
+      - name: 'Check the m2repo identity'
+        shell: bash
+        env:
+          M2REPO_ARTIFACT_ID: ${{ needs.build.outputs.m2repo_artifact_id }}
+          M2REPO_DIGEST: ${{ needs.build.outputs.m2repo_digest }}
+        run: |
+          # Check the m2repo identity
+          set -euo pipefail
+          if ! [[ "${M2REPO_ARTIFACT_ID}" =~ ^[0-9]+$ ]]; then
+            echo '::error::The build job reported no numeric m2repo' \
+              'artefact ID; refusing to unpack by name.'
+            exit 1
+          fi
+          if ! [[ "${M2REPO_DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo '::error::The build job reported no SHA-256 m2repo' \
+              'manifest digest; refusing to unpack unchecked.'
+            exit 1
+          fi
+          echo 'The m2repo identity is present ✅'
+
       # The tree the build job deployed and pruned; this job builds
-      # nothing and runs none of the project's code.
-      - name: 'Download the m2repo'
+      # nothing and runs none of the project's code. The artefact is
+      # fetched by the ID its pack returned, never by name: a name
+      # resolves to the newest artefact carrying it, and the build job
+      # runs project code, which could upload one of its own. unpack
+      # extracts nothing unless the manifest hashes to the digest pack
+      # reported and the tar matches the manifest, refuses links that
+      # escape, devices and paths outside m2repo, and creates m2repo
+      # itself, which a fresh workspace does not hold.
+      - name: 'Unpack the m2repo'
         # yamllint disable-line rule:line-length
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        uses: lfreleng-actions/build-artifact-action@3ca6c9d63da49f604794b74af3c43c603175fc80  # v0.0.3
         with:
-          name: maven-merge-m2repo${{ inputs.artifact_suffix }}
-          path: m2repo
+          mode: 'unpack'
+          artifact-name: maven-merge-m2repo${{ inputs.artifact_suffix }}
+          artifact-id: ${{ needs.build.outputs.m2repo_artifact_id }}
+          expected-digest: ${{ needs.build.outputs.m2repo_digest }}
+          destination: 'm2repo'
 
       # A merge lane that skipped its publish would leave the SNAPSHOT
       # behind the branch without failing, so a live run without the
@@ -1563,18 +1655,43 @@ jobs:
           allowed-endpoints: >
             ${{ env.CONNECTION_ALLOW_LIST }}
 
+      # download-artifact given no artifact-ids downloads every artefact
+      # in the run, and merge-multiple would mix other lanes' SBOMs into
+      # this one. The ID can go missing after a successful upload when
+      # it matches a mask the project code registered, so refuse that.
+      - name: 'Check the SBOM artefact ID'
+        shell: bash
+        env:
+          SBOM_ARTIFACT_ID: ${{ needs.build.outputs.sbom_artifact_id }}
+        run: |
+          # Check the SBOM artefact ID
+          set -euo pipefail
+          if ! [[ "${SBOM_ARTIFACT_ID}" =~ ^[0-9]+$ ]]; then
+            echo '::error::The build job reported no numeric SBOM' \
+              'artefact ID; refusing to download every artefact.'
+            exit 1
+          fi
+          echo 'The SBOM artefact ID is present ✅'
+
+      # The SBOM arrives by the ID its upload returned, never by name,
+      # as in the verify lane. A download by ID takes no name, and
+      # without merge-multiple would nest the files under the
+      # artefact's; with it they land in the path directly, where the
+      # audit step below reads them.
       - name: 'Download SBOM artefact'
         # yamllint disable-line rule:line-length
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
         with:
-          name: sbom-files-maven-merge${{ inputs.artifact_suffix }}
+          artifact-ids: ${{ needs.build.outputs.sbom_artifact_id }}
+          merge-multiple: true
+          path: sbom
 
       - name: 'Grype audit SBOM'
         id: grype-audit
         # yamllint disable-line rule:line-length
         uses: lfreleng-actions/grype-scan-action@f65dca2762823cfc8f376e32fee9baa6f3292696  # v0.6.2
         with:
-          sbom: 'sbom-cyclonedx.json'
+          sbom: 'sbom/sbom-cyclonedx.json'
           fail-on: ${{ inputs.grype_fail_on }}
           # The scan reports, never gates, whatever the policy says.
           permit-fail: 'true'

@@ -196,12 +196,40 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: 'Download the m2repo'
+      # The publish job's own check: with either output missing, the
+      # unpack below would fall back to the name or skip the digest.
+      - name: 'Check the m2repo identity'
+        shell: bash
+        env:
+          # yamllint disable-line rule:line-length
+          M2REPO_ARTIFACT_ID: ${{ needs.maven-merge.outputs.m2repo_artifact_id }}
+          M2REPO_DIGEST: ${{ needs.maven-merge.outputs.m2repo_digest }}
+        run: |
+          # Check the m2repo identity
+          set -euo pipefail
+          if ! [[ "${M2REPO_ARTIFACT_ID}" =~ ^[0-9]+$ ]]; then
+            echo '::error::The build job reported no numeric m2repo' \
+              'artefact ID; refusing to unpack by name.'
+            exit 1
+          fi
+          if ! [[ "${M2REPO_DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo '::error::The build job reported no SHA-256 m2repo' \
+              'manifest digest; refusing to unpack unchecked.'
+            exit 1
+          fi
+          echo 'The m2repo identity is present ✅'
+
+      # By the ID and digest the lane's pack reported, as its publish
+      # job unpacks it.
+      - name: 'Unpack the m2repo'
         # yamllint disable-line rule:line-length
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        uses: lfreleng-actions/build-artifact-action@3ca6c9d63da49f604794b74af3c43c603175fc80  # v0.0.3
         with:
-          name: maven-merge-m2repo
-          path: m2repo
+          mode: 'unpack'
+          artifact-name: 'maven-merge-m2repo'
+          artifact-id: ${{ needs.maven-merge.outputs.m2repo_artifact_id }}
+          expected-digest: ${{ needs.maven-merge.outputs.m2repo_digest }}
+          destination: 'm2repo'
 
       - name: 'Assert the m2repo and the dry run'
         shell: bash

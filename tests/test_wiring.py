@@ -10,6 +10,10 @@
 - the merge lane's input validation, including the branch its
   checkouts build, and its m2repo checks, whose reject paths guard the
   publish;
+- the merge lane's m2repo hand-off: packed by build-artifact-action,
+  unpacked by publish and by the self-test by ID and expected-digest,
+  never read by name, each read refusing a missing ID or digest; and
+  its SBOM read by ID, refusing a missing one;
 - the merge lane's coordinate check: prune keeps it on, and the
   testing.yaml job proving the rejection runs the lane's own pin;
 - the merge lane's copy of maven-build-action's workspace placeholder
@@ -69,6 +73,7 @@ from helpers import (
     TESTING,
     VALIDATE,
     ContractCase,
+    Step,
     Verdict,
     Workflow,
     env_of,
@@ -81,6 +86,7 @@ from helpers import (
     outputs_of,
     present,
     run_of,
+    section,
     step_index,
     step_of,
     step_with_id,
@@ -98,8 +104,14 @@ LANES = (MAVEN, GRADLE, MERGE)
 
 SBOM_STEP = "Generate SBOM"
 SBOM_UPLOAD = "Upload SBOM artifacts"
-M2REPO_DOWNLOAD = "Download the m2repo"
-M2REPO_UPLOAD = "Upload the m2repo"
+M2REPO_UNPACK = "Unpack the m2repo"
+M2REPO_PACK = "Pack the m2repo"
+M2REPO_LOCATE_ID = "m2repo-path"
+M2REPO_NAME = "maven-merge-m2repo${{ inputs.artifact_suffix }}"
+NEXUS_PUBLISH = "Publish the m2repo to Nexus"
+SBOM_DOWNLOAD = "Download SBOM artefact"
+M2REPO_IDENTITY = "Check the m2repo identity"
+SBOM_IDENTITY = "Check the SBOM artefact ID"
 JUNIT_UPLOAD = "Upload JUnit reports"
 RECORD = "Record the toolchain"
 RECORD_UPLOAD = "Upload the toolchain record"
@@ -120,9 +132,12 @@ EXPAND_VENDORED = (
 )
 METADATA_ACTION = "lfreleng-actions/maven-snapshot-metadata-action"
 GRYPE_ACTION = "lfreleng-actions/grype-scan-action"
+BUILD_ARTIFACT_ACTION = "lfreleng-actions/build-artifact-action"
+BUILD_ARTIFACT_PIN = "3ca6c9d63da49f604794b74af3c43c603175fc80"
 ARTEFACT_ACTIONS = (
     "actions/upload-artifact",
     "actions/download-artifact",
+    BUILD_ARTIFACT_ACTION,
     "lfreleng-actions/maven-build-action",
     "lfreleng-actions/gradle-build-action",
     GRYPE_ACTION,
@@ -973,7 +988,9 @@ class StaleM2repo(GuardCase):
     "Re-run failed jobs" reruns the publish with the build's outputs and
     artefact from an earlier attempt; publishing that m2repo could roll
     Nexus back. The guard compares the attempts, so the build must
-    record its own.
+    record its own. build-artifact-action's unpack refuses a manifest
+    from another run, but not one from an earlier attempt of this run,
+    so it does not stand in for the guard.
     """
 
     workflow = MERGE
@@ -1013,13 +1030,13 @@ class StaleM2repo(GuardCase):
             " attempt output",
         )
 
-    def check_guard_precedes_the_download(self, merge: Workflow) -> None:
-        """Fail unless the publish job refuses before it downloads."""
+    def check_guard_precedes_the_unpack(self, merge: Workflow) -> None:
+        """Fail unless the publish job refuses before it unpacks."""
         publish = job_of(merge, "publish")
         self.assertLess(
             step_index(publish, STALE),
-            step_index(publish, M2REPO_DOWNLOAD),
-            f"{MERGE}: the publish job downloads the m2repo before refusing"
+            step_index(publish, M2REPO_UNPACK),
+            f"{MERGE}: the publish job unpacks the m2repo before refusing"
             " a stale one",
         )
 
@@ -1031,9 +1048,9 @@ class StaleM2repo(GuardCase):
         """The guard's BUILD_ATTEMPT is the build job's output."""
         self.check_guard_reads_the_build_attempt(load_workflow(MERGE))
 
-    def test_guard_precedes_the_download(self) -> None:
-        """The guard runs before the m2repo download."""
-        self.check_guard_precedes_the_download(load_workflow(MERGE))
+    def test_guard_precedes_the_unpack(self) -> None:
+        """The guard runs before the m2repo unpack."""
+        self.check_guard_precedes_the_unpack(load_workflow(MERGE))
 
     def test_an_unrecorded_attempt_fails(self) -> None:
         """A build job without the attempt output fails the check."""
@@ -1051,15 +1068,461 @@ class StaleM2repo(GuardCase):
             self.check_guard_reads_the_build_attempt, merge
         )
 
-    def test_a_guard_after_the_download_fails(self) -> None:
-        """A guard moved behind the download fails the check."""
+    def test_a_guard_after_the_unpack_fails(self) -> None:
+        """A guard moved behind the unpack fails the check."""
         merge = load_workflow(MERGE)
         steps = steps_of(job_of(merge, "publish"))
         guard = steps.pop(step_index(job_of(merge, "publish"), STALE))
         steps.insert(
-            step_index(job_of(merge, "publish"), M2REPO_DOWNLOAD) + 1, guard
+            step_index(job_of(merge, "publish"), M2REPO_UNPACK) + 1, guard
         )
-        self.assert_check_fails(self.check_guard_precedes_the_download, merge)
+        self.assert_check_fails(self.check_guard_precedes_the_unpack, merge)
+
+
+class M2repoHandOff(ContractCase):
+    """Merge lane: the m2repo reaches publish by identity, not by name.
+
+    The build job packs the m2repo with build-artifact-action and
+    publishes the artefact's ID and manifest digest as job and workflow
+    outputs. The publish job, which holds the Nexus credential, unpacks
+    that artefact alone, by ID, and only when its manifest hashes to
+    that digest: a download by name resolves to the newest artefact
+    carrying it, which the build job's project code could have
+    uploaded. Nothing in the lane reads the m2repo by name, and the
+    self-test's merge-check unpacks it as publish does. The Grype job
+    reads the SBOM by ID too, as the verify lanes do.
+    """
+
+    def check_pack(self, merge: Workflow) -> None:
+        """Fail unless build packs the landed m2repo and reports its ID."""
+        build = job_of(merge, "build")
+        pack = step_of(build, M2REPO_PACK)
+        self.assertEqual(
+            uses_of(pack),
+            f"{BUILD_ARTIFACT_ACTION}@{BUILD_ARTIFACT_PIN}",
+            f"{MERGE}: '{M2REPO_PACK}' does not run the pinned action",
+        )
+        locate = step_with_id(build, M2REPO_LOCATE_ID)
+        self.assertIsNotNone(
+            locate, f"{MERGE}: no step '{M2REPO_LOCATE_ID}' locates the m2repo"
+        )
+        assert locate is not None
+        self.assertEqual(
+            text(env_of(locate).get("M2REPO_PATH")),
+            "${{ steps.build.outputs.m2repo_path }}",
+            f"{MERGE}: the pack's path is not derived from m2repo_path",
+        )
+        self.assertEqual(
+            {key: text(value) for key, value in with_of(pack).items()},
+            {
+                "mode": "pack",
+                "artifact-name": M2REPO_NAME,
+                "path": f"${{{{ steps.{M2REPO_LOCATE_ID}.outputs.path }}}}",
+                "overwrite": OVERWRITE,
+                "retention-days": "3",
+                "fail-on-empty": "true",
+            },
+            f"{MERGE}: '{M2REPO_PACK}'",
+        )
+        self.assertLess(
+            step_index(build, LANDED),
+            step_index(build, M2REPO_PACK),
+            f"{MERGE}: '{M2REPO_PACK}' runs before '{LANDED}'",
+        )
+        pack_id = text(pack.get("id")) or "?"
+        outputs = outputs_of(build)
+        for output, key in (
+            ("m2repo_artifact_id", "artifact-id"),
+            ("m2repo_digest", "digest"),
+        ):
+            self.assertEqual(
+                text(outputs.get(output)),
+                f"${{{{ steps.{pack_id}.outputs.{key} }}}}",
+                f"{MERGE}: build's {output} is not the pack's {key}",
+            )
+            value = section(
+                section(
+                    section(section(merge, "on"), "workflow_call"), "outputs"
+                ),
+                output,
+            ).get("value")
+            self.assertEqual(
+                text(value),
+                f"${{{{ jobs.build.outputs.{output} }}}}",
+                f"{MERGE}: workflow output {output} is not build's",
+            )
+
+    def check_unpack(self, merge: Workflow) -> None:
+        """Fail unless publish unpacks by ID and digest where Nexus reads."""
+        publish = job_of(merge, "publish")
+        unpack = step_of(publish, M2REPO_UNPACK)
+        self.assertEqual(
+            uses_of(unpack),
+            f"{BUILD_ARTIFACT_ACTION}@{BUILD_ARTIFACT_PIN}",
+            f"{MERGE}: '{M2REPO_UNPACK}' does not run the pinned action",
+        )
+        self.assertEqual(
+            {key: text(value) for key, value in with_of(unpack).items()},
+            {
+                "mode": "unpack",
+                "artifact-name": M2REPO_NAME,
+                "artifact-id": "${{ needs.build.outputs.m2repo_artifact_id }}",
+                "expected-digest": "${{ needs.build.outputs.m2repo_digest }}",
+                "destination": "m2repo",
+            },
+            f"{MERGE}: '{M2REPO_UNPACK}'",
+        )
+        self.assertEqual(
+            text(with_of(step_of(publish, NEXUS_PUBLISH)).get("files_path")),
+            "${{ github.workspace }}/m2repo",
+            f"{MERGE}: '{NEXUS_PUBLISH}' does not read the unpacked m2repo",
+        )
+        self.assertLess(
+            step_index(publish, M2REPO_UNPACK),
+            step_index(publish, NEXUS_PUBLISH),
+            f"{MERGE}: '{NEXUS_PUBLISH}' runs before '{M2REPO_UNPACK}'",
+        )
+
+    def check_no_m2repo_by_name(self, path: str, workflow: Workflow) -> None:
+        """Fail unless every read of the m2repo goes by ID and digest.
+
+        No download-artifact step may name or match the m2repo
+        artefact, and every build-artifact-action unpack must carry
+        both an artifact-id and an expected-digest.
+        """
+        for job_id, job in jobs_of(workflow).items():
+            for step in steps_of(job):
+                label = f"{path}: {job_id} '{text(step.get('name'))}'"
+                inputs = with_of(step)
+                if is_action(step, "actions/download-artifact"):
+                    named = text(present(inputs, "name", "pattern"))
+                    self.assertNotIn(
+                        "maven-merge-m2repo",
+                        named,
+                        f"{label} downloads the m2repo by name",
+                    )
+                if is_action(step, BUILD_ARTIFACT_ACTION) and (
+                    text(inputs.get("mode")) == "unpack"
+                ):
+                    for key in ("artifact-id", "expected-digest"):
+                        self.assertTrue(
+                            text(inputs.get(key)),
+                            f"{label} unpacks without {key}",
+                        )
+
+    def check_merge_check(self, testing: Workflow) -> None:
+        """Fail unless merge-check unpacks the call's m2repo by ID."""
+        unpack = step_of(job_of(testing, "merge-check"), M2REPO_UNPACK)
+        self.assertEqual(
+            uses_of(unpack),
+            f"{BUILD_ARTIFACT_ACTION}@{BUILD_ARTIFACT_PIN}",
+            f"{TESTING}: '{M2REPO_UNPACK}' does not run the pinned action",
+        )
+        self.assertEqual(
+            {key: text(value) for key, value in with_of(unpack).items()},
+            {
+                "mode": "unpack",
+                "artifact-name": "maven-merge-m2repo",
+                "artifact-id": (
+                    "${{ needs.maven-merge.outputs.m2repo_artifact_id }}"
+                ),
+                "expected-digest": (
+                    "${{ needs.maven-merge.outputs.m2repo_digest }}"
+                ),
+                "destination": "m2repo",
+            },
+            f"{TESTING}: merge-check '{M2REPO_UNPACK}'",
+        )
+
+    def check_sbom_by_id(self, merge: Workflow) -> None:
+        """Fail unless the Grype job downloads the SBOM by its upload's ID."""
+        build = job_of(merge, "build")
+        upload_id = text(step_of(build, SBOM_UPLOAD).get("id")) or "?"
+        self.assertEqual(
+            text(outputs_of(build).get("sbom_artifact_id")),
+            f"${{{{ steps.{upload_id}.outputs.artifact-id }}}}",
+            f"{MERGE}: build's sbom_artifact_id is not '{SBOM_UPLOAD}''s",
+        )
+        grype = job_of(merge, "grype")
+        download = step_of(grype, SBOM_DOWNLOAD)
+        self.assertEqual(
+            {key: text(value) for key, value in with_of(download).items()},
+            {
+                "artifact-ids": "${{ needs.build.outputs.sbom_artifact_id }}",
+                "merge-multiple": "true",
+                "path": "sbom",
+            },
+            f"{MERGE}: '{SBOM_DOWNLOAD}'",
+        )
+        self.assertEqual(
+            text(with_of(step_of(grype, "Grype audit SBOM")).get("sbom")),
+            "sbom/sbom-cyclonedx.json",
+            f"{MERGE}: the scan does not read the downloaded SBOM",
+        )
+
+    def test_build_packs_the_m2repo(self) -> None:
+        """The build job packs the m2repo and publishes its identity."""
+        self.check_pack(load_workflow(MERGE))
+
+    def test_publish_unpacks_by_id_and_digest(self) -> None:
+        """The publish job unpacks the m2repo by ID and expected-digest."""
+        self.check_unpack(load_workflow(MERGE))
+
+    def test_nothing_reads_the_m2repo_by_name(self) -> None:
+        """Neither the lane nor its self-test reads the m2repo by name."""
+        for path in (MERGE, TESTING):
+            with self.subTest(workflow=path):
+                self.check_no_m2repo_by_name(path, load_workflow(path))
+
+    def test_merge_check_unpacks_by_id(self) -> None:
+        """The self-test's merge-check unpacks as the publish does."""
+        self.check_merge_check(load_workflow(TESTING))
+
+    def test_grype_reads_the_sbom_by_id(self) -> None:
+        """The merge lane's Grype job downloads the SBOM by ID."""
+        self.check_sbom_by_id(load_workflow(MERGE))
+
+    def test_an_unpack_without_a_digest_fails(self) -> None:
+        """A publish unpack with no expected-digest fails both checks."""
+        merge = load_workflow(MERGE)
+        del with_of(step_of(job_of(merge, "publish"), M2REPO_UNPACK))[
+            "expected-digest"
+        ]
+        self.assert_check_fails(self.check_unpack, merge)
+        self.assert_check_fails(self.check_no_m2repo_by_name, MERGE, merge)
+
+    def test_an_unpack_by_name_fails(self) -> None:
+        """A publish unpack with no artifact-id fails both checks."""
+        merge = load_workflow(MERGE)
+        del with_of(step_of(job_of(merge, "publish"), M2REPO_UNPACK))[
+            "artifact-id"
+        ]
+        self.assert_check_fails(self.check_unpack, merge)
+        self.assert_check_fails(self.check_no_m2repo_by_name, MERGE, merge)
+
+    def test_a_download_by_name_fails(self) -> None:
+        """A download-artifact of the m2repo by name fails the check."""
+        for path, job_id in ((MERGE, "publish"), (TESTING, "merge-check")):
+            with self.subTest(workflow=path):
+                workflow = load_workflow(path)
+                steps_of(job_of(workflow, job_id)).append(
+                    {
+                        "name": "Download the m2repo",
+                        "uses": f"actions/download-artifact@{'0' * 40}",
+                        "with": {"name": M2REPO_NAME, "path": "m2repo"},
+                    }
+                )
+                self.assert_check_fails(
+                    self.check_no_m2repo_by_name, path, workflow
+                )
+
+    def test_a_digest_from_elsewhere_fails(self) -> None:
+        """A build digest output read from another step fails the check."""
+        merge = load_workflow(MERGE)
+        outputs_of(job_of(merge, "build"))["m2repo_digest"] = (
+            "${{ steps.build.outputs.digest }}"
+        )
+        self.assert_check_fails(self.check_pack, merge)
+
+    def test_a_missing_workflow_output_fails(self) -> None:
+        """A lane without the m2repo_artifact_id workflow output fails."""
+        merge = load_workflow(MERGE)
+        del merge["on"]["workflow_call"]["outputs"]["m2repo_artifact_id"]
+        self.assert_check_fails(self.check_pack, merge)
+
+    def test_a_pack_of_another_path_fails(self) -> None:
+        """A pack of a path other than the located m2repo fails."""
+        merge = load_workflow(MERGE)
+        with_of(step_of(job_of(merge, "build"), M2REPO_PACK))["path"] = "."
+        self.assert_check_fails(self.check_pack, merge)
+
+    def test_a_pack_before_the_landed_check_fails(self) -> None:
+        """A pack moved ahead of the landed check fails the check."""
+        merge = load_workflow(MERGE)
+        build = job_of(merge, "build")
+        steps = steps_of(build)
+        pack = steps.pop(step_index(build, M2REPO_PACK))
+        steps.insert(step_index(build, LANDED), pack)
+        self.assert_check_fails(self.check_pack, merge)
+
+    def test_a_merge_check_by_name_fails(self) -> None:
+        """A merge-check unpack without the call's ID fails the check."""
+        testing = load_workflow(TESTING)
+        unpack = step_of(job_of(testing, "merge-check"), M2REPO_UNPACK)
+        del with_of(unpack)["artifact-id"]
+        self.assert_check_fails(self.check_merge_check, testing)
+
+    def test_an_sbom_download_by_name_fails(self) -> None:
+        """The merge lane's SBOM downloaded by name fails the check."""
+        merge = load_workflow(MERGE)
+        download = step_of(job_of(merge, "grype"), SBOM_DOWNLOAD)
+        inputs = with_of(download)
+        del inputs["artifact-ids"]
+        inputs["name"] = f"sbom-files-maven-merge{SUFFIX}"
+        self.assert_check_fails(self.check_sbom_by_id, merge)
+
+
+class HandOffIdentity(ContractCase):
+    """Merge lane: a missing artefact identity fails closed.
+
+    GitHub drops a job output that matches a registered mask, and the
+    build job runs project code, which can register one. Given no
+    artifact-id, build-artifact-action's unpack downloads by name, and
+    given no expected-digest it skips the comparison; given no
+    artifact-ids, download-artifact downloads every artefact in the
+    run. So a step before each read refuses an identity that is not
+    there: in publish and in the self-test's merge-check before the
+    m2repo unpack, in the Grype job before the SBOM download.
+    """
+
+    M2REPO_ENV = (
+        ("M2REPO_ARTIFACT_ID", "m2repo_artifact_id"),
+        ("M2REPO_DIGEST", "m2repo_digest"),
+    )
+    GOOD_ID = "4242"
+    GOOD_DIGEST = "0123456789abcdef" * 4
+
+    def check_guard(
+        self,
+        workflow: Workflow,
+        job_id: str,
+        guard: str,
+        read: str,
+        env: dict[str, str],
+    ) -> None:
+        """Fail unless ``guard`` reads ``env`` and runs before ``read``."""
+        job = job_of(workflow, job_id)
+        self.assertEqual(
+            {
+                key: text(value)
+                for key, value in env_of(step_of(job, guard)).items()
+            },
+            env,
+            f"{job_id} '{guard}'",
+        )
+        self.assertLess(
+            step_index(job, guard),
+            step_index(job, read),
+            f"{job_id}: '{read}' runs before '{guard}'",
+        )
+
+    def check_identity_guards(
+        self, merge: Workflow, testing: Workflow
+    ) -> None:
+        """Fail unless every m2repo and SBOM read checks its identity."""
+        self.check_guard(
+            merge,
+            "publish",
+            M2REPO_IDENTITY,
+            M2REPO_UNPACK,
+            {
+                key: f"${{{{ needs.build.outputs.{output} }}}}"
+                for key, output in self.M2REPO_ENV
+            },
+        )
+        self.check_guard(
+            testing,
+            "merge-check",
+            M2REPO_IDENTITY,
+            M2REPO_UNPACK,
+            {
+                key: f"${{{{ needs.maven-merge.outputs.{output} }}}}"
+                for key, output in self.M2REPO_ENV
+            },
+        )
+        self.assertEqual(
+            run_of(testing, "merge-check", M2REPO_IDENTITY),
+            run_of(merge, "publish", M2REPO_IDENTITY),
+            f"{TESTING}: merge-check's '{M2REPO_IDENTITY}' differs from"
+            " publish's",
+        )
+        sbom_id = "${{ needs.build.outputs.sbom_artifact_id }}"
+        self.check_guard(
+            merge,
+            "grype",
+            SBOM_IDENTITY,
+            SBOM_DOWNLOAD,
+            {"SBOM_ARTIFACT_ID": sbom_id},
+        )
+
+    def run_m2repo_guard(self, artefact_id: str, digest: str) -> Verdict:
+        """Run publish's identity check with ``artefact_id`` and ``digest``."""
+        script = run_of(load_workflow(MERGE), "publish", M2REPO_IDENTITY)
+        return run_script(
+            script,
+            {"M2REPO_ARTIFACT_ID": artefact_id, "M2REPO_DIGEST": digest},
+        )
+
+    def run_sbom_guard(self, artefact_id: str) -> Verdict:
+        """Run the Grype job's ID check with ``artefact_id``."""
+        script = run_of(load_workflow(MERGE), "grype", SBOM_IDENTITY)
+        return run_script(script, {"SBOM_ARTIFACT_ID": artefact_id})
+
+    def test_every_read_checks_its_identity(self) -> None:
+        """Publish, merge-check and Grype each check before reading."""
+        self.check_identity_guards(
+            load_workflow(MERGE), load_workflow(TESTING)
+        )
+
+    def test_a_guard_after_the_unpack_fails(self) -> None:
+        """An identity check moved behind the unpack fails the check."""
+        merge = load_workflow(MERGE)
+        publish = job_of(merge, "publish")
+        steps = steps_of(publish)
+        guard = steps.pop(step_index(publish, M2REPO_IDENTITY))
+        steps.insert(step_index(publish, M2REPO_UNPACK) + 1, guard)
+        self.assert_check_fails(
+            self.check_identity_guards, merge, load_workflow(TESTING)
+        )
+
+    def test_a_missing_sbom_guard_fails(self) -> None:
+        """A Grype job without the ID check fails the check."""
+        merge = load_workflow(MERGE)
+        grype = job_of(merge, "grype")
+        steps_of(grype)[:] = [
+            step
+            for step in steps_of(grype)
+            if text(step.get("name")) != SBOM_IDENTITY
+        ]
+        self.assert_check_fails(
+            self.check_identity_guards, merge, load_workflow(TESTING)
+        )
+
+    @needs_runner_tools
+    def test_m2repo_identity_present(self) -> None:
+        """A numeric ID and a lower-case SHA-256 digest pass."""
+        verdict = self.run_m2repo_guard(self.GOOD_ID, self.GOOD_DIGEST)
+        self.assert_passes(verdict, "m2repo identity present")
+
+    @needs_runner_tools
+    def test_m2repo_identity_missing_or_malformed(self) -> None:
+        """An empty, non-numeric or malformed identity fails."""
+        good_id, good_digest = self.GOOD_ID, self.GOOD_DIGEST
+        for artefact_id, digest in (
+            ("", good_digest),
+            ("12a", good_digest),
+            (f"{good_id}\n", good_digest),
+            (good_id, ""),
+            (good_id, good_digest.upper()),
+            (good_id, good_digest[:-1]),
+            (good_id, f"{good_digest}\n"),
+        ):
+            with self.subTest(artefact_id=artefact_id, digest=digest):
+                verdict = self.run_m2repo_guard(artefact_id, digest)
+                self.assert_fails(verdict, "m2repo identity malformed")
+
+    @needs_runner_tools
+    def test_sbom_id_present(self) -> None:
+        """A numeric SBOM artefact ID passes."""
+        self.assert_passes(self.run_sbom_guard(self.GOOD_ID), "SBOM ID")
+
+    @needs_runner_tools
+    def test_sbom_id_missing_or_malformed(self) -> None:
+        """An empty or non-numeric SBOM artefact ID fails."""
+        for artefact_id in ("", "x1", f"{self.GOOD_ID}\n"):
+            with self.subTest(artefact_id=artefact_id):
+                verdict = self.run_sbom_guard(artefact_id)
+                self.assert_fails(verdict, "SBOM ID malformed")
 
 
 @needs_runner_tools
@@ -1356,6 +1819,42 @@ class DeployLanded(GuardCase):
         link = self.scratch / "root-link"
         link.symlink_to("valid")
         self.assert_fails(self.landed(link), "an m2repo that is itself a link")
+
+    def test_a_dot_prefixed_module_beside_another(self) -> None:
+        """A module whose artifactId begins with a dot passes.
+
+        The pack carries a dot-prefixed path, so the check must too.
+        """
+        tree = self.m2repo(
+            "dot-module",
+            SNAPSHOT_JAR,
+            "org/example/.hidden/1.0.0-SNAPSHOT/"
+            ".hidden-1.0.0-20260101.000000-1.jar",
+            "org/example/.hidden/maven-metadata.xml",
+        )
+        verdict = self.landed(tree)
+        self.assert_passes(verdict, "a dot-prefixed module beside another")
+        self.assertEqual(verdict.value("file_count"), "3")
+
+    def test_a_git_module_beside_another(self) -> None:
+        """A module whose artifactId is .git, beside a valid one, fails.
+
+        The pack skips every entry named .git, so the publish would
+        silently drop that module while the other passed.
+        """
+        tree = self.m2repo(
+            "git-module",
+            SNAPSHOT_JAR,
+            "org/example/core/maven-metadata.xml",
+            "org/example/.git/1.0.0-SNAPSHOT/.git-1.0.0-20260101.000000-1.jar",
+            "org/example/.git/maven-metadata.xml",
+        )
+        self.assert_fails(self.landed(tree), "a .git module beside another")
+
+    def test_a_file_named_git_beside_an_artefact(self) -> None:
+        """A file named .git in a SNAPSHOT version directory fails."""
+        tree = self.m2repo("git-file", SNAPSHOT_JAR, f"{VERSION}/.git")
+        self.assert_fails(self.landed(tree), "a file named .git")
 
 
 def metadata_prunes(job: dict[str, object], checked: bool) -> int:
@@ -1711,7 +2210,9 @@ class ArtefactSuffixes(ContractCase):
     suffix. A name without it would hand one cell another cell's SBOM
     or, in the merge lane, another cell's m2repo to publish. The guard
     covers each step that names an artefact: upload-artifact,
-    download-artifact, and the actions the lanes pass a name to.
+    download-artifact, and the actions the lanes pass a name to,
+    build-artifact-action among them, whose unpack checks the name it
+    is given against the artefact it fetches by ID.
     repository-metadata-action takes no name; it suffixes its upload
     with a timestamp and a random part of its own, so it cannot collide.
     A grype-scan-action step in validate-only mode checks its inputs
@@ -1914,6 +2415,22 @@ class ArtefactSuffixes(ContractCase):
                 )
 
 
+def uploaded_name(step: Step) -> str | None:
+    """Return the artefact name ``step`` uploads, or None for no upload.
+
+    upload-artifact takes it as name, and a build-artifact-action pack
+    as artifact-name.
+    """
+    inputs = with_of(step)
+    if is_action(step, "actions/upload-artifact"):
+        return text(inputs.get("name"))
+    if is_action(step, BUILD_ARTIFACT_ACTION) and (
+        text(inputs.get("mode")) == "pack"
+    ):
+        return text(inputs.get("artifact-name"))
+    return None
+
+
 class CellEvidence(ContractCase):
     """Lanes: a cell publishes only evidence a re-run replaces.
 
@@ -1923,7 +2440,9 @@ class CellEvidence(ContractCase):
     attempt's upload survives beside the new one and the check reads
     both. The overwrite holds only with a suffix: without one, two
     calls in a run share a name, and an overwrite would delete the
-    other call's upload, which its Grype job fetches by ID.
+    other call's upload, which its Grype job fetches by ID. A
+    build-artifact-action pack uploads too, under its artifact-name,
+    and is held to the same rule.
 
     A toolchain record describes the build tool the cell provisioned,
     so it is taken only when every step before it succeeded; after a
@@ -1951,8 +2470,7 @@ class CellEvidence(ContractCase):
                 for path, workflow in lanes.items()
                 for job in jobs_of(workflow).values()
                 for step in steps_of(job)
-                if is_action(step, "actions/upload-artifact")
-                and text(with_of(step).get("name")) == name
+                if uploaded_name(step) == name
             ]
             self.assertTrue(
                 uploads, f"{TESTING} reads '{name}', which no lane uploads"
@@ -1997,7 +2515,7 @@ class CellEvidence(ContractCase):
             (GRADLE, JUNIT_UPLOAD),
             (GRADLE, SBOM_UPLOAD),
             (MERGE, RECORD_UPLOAD),
-            (MERGE, M2REPO_UPLOAD),
+            (MERGE, M2REPO_PACK),
         ):
             for value in (None, True):
                 with self.subTest(workflow=path, step=name, value=value):
