@@ -17,7 +17,7 @@ dependency files, so these tests hold it in place:
   that one action and nothing else; the verify lanes'
   grype_dependency_ecosystems check accepts each allowed value and
   rejects a typo, run as extracted from the workflows;
-- every repository-metadata-action call is at the v0.5.1 pin, and no
+- every repository-metadata-action call is at the v0.5.4 pin, and no
   workflow calls dependency-change-action directly, reads its
   sidecar, or keeps a dependency-change job;
 - each verify lane's repository-metadata job detects with its own
@@ -98,11 +98,11 @@ from yaml_loading import ROOT, read_text
 LANES = (MAVEN, GRADLE)
 PRESETS = {MAVEN: "maven", GRADLE: "gradle"}
 
-META_PIN = "f0e5d2d8dc1154a5d702b75acc551eff6ba072dc"
+META_PIN = "ff822d06a64404a54feb79f8e27b687cc76d1c83"
 META_ACTION = "lfreleng-actions/repository-metadata-action"
 META_USES = f"{META_ACTION}@{META_PIN}"
 # The pin with its version comment, as the workflow text must hold it.
-META_LINE = f"uses: {META_USES}  # v0.5.1"
+META_LINE = f"uses: {META_USES}  # v0.5.4"
 # The detector the lanes called before repository-metadata-action took
 # detection over; no workflow may call it, or read its sidecar, now.
 OLD_DETECTOR = "lfreleng-actions/dependency-change-action@"
@@ -1119,7 +1119,7 @@ class MetadataDetection(ContractCase):
         )
 
     def test_the_pin_appears_once_with_its_comment(self) -> None:
-        """Each workflow calling the action holds the v0.5.1 pin, once."""
+        """Each workflow calling the action holds the v0.5.4 pin, once."""
         for path in (*LANES, MERGE, TESTING):
             with self.subTest(path=path):
                 self.check_pin_in_text(path)
@@ -1163,7 +1163,7 @@ class MetadataDetection(ContractCase):
     def test_the_old_pin_fails(self) -> None:
         """The metadata step at v0.3.3 fails the check."""
         old = "2206d754f65f1a90f57b49be546712c5f594def2  # v0.3.3"
-        source = read_text(GRADLE).replace(f"{META_PIN}  # v0.5.1", old)
+        source = read_text(GRADLE).replace(f"{META_PIN}  # v0.5.4", old)
         with mock.patch(f"{__name__}.read_text", return_value=source):
             self.assert_check_fails(self.check_pin_in_text, GRADLE)
 

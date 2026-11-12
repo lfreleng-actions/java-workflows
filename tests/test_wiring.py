@@ -133,7 +133,7 @@ EXPAND_VENDORED = (
 METADATA_ACTION = "lfreleng-actions/maven-snapshot-metadata-action"
 GRYPE_ACTION = "lfreleng-actions/grype-scan-action"
 BUILD_ARTIFACT_ACTION = "lfreleng-actions/build-artifact-action"
-BUILD_ARTIFACT_PIN = "3ca6c9d63da49f604794b74af3c43c603175fc80"
+BUILD_ARTIFACT_PIN = "da760dc32b7c902d9abde529e12f2557a3897e4f"
 ARTEFACT_ACTIONS = (
     "actions/upload-artifact",
     "actions/download-artifact",
