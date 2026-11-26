@@ -70,7 +70,8 @@ through `build-metadata-action`, runs the build with
 3. generates a CBOM with `cbom-action` and uploads it.
 
 Each of these runs whatever the build's outcome, so a test failure still
-surfaces its report, SBOM and CBOM. The `grype` job then audits the SBOM
+surfaces its report, SBOM and CBOM; the Maven lane's `sbom_source: build`
+is the exception below. The `grype` job then audits the SBOM
 under the `grype_fail_on` gate. It stays a separate job because it
 judges rather than describes: it reads nothing but the document,
 fetches its own vulnerability database, and reports its verdict as a
@@ -84,6 +85,31 @@ versions in a `pom.xml`, and finds nothing in a Gradle project without a
 `gradle.lockfile` (issues #47 and #48). A Gradle wrapper older than the
 plugin supports (8.4, or 8.5 on Java 21) skips the SBOM and Grype with a
 warning rather than failing the run.
+
+The Maven lane's `sbom_source` (default `generate`) picks where the SBOM
+comes from. `generate` resolves the graph again as above, through the
+`makeAggregateBom` goal, which skips the whole reactor when its root
+sets `maven.deploy.skip`. `build` instead merges the `target/bom.json`
+that a parent binding `cyclonedx-maven-plugin`'s `makeBom` (as
+odlparent does) wrote into each module during the build, so the SBOM
+describes what the project publishes without a second resolution. The
+merge keeps one root, each module once and every module's dependency
+graph, so the Grype gate still tells direct from transitive. A Maven
+purl names a module by its coordinates alone, since a `bundle` module
+names itself `?type=bundle` where its siblings name it `?type=jar`; an
+attached artifact such as `?classifier=tests` counts as its module,
+and a library that modules scope differently keeps the strongest
+scope. It needs a successful build, since a failed one may stop
+partway, and fails when no module wrote a BOM, or a module's BOM is
+not a CycloneDX document, omits its schema version or names no
+`metadata.component.bom-ref`, or the BOMs mix schema versions.
+It reads every module in the workspace, so modules a reactor names
+beside `path_prefix` count. It skips any BOM inside a `target` tree,
+and warns on and skips a `target/bom.json` that the repository owning
+its module tracks (a submodule's, inside one), since the build did not
+write it. The upload under `build` takes
+`sbom-cyclonedx.json` alone, so no stale `sbom-cyclonedx.xml` joins it.
+The POM and environment guards below apply under either source.
 
 The per-step timeout inputs (`tests_timeout_minutes`,
 `sbom_timeout_minutes`, `cbom_timeout_minutes`) each bound their own

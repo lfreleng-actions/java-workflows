@@ -107,12 +107,15 @@ their own beside any `grype_dependency_patterns` the caller passes.
    and `junit-test-report-action` renders them into the job summary.
 5. When `upload_build_artifacts` is set, a "Collect build artefacts"
    step stages the packaged output and uploads it.
-6. `sbom-action` generates the SBOM and uploads it as `sbom-files-maven`.
+6. `sbom-action` generates the SBOM and uploads it as `sbom-files-maven`;
+   under `sbom_source: build`, a merge of the module BOMs the build
+   wrote replaces it (see below).
 7. `cbom-action` generates the CBOM and uploads it as `cbom-files-maven`.
 
 Steps 3 onwards run whatever the build's outcome (`!cancelled()` or
 `always()`), so a failed build still reports its tests and produces its
-SBOM and CBOM. Each folded step keeps its own timeout input
+SBOM and CBOM; the one exception is the `sbom_source: build` merge,
+which needs a successful build. Each folded step keeps its own timeout input
 (`tests_timeout_minutes`, `sbom_timeout_minutes`,
 `cbom_timeout_minutes`) as a step-level `timeout-minutes`, all within
 `build_timeout_minutes`, which bounds the whole job.
@@ -194,6 +197,13 @@ writes `sbom-cyclonedx.json` and `sbom-cyclonedx.xml` at the workspace
 root — the JSON document is the Grype job's scan contract — and reports
 the component count to the job summary. The build job exposes
 `sbom_uploaded`, and `grype` runs only when it is `true`.
+
+In the Maven lane, `sbom_source: build` replaces the `sbom-action`
+steps with a merge of the `target/bom.json` each module's
+`cyclonedx-maven-plugin` `makeBom` wrote during the build. It writes
+`sbom-cyclonedx.json` alone, which the upload takes on its own, and the
+Grype job reads it unchanged. The README lists what it merges, skips
+and fails on.
 
 Both lanes use `sbom-action`'s `cyclonedx` backend, because a Java
 build file is an input to dependency resolution rather than a product

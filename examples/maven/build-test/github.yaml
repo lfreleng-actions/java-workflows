@@ -52,6 +52,7 @@ jobs:
     #   run_jacoco: true              # produce JaCoCo coverage
     #   test_permit_fail: false       # soft-fail tests
     #   sbom_enabled: true            # false skips SBOM generation
+    #   sbom_source: 'generate'       # 'build' merges module BOMs
     #   grype_enabled: true           # false skips the Grype scan only
     #   grype_fail_on: 'medium'       # Grype severity gate
     #   harden_runner_egress: 'block' # 'block' (default) or 'audit'
