@@ -1084,7 +1084,7 @@ jobs:
         if: ${{ !cancelled() && inputs.sbom_enabled && steps.gradle-args.outcome == 'success' && steps.wrapper.outcome != 'failure' }}
         timeout-minutes: ${{ inputs.sbom_timeout_minutes }}
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/sbom-action@434d39a14c023feabeb207cce667179a7acf49b0  # v0.7.3
+        uses: lfreleng-actions/sbom-action@e437f52b519a013dfbf8b4f57553ecf1f2258a99  # v0.7.5
         with:
           backend: 'cyclonedx'
           # Named rather than left to 'auto', which resolves a tree
