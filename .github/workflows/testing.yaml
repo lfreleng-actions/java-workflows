@@ -223,7 +223,7 @@ jobs:
       # job unpacks it.
       - name: 'Unpack the m2repo'
         # yamllint disable-line rule:line-length
-        uses: lfreleng-actions/build-artifact-action@da760dc32b7c902d9abde529e12f2557a3897e4f  # v0.1.1
+        uses: lfreleng-actions/build-artifact-action@d2443b3437d685ffda8ab886db89d891a6c34af0  # v0.1.3
         with:
           mode: 'unpack'
           artifact-name: 'maven-merge-m2repo'
