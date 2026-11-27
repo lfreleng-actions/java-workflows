@@ -248,7 +248,6 @@ class SbomEnvironmentGuard(GuardCase):
                     verdict, f"environment guard rejects {value}"
                 )
 
-    @unittest.expectedFailure
     @needs_runner_tools
     def test_rejects_names_the_current_sbom_step_sets(self) -> None:
         """Names sbom-action's generate step gained after v0.2.0 fail."""
@@ -506,7 +505,6 @@ class MergeEnvironmentGuard(GuardCase):
                     verdict, f"merge guard (sbom false) accepts {value}"
                 )
 
-    @unittest.expectedFailure
     @needs_runner_tools
     def test_current_sbom_names_matter_only_when_it_runs(self) -> None:
         """Names the SBOM step gained after v0.2.0 fail only with it on."""

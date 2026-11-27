@@ -270,8 +270,9 @@ an ASCII identifier, and on a value that is not a JSON object. The ASCII
 rule closes a bypass: the action upper-cases with full Unicode case
 mapping, which maps some non-ASCII letters onto ASCII ones
 (`maven_arg` followed by U+017F exports as `MAVEN_ARGS`), while the
-guard's `ascii_upcase` leaves them. The name lists follow `sbom-action`
-v0.2.0 and `maven-build-action` v0.5.3 and move with their pins.
+guard's `ascii_upcase` leaves them. The name lists were last checked
+against `sbom-action` v0.7.5 and `maven-build-action` v0.5.6 and move
+with their pins.
 
 `sbom-action` resolves `path_prefix/pom.xml` and rejects `-f`/`--file`
 in `maven_args`, because an alternate POM would escape the directory it

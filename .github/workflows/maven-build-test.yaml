@@ -879,8 +879,9 @@ jobs:
       # there and the exported value in the other, since a step's own
       # env: wins over GITHUB_ENV: sbom-action's generate step forces
       # MAVEN_ARGS empty, for one. Fail on those rather than resolve
-      # another graph. The lists come from sbom-action v0.2.0 and
-      # maven-build-action v0.5.3; recheck them when either pin moves.
+      # another graph. The lists were last checked against sbom-action
+      # v0.7.5 and maven-build-action v0.5.6; recheck them when either
+      # pin moves.
       - name: 'Require an environment the SBOM can reproduce'
         id: env-guard
         if: inputs.sbom_enabled
@@ -919,6 +920,11 @@ jobs:
           reserved+=' INPUT_MAVEN_ARGS GRADLE_PLUGIN_VERSION'
           reserved+=' GRADLE_VERSION GRADLE_MINIMUM JAVA_VERSION'
           reserved+=' INPUT_GRADLE_ARGS'
+          reserved+=' CARGO_ALL_FEATURES CARGO_CYCLONEDX_VERSION CARGO_FEATURES'
+          reserved+=' CARGO_NO_DEFAULT_FEATURES CARGO_TARGET CARGO_VERSION'
+          reserved+=' CARGO_WORKING_DIRECTORY CYCLONEDX_CLI_VERSION'
+          reserved+=' CYCLONEDX_PY_VERSION IMAGE_ARCHIVE_DIRECTORY MODE'
+          reserved+=' PYTHON_CMD PYTHON_VERSION'
           reserved+=' SYFT_JAVASCRIPT_INCLUDE_DEV_DEPENDENCIES'
           reserved+=' PATH_PREFIX GLOBAL_SETTINGS MVN_PHASES MVN_POM_FILE'
           reserved+=' MVN_PROFILES MVN_OPTS MVN_PARAMS JACOCO_ARGS '
