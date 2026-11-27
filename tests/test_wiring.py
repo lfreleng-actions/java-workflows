@@ -249,6 +249,23 @@ class SbomEnvironmentGuard(GuardCase):
                 )
 
     @needs_runner_tools
+    def test_rejects_names_the_current_sbom_step_sets(self) -> None:
+        """Names sbom-action's generate step gained after v0.2.0 fail."""
+        for value in (
+            '{"MODE": "release"}',
+            '{"mode": "release"}',
+            '{"CARGO_FEATURES": "x"}',
+            '{"cyclonedx_cli_version": "x"}',
+            '{"PYTHON_CMD": "x"}',
+            '{"Image_Archive_Directory": "x"}',
+        ):
+            with self.subTest(value=value):
+                verdict = self.run_guard(ENV_VARS=value)
+                self.assert_fails(
+                    verdict, f"environment guard rejects {value}"
+                )
+
+    @needs_runner_tools
     def test_rejects_names_unicode_case_mapping_reserves(self) -> None:
         """Names full Unicode case mapping turns into reserved ones fail.
 
@@ -478,6 +495,26 @@ class MergeEnvironmentGuard(GuardCase):
     def test_sbom_names_matter_only_when_it_runs(self) -> None:
         """The SBOM step's own names fail only with the SBOM on."""
         for value in ('{"JAVA_VERSION": "8"}', '{"syft_cmd": "x"}'):
+            with self.subTest(value=value):
+                verdict = self.run_guard(ENV_VARS=value, SBOM_ENABLED="true")
+                self.assert_fails(
+                    verdict, f"merge guard (sbom true) rejects {value}"
+                )
+                verdict = self.run_guard(ENV_VARS=value, SBOM_ENABLED="false")
+                self.assert_passes(
+                    verdict, f"merge guard (sbom false) accepts {value}"
+                )
+
+    @needs_runner_tools
+    def test_current_sbom_names_matter_only_when_it_runs(self) -> None:
+        """Names the SBOM step gained after v0.2.0 fail only with it on."""
+        for value in (
+            '{"MODE": "release"}',
+            '{"mode": "release"}',
+            '{"CARGO_TARGET": "x"}',
+            '{"CYCLONEDX_PY_VERSION": "x"}',
+            '{"python_version": "3"}',
+        ):
             with self.subTest(value=value):
                 verdict = self.run_guard(ENV_VARS=value, SBOM_ENABLED="true")
                 self.assert_fails(

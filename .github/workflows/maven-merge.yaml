@@ -702,11 +702,11 @@ jobs:
       # some deployed module would get no seeded metadata. The parity
       # names are refused always; the SBOM's own only when it runs.
       #
-      # Parity: maven-build-action's build step (v0.4.3's list, which
-      # v0.5.3 keeps), MAVEN_ARGS, and the SNAPSHOT_METADATA_* inputs
+      # Parity: maven-build-action's build step (last checked against
+      # v0.5.6), MAVEN_ARGS, and the SNAPSHOT_METADATA_* inputs
       # maven-snapshot-metadata-action v0.1.0 removes from the fetch's
       # environment, which the deploy would still see. SBOM: sbom-action
-      # v0.2.0. Recheck the lists when any of those pins moves.
+      # v0.7.5. Recheck the lists when any of those pins moves.
       - name: 'Require one environment for fetch, deploy and SBOM'
         id: env-guard
         shell: bash
@@ -764,6 +764,11 @@ jobs:
           sbom+=' INPUT_MAVEN_ARGS GRADLE_PLUGIN_VERSION'
           sbom+=' GRADLE_VERSION GRADLE_MINIMUM JAVA_VERSION'
           sbom+=' INPUT_GRADLE_ARGS'
+          sbom+=' CARGO_ALL_FEATURES CARGO_CYCLONEDX_VERSION CARGO_FEATURES'
+          sbom+=' CARGO_NO_DEFAULT_FEATURES CARGO_TARGET CARGO_VERSION'
+          sbom+=' CARGO_WORKING_DIRECTORY CYCLONEDX_CLI_VERSION'
+          sbom+=' CYCLONEDX_PY_VERSION IMAGE_ARCHIVE_DIRECTORY MODE'
+          sbom+=' PYTHON_CMD PYTHON_VERSION'
           sbom+=' SYFT_JAVASCRIPT_INCLUDE_DEV_DEPENDENCIES '
           status=0
           while IFS= read -r name; do
